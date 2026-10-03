@@ -290,3 +290,373 @@ def test_the_latest_state_dir_ignores_retired_apps(tmp_path):
         (root / name).mkdir(parents=True)
     result = migrate(tmp_path, "latest_state_dir")
     assert result.stdout.strip().endswith("migration/20261003-120000")
+
+
+# --- build-engines-mac.sh: staged venv swap and rollback ---------------------------------------
+
+
+def build_fn(home, snippet, **env):
+    """Source build-engines-mac.sh (its main is guarded) against a scratch engines home."""
+    return run(
+        ["bash", "-c", f'set -euo pipefail; . "{SCRIPTS}/build-engines-mac.sh"; mkdir -p "$ENGINES_HOME"; touch "$MARKER"; {snippet}'],
+        {"UNSLOTH_ENGINES_HOME": str(home), **env},
+    )
+
+
+def make_venv(path: Path, version: str, staged=None):
+    fake_python(path / "bin" / "python", f'echo {version}\n')
+    (path / "VERSION").write_text(version)
+    # an entry point whose shebang names the build location, as pip writes it
+    script = path / "bin" / "omlx"
+    script.write_text(f"#!{path}/bin/python\nprint()\n")
+    script.chmod(0o755)
+    (path / "pyvenv.cfg").write_text(f"home = /usr/bin\nprompt = {path}\n")
+    if staged:
+        (path / ".staged").write_text("\n".join(staged) + "\n")
+
+
+def marker(home):
+    return dict(line.split("=", 1) for line in (home / ".provisioned").read_text().splitlines() if "=" in line)
+
+
+def test_swap_replaces_the_venv_keeps_old_and_records_the_marker_after(home):
+    make_venv(home / "omlx", "old")
+    (home / ".provisioned").write_text("omlx=old-key\nomlx_kernels=1\nds4_build=abc\n")
+    make_venv(home / "omlx.new", "new", ["omlx", "new-key", "omlx_kernels=0"])
+    result = build_fn(home, 'venv_in_use() { return 1; }; swap_venv "$ENGINES_HOME/omlx"')
+    assert result.returncode == 0, result.stderr
+    assert (home / "omlx" / "VERSION").read_text() == "new"
+    assert (home / "omlx.old" / "VERSION").read_text() == "old"
+    assert not (home / "omlx.new").exists() and not (home / "omlx" / ".staged").exists()
+    assert marker(home) == {"omlx": "new-key", "omlx_kernels": "0", "ds4_build": "abc"}
+    # the entry point and pyvenv.cfg now name the live path, not omlx.new
+    assert (home / "omlx" / "bin" / "omlx").read_text().startswith(f"#!{home}/omlx/bin/python")
+    assert f"{home}/omlx.new" not in (home / "omlx" / "pyvenv.cfg").read_text()
+
+
+def test_swap_waits_while_an_engine_runs_from_the_venv(home):
+    make_venv(home / "omlx", "old")
+    (home / ".provisioned").write_text("omlx=old-key\n")
+    make_venv(home / "omlx.new", "new", ["omlx", "new-key"])
+    result = build_fn(home, 'venv_in_use() { return 0; }; swap_venv "$ENGINES_HOME/omlx"; echo pending=$PENDING_SWAPS')
+    assert result.returncode == 0
+    assert "pending=1" in result.stdout and "update-engines-mac.sh" in result.stdout
+    assert (home / "omlx" / "VERSION").read_text() == "old" and (home / "omlx.new").exists()
+    assert marker(home) == {"omlx": "old-key"}  # never written before the swap succeeded
+    forced = build_fn(home, 'venv_in_use() { return 0; }; swap_venv "$ENGINES_HOME/omlx"', FORCE_REPLACE_RUNNING="1")
+    assert forced.returncode == 0 and (home / "omlx" / "VERSION").read_text() == "new"
+
+
+def test_swap_only_fails_while_an_engine_runs(home):
+    make_venv(home / "omlx", "old")
+    make_venv(home / "omlx.new", "new", ["omlx", "k"])
+    result = build_fn(home, 'venv_in_use() { return 0; }; MODE=swap; main')
+    assert result.returncode != 0 and "not swapped" in result.stderr
+
+
+def test_swap_onto_a_fresh_install_has_nothing_to_keep(home):
+    make_venv(home / "omlx.new", "new", ["omlx", "k1"])
+    result = build_fn(home, 'swap_venv "$ENGINES_HOME/omlx"')
+    assert result.returncode == 0, result.stderr
+    assert (home / "omlx" / "VERSION").read_text() == "new" and not (home / "omlx.old").exists()
+    assert marker(home) == {"omlx": "k1"}
+
+
+def test_a_staged_venv_without_a_record_is_refused(home):
+    make_venv(home / "omlx", "old")
+    make_venv(home / "omlx.new", "new")
+    result = build_fn(home, 'swap_venv "$ENGINES_HOME/omlx"')
+    assert result.returncode != 0 and ".staged" in result.stderr
+    assert (home / "omlx" / "VERSION").read_text() == "old"
+
+
+def test_rollback_restores_the_old_venv_and_markers(home):
+    make_venv(home / "omlx", "old")
+    (home / ".provisioned").write_text("omlx=old-key\nomlx_kernels=1\n")
+    make_venv(home / "omlx.new", "new", ["omlx", "new-key", "omlx_kernels=0"])
+    assert build_fn(home, 'venv_in_use() { return 1; }; swap_venv "$ENGINES_HOME/omlx"').returncode == 0
+    result = build_fn(home, 'venv_in_use() { return 1; }; rollback_venv "$ENGINES_HOME/omlx"')
+    assert result.returncode == 0, result.stderr
+    assert (home / "omlx" / "VERSION").read_text() == "old"
+    assert (home / "omlx.failed" / "VERSION").read_text() == "new"
+    assert not (home / "omlx.old").exists() and not (home / "omlx" / ".prev-markers").exists()
+    assert marker(home) == {"omlx": "old-key", "omlx_kernels": "1"}
+    again = build_fn(home, 'rollback_venv "$ENGINES_HOME/omlx"')
+    assert again.returncode == 0 and "no omlx.old" in again.stdout
+
+
+def test_staging_never_touches_the_live_venv_or_the_marker(home):
+    make_venv(home / "ds4-ondemand", "old")
+    (home / ".provisioned").write_text("ds4_ondemand=old\n")
+    snippet = (
+        'HAVE_UV=0; DS4_COMMIT=newcommit; FORCE=0; ENGINES_SRC=/nonexistent; '
+        'make_venv() { mkdir -p "$1/bin"; printf "#!/bin/sh\\n" >"$1/bin/python"; chmod +x "$1/bin/python"; }; '
+        'pip_install() { :; }; validate_ds4_ondemand() { :; }; '
+        'stage_ds4_ondemand; stage_ds4_ondemand'
+    )
+    result = build_fn(home, snippet)
+    assert result.returncode == 0, result.stderr
+    assert (home / "ds4-ondemand" / "VERSION").read_text() == "old"
+    assert (home / "ds4-ondemand.new" / ".staged").read_text().splitlines() == ["ds4_ondemand", "newcommit"]
+    assert marker(home) == {"ds4_ondemand": "old"}
+    assert result.stdout.count("staging newcommit") == 1 and "already staged" in result.stdout
+
+
+def test_a_failed_validation_leaves_no_staged_record(home):
+    snippet = (
+        'HAVE_UV=0; DS4_COMMIT=c; FORCE=0; ENGINES_SRC=/nonexistent; '
+        'make_venv() { mkdir -p "$1/bin"; }; pip_install() { :; }; validate_ds4_ondemand() { return 1; }; '
+        'stage_ds4_ondemand'
+    )
+    result = build_fn(home, snippet)
+    assert result.returncode != 0
+    assert not (home / "ds4-ondemand.new" / ".staged").exists()
+    swap = build_fn(home, 'swap_venv "$ENGINES_HOME/ds4-ondemand"')
+    assert swap.returncode != 0  # the half-built venv is refused, not swapped
+
+
+def git(cwd, *args):
+    subprocess.run(
+        ["git", "-c", "protocol.file.allow=always", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        cwd=cwd, check=True, capture_output=True,
+    )
+
+
+@pytest.fixture
+def repo_with_submodules(tmp_path):
+    subs = tmp_path / "subs"
+    for name in ("omlx", "ds4"):
+        d = subs / name
+        d.mkdir(parents=True)
+        git(d, "init", "-q", "-b", "main")
+        (d / "f").write_text("1")
+        git(d, "add", ".")
+        git(d, "commit", "-q", "-m", "one")
+    repo = tmp_path / "repo"
+    (repo / "studio" / "engines").mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    for name in ("omlx", "ds4"):
+        git(repo, "submodule", "add", "-q", str(subs / name), f"studio/engines/{name}")
+    git(repo, "commit", "-q", "-m", "pin")
+    return repo
+
+
+def pins(repo, home):
+    return build_fn(home, f'REPO="{repo}"; ENGINES_SRC="{repo}/studio/engines"; check_submodule_pins; echo pins-ok')
+
+
+def test_pin_check_passes_on_a_clean_pinned_checkout(repo_with_submodules, home):
+    result = pins(repo_with_submodules, home)
+    assert result.returncode == 0 and "pins-ok" in result.stdout, result.stderr
+
+
+def test_pin_check_fails_on_a_moved_submodule(repo_with_submodules, home):
+    sub = repo_with_submodules / "studio" / "engines" / "omlx"
+    (sub / "f").write_text("2")
+    git(sub, "commit", "-qam", "two")
+    result = pins(repo_with_submodules, home)
+    assert result.returncode != 0 and "pin mismatch" in result.stderr
+
+
+def test_pin_check_fails_on_a_dirty_submodule(repo_with_submodules, home):
+    (repo_with_submodules / "studio" / "engines" / "ds4" / "f").write_text("dirty")
+    result = pins(repo_with_submodules, home)
+    assert result.returncode != 0 and "local changes" in result.stderr
+
+
+def test_pin_check_fails_on_an_uninitialised_submodule(repo_with_submodules, home):
+    git(repo_with_submodules, "submodule", "deinit", "-f", "studio/engines/ds4")
+    result = pins(repo_with_submodules, home)
+    assert result.returncode != 0 and "pin mismatch" in result.stderr
+
+
+# --- update-engines-mac.sh against fake engines and a fake launchctl ----------------------------
+
+FAKES = Path(__file__).resolve().parent / "fakes"
+UPDATE = SCRIPTS / "update-engines-mac.sh"
+
+
+class Rig:
+    def __init__(self, tmp_path, home):
+        self.home = home
+        self.lc = tmp_path / "lc"
+        self.lc.mkdir()
+        self.plists = tmp_path / "plists"
+        self.plists.mkdir()
+        self.omlx_port, self.ds4_port = free_port(), free_port()
+        self.labels = ("ai.unsloth.studio.omlx", "ai.unsloth.studio.ds4")
+        make_venv(home / "omlx", "old")
+        make_venv(home / "ds4-ondemand", "old")
+        (home / ".provisioned").write_text("omlx=old-key\nomlx_kernels=1\nds4_ondemand=old-ds4\n")
+        # stage-only is simulated (a real build needs uv, the network and minutes); swap and
+        # rollback run the real build-engines-mac.sh.
+        self.build = tmp_path / "fake-build"
+        self.build.write_text(
+            "#!/bin/bash\n"
+            'if [ "$1" = --stage-only ]; then\n'
+            '  echo "fake stage: $STAGE_VERSION" >>"$FAKE_LC/calls.log"\n'
+            '  [ "${STAGE_VERSION:-none}" = none ] && exit 0\n'
+            '  [ "$STAGE_VERSION" = fail ] && exit 1\n'
+            '  mkdir -p "$UNSLOTH_ENGINES_HOME/omlx.new/bin"\n'
+            f'  cp "{home}/omlx/bin/python" "$UNSLOTH_ENGINES_HOME/omlx.new/bin/python"\n'
+            '  printf %s "$STAGE_VERSION" >"$UNSLOTH_ENGINES_HOME/omlx.new/VERSION"\n'
+            '  printf "omlx\\nnew-key\\nomlx_kernels=0\\n" >"$UNSLOTH_ENGINES_HOME/omlx.new/.staged"\n'
+            "  exit 0\n"
+            "fi\n"
+            f'exec "{SCRIPTS}/build-engines-mac.sh" "$@"\n'
+        )
+        self.build.chmod(0o755)
+        self.env = {
+            "UNSLOTH_ENGINES_HOME": str(home),
+            "OMLX_URL": f"http://127.0.0.1:{self.omlx_port}",
+            "DS4_URL": f"http://127.0.0.1:{self.ds4_port}",
+            "ENGINE_PORTS": f"{self.omlx_port} {self.ds4_port}",
+            "LAUNCHCTL": str(FAKES / "fake-launchctl"),
+            "HELPER_PLIST_DIR": str(self.plists),
+            "BUILD_ENGINES": str(self.build),
+            "HEALTH_TIMEOUT": "6",
+            "HEALTH_POLL": "0.2",
+            "PORT_GATE_TIMEOUT": "10",
+            "FAKE_LC": str(self.lc),
+            "FAKE_HOME": str(home),
+            "FAKE_OMLX_PORT": str(self.omlx_port),
+            "FAKE_DS4_PORT": str(self.ds4_port),
+            "FAKE_PY": sys.executable,
+            "STAGE_VERSION": "none",
+        }
+        for label in self.labels:
+            self.launchctl("bootstrap", "gui/501", str(self.plists / f"{label}.plist"))
+        self.wait_up()
+
+    def launchctl(self, *args):
+        return run([str(FAKES / "fake-launchctl"), *args], self.env)
+
+    def wait_up(self):
+        import time
+        import urllib.request
+
+        for url in (f"http://127.0.0.1:{self.omlx_port}/api/status", f"http://127.0.0.1:{self.ds4_port}/admin/status"):
+            for _ in range(100):
+                try:
+                    urllib.request.urlopen(url, timeout=1).read()
+                    break
+                except OSError:
+                    time.sleep(0.1)
+
+    def update(self, *args, **env):
+        return run(["bash", str(UPDATE), "--yes", *args], {**self.env, **env})
+
+    def calls(self):
+        return (self.lc / "calls.log").read_text().splitlines() if (self.lc / "calls.log").exists() else []
+
+    def loaded(self, label):
+        return self.launchctl("print", f"gui/501/{label}").returncode == 0
+
+    def close(self):
+        import signal
+
+        for pid_file in self.lc.glob("*.pid"):
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+
+
+@pytest.fixture
+def rig(tmp_path, home):
+    r = Rig(tmp_path, home)
+    yield r
+    r.close()
+
+
+def test_update_swaps_the_venv_with_the_helpers_stopped_for_the_swap_only(rig):
+    (rig.home / "omlx-loaded").write_text("1")
+    (rig.home / "ds4-loaded").write_text("1")
+    result = rig.update(STAGE_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (rig.home / "omlx" / "VERSION").read_text() == "new"
+    assert (rig.home / "omlx.old" / "VERSION").read_text() == "old"
+    assert marker(rig.home)["omlx"] == "new-key"
+    calls = rig.calls()
+    # staged first, while the helpers still serve; then idle unload, stop, bootout, bootstrap
+    order = [
+        "fake stage: new",
+        "omlx-unload",
+        "ds4-stop /admin/stop?if_idle=1",
+        "launchctl bootout gui/501/ai.unsloth.studio.omlx",
+        "launchctl bootout gui/501/ai.unsloth.studio.ds4",
+    ]
+    positions = [calls.index(item) for item in order]
+    assert positions == sorted(positions)
+    after_stop = calls[calls.index("launchctl bootout gui/501/ai.unsloth.studio.ds4"):]
+    assert sum(c.startswith("launchctl bootstrap") for c in after_stop) == 2
+    assert all(rig.loaded(label) for label in rig.labels)
+    assert not (rig.home / "omlx.new").exists()
+
+
+def test_update_with_nothing_staged_does_not_touch_the_helpers(rig):
+    result = rig.update(STAGE_VERSION="none")
+    assert result.returncode == 0 and "nothing to do" in result.stdout
+    assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+
+
+def test_update_refuses_while_an_engine_is_busy_and_stages_nothing(rig):
+    (rig.home / "ds4-busy").write_text("1")
+    result = rig.update(STAGE_VERSION="new")
+    assert result.returncode != 0 and "in flight" in result.stderr
+    assert not any(c.startswith("fake stage") or c.startswith("launchctl bootout") for c in rig.calls())
+    assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+
+
+def test_update_rolls_back_when_the_new_venv_is_unhealthy(rig):
+    result = rig.update(STAGE_VERSION="bad")
+    assert result.returncode != 0
+    assert "rolling back" in result.stdout and "rolled back" in result.stdout, result.stdout + result.stderr
+    assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+    assert (rig.home / "omlx.failed" / "VERSION").read_text() == "bad"
+    assert marker(rig.home) == {"omlx": "old-key", "omlx_kernels": "1", "ds4_ondemand": "old-ds4"}
+    assert all(rig.loaded(label) for label in rig.labels)
+
+
+def test_update_restarts_the_helpers_when_the_swap_cannot_happen(rig):
+    # something outside launchd holds the live venv (cwd inside it, path in its argv): the real
+    # swap guard refuses, and the update must still bring the helpers back with the venv untouched
+    stray = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", f"{rig.home}/omlx/bin/python"],
+        cwd=rig.home / "omlx" / "bin",
+    )
+    try:
+        before = (rig.home / ".provisioned").read_text()
+        result = rig.update(STAGE_VERSION="new")
+        assert result.returncode != 0 and "not swapped" in result.stderr, result.stdout + result.stderr
+        assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+        assert (rig.home / "omlx.new").exists() and not (rig.home / "omlx.old").exists()
+        assert (rig.home / ".provisioned").read_text() == before
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        stray.kill()
+        stray.wait()
+
+
+def test_update_fails_cleanly_when_the_stage_fails(rig):
+    result = rig.update(STAGE_VERSION="fail")
+    assert result.returncode != 0
+    assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+    assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+
+
+def test_update_reports_when_a_helper_cannot_be_restarted(rig):
+    result = rig.update(STAGE_VERSION="new", FAKE_BOOTSTRAP_FAIL="1")
+    assert result.returncode != 0
+    assert "did not restart" in result.stderr + result.stdout
+    assert any(c.startswith("launchctl kickstart") for c in rig.calls())
+
+
+def test_update_dry_run_changes_nothing(rig):
+    result = rig.update("--dry-run", STAGE_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "[dry-run]" in result.stdout and "bootout" in result.stdout and "--swap-only" in result.stdout
+    assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+    assert not (rig.home / "omlx.new").exists() and not (rig.home / "omlx.old").exists()
+    assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+    assert all(rig.loaded(label) for label in rig.labels)
