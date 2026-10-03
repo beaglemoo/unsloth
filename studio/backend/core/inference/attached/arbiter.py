@@ -28,6 +28,10 @@ Reason = Literal["training", "local_load"]
 _THREAD_WAIT_S = 360.0
 HOLD_TTL_S = 120
 HOLD_RENEW_S = 60
+HOLD_RETRY_S = 10
+PROTECTION_LOST = "DwarfStar protection lost, ds4 may start"
+PROTECTION_BUSY = "DwarfStar started while protection was lost and is mid-reply; it will be stopped when idle"
+_clock = time.monotonic
 _notices: deque[dict[str, Any]] = deque(maxlen = 20)
 _locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _leases: set[HoldLease] = set()
@@ -46,10 +50,22 @@ class HoldLease:
     lease until teardown completes, then arm the residency watcher.
     """
 
-    def __init__(self, client: Ds4Client, hold_id: str, reason: str):
+    def __init__(
+        self,
+        client: Ds4Client,
+        hold_id: str,
+        reason: str,
+        confirmed_at: Optional[float] = None,
+    ):
         self.client, self.hold_id, self.reason = client, hold_id, reason
         self.closed = False
         self.error: Optional[str] = None
+        # Monotonic time until which the launcher is known to hold ds4 off. It is
+        # measured from just before the confirming request was sent, so it never
+        # overstates the launcher's own expiry.
+        self.deadline = (_clock() if confirmed_at is None else confirmed_at) + HOLD_TTL_S
+        self.lost = False
+        self._busy_noticed = False
         self._mutex = asyncio.Lock()
         self._watcher: Optional[asyncio.Task] = None
         self._renewer = asyncio.create_task(self._renew(), name = f"ds4-hold-{reason}")
@@ -58,34 +74,90 @@ class HoldLease:
     @classmethod
     async def create(cls, url: str, reason: str) -> HoldLease:
         client = Ds4Client(url)
-        return cls(client, await client.hold(f"Studio {reason}", HOLD_TTL_S), reason)
+        sent = _clock()
+        return cls(client, await client.hold(f"Studio {reason}", HOLD_TTL_S), reason, sent)
 
     async def renew(self) -> None:
         async with self._mutex:
             if self.closed:
                 return
+            sent = _clock()
             replacement = await self.client.hold(f"Studio {self.reason}", HOLD_TTL_S)
             previous, self.hold_id = self.hold_id, replacement
+            self.deadline = sent + HOLD_TTL_S
             # A failed delete leaves only a bounded extra hold, never an admission gap.
+            # An expired or restarted-away id answers 404, which the client ignores.
             try:
                 await self.client.release_hold(previous)
             except AttachedEngineError as exc:
                 logger.warning("%s", exc)
             self.error = None
 
+    async def _enforce(self) -> bool:
+        """The hold lapsed, so ds4 may have started: stop it unless it is mid-reply.
+
+        Returns True only once ds4 is verified neither loaded nor starting. Never
+        touches the protected workload itself (training keeps running).
+        """
+        status = await self.client.status()
+        if self.closed:
+            return True
+        if not status.reachable:
+            return False
+        if not (status.loaded or status.starting):
+            self._busy_noticed = False
+            return True
+        stopped = await self.client.stop(if_idle = True)
+        if self.closed:
+            return True
+        if stopped.error is not None:
+            if stopped.error == "HTTP 409" and not self._busy_noticed:
+                self._busy_noticed = True
+                _record(self.reason, [PROTECTION_BUSY], 0)
+            return False
+        if stopped.loaded or stopped.starting:
+            return False
+        self._busy_noticed = False
+        _record(self.reason, ["Stopped DwarfStar after its hold lapsed"], 0)
+        return True
+
     async def _renew(self) -> None:
         delay = HOLD_RENEW_S
         while not self.closed:
             await asyncio.sleep(delay)
+            if self.closed:
+                return
+            # A stalled loop or a long outage can overrun the deadline even when
+            # the next renewal then succeeds; that still counts as a lapse.
+            lapsed = _clock() >= self.deadline
             try:
                 await self.renew()
+                renewed = True
                 delay = HOLD_RENEW_S
             except AttachedEngineError as exc:
+                renewed = False
                 self.error = str(exc)
                 logger.error("Studio %s hold renewal failed: %s", self.reason, exc)
-                # Retry while the original TTL is still valid. Local admissions
-                # also consult _leases and never bypass a failed renewal.
-                delay = 5
+                delay = HOLD_RETRY_S
+                remaining = self.deadline - _clock()
+                if remaining > 0:
+                    # Land a retry just past the deadline, not up to a period late.
+                    delay = min(HOLD_RETRY_S, remaining + 0.01)
+            if not self.lost and (lapsed or (not renewed and _clock() >= self.deadline)):
+                self.lost = True
+                logger.error("Studio %s: %s", self.reason, PROTECTION_LOST)
+                _record(self.reason, [PROTECTION_LOST], 0)
+            if self.lost:
+                try:
+                    clean = await self._enforce()
+                except Exception:
+                    logger.exception("Studio %s: DwarfStar residency check failed", self.reason)
+                    clean = False
+                if renewed and clean:
+                    self.lost = False
+                    logger.warning("Studio %s: DwarfStar protection restored", self.reason)
+                elif renewed:
+                    delay = HOLD_RETRY_S
 
     async def watch_until(self, predicate) -> None:
         if self.closed or self._watcher is not None:
