@@ -118,20 +118,22 @@ class OmlxClient:
             ceiling_bytes = _int(body.get("final_ceiling")),
         )
 
-    async def chat_model_ids(self, *, status: Optional[OmlxStatus] = None) -> list[str]:
-        """Ids the server lists on ``/v1/models`` minus embedding and helper (drafter) models. Pass an already fetched ``status`` to spare a second round trip."""
+    async def chat_model_ids(self, *, status: Optional[OmlxStatus] = None) -> Optional[list[str]]:
+        """Ids the server lists on ``/v1/models`` minus embedding and helper (drafter) models, or None when the listing could not be fetched (timeout, HTTP error, malformed body), which is not the same as an empty catalog. Pass an already fetched ``status`` to spare a second round trip."""
         try:
             async with self._client() as client:
                 response = await client.get("/v1/models")
                 response.raise_for_status()
                 data = response.json().get("data")
+                if not isinstance(data, list):
+                    raise ValueError("unexpected /v1/models payload")
             ids = [
                 row["id"]
                 for row in data
                 if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
             ]
         except (httpx.HTTPError, ValueError, AttributeError, TypeError):
-            return []
+            return None
         status = status if status is not None else await self.status()
         kept = []
         for model_id in ids:
