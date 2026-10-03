@@ -24,7 +24,7 @@ _ADMIN_SLACK_S = 15.0
 class Ds4Status:
     reachable: bool
     loaded: bool = False
-    # The launcher exposes no "starting" flag; a spawned process that is not serving yet is starting.
+    # Includes a cold start before its child process has been spawned.
     starting: bool = False
     pid: Optional[int] = None
     uptime_s: Optional[float] = None
@@ -102,7 +102,7 @@ class Ds4Client:
         return Ds4Status(
             reachable = True,
             loaded = loaded,
-            starting = pid is not None and not loaded,
+            starting = bool(body.get("starting")) or (pid is not None and not loaded),
             pid = pid,
             uptime_s = _float(body.get("uptime_seconds")),
             in_flight = _int(body.get("in_flight")) or 0,
@@ -121,9 +121,33 @@ class Ds4Client:
         """Start ds4 and wait until it serves (the launcher blocks up to its start timeout)."""
         return await self._admin("/admin/start")
 
-    async def stop(self) -> Ds4Status:
+    async def stop(self, *, if_idle: bool = False) -> Ds4Status:
         """Stop ds4. The launcher takes its lock, so this waits out an in-progress start."""
-        return await self._admin("/admin/stop")
+        return await self._admin("/admin/stop?if_idle=1" if if_idle else "/admin/stop")
+
+    async def hold(self, reason: str, ttl_s: int = 120) -> str:
+        """Create a TTL hold. Renewal creates a replacement before deleting the old hold."""
+        try:
+            async with self._client() as client:
+                response = await client.post("/admin/hold", json = {"reason": reason, "ttl_s": ttl_s})
+                response.raise_for_status()
+                hold_id = response.json().get("hold_id")
+                if not isinstance(hold_id, str) or not hold_id:
+                    raise ValueError("invalid hold id")
+                return hold_id
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            raise AttachedEngineError(f"Could not hold DwarfStar: {type(exc).__name__}") from exc
+
+    async def release_hold(self, hold_id: str) -> None:
+        from urllib.parse import quote
+
+        try:
+            async with self._client() as client:
+                response = await client.delete(f"/admin/hold/{quote(hold_id, safe = '')}")
+                if response.status_code != 404:
+                    response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise AttachedEngineError(f"Could not release DwarfStar hold: {type(exc).__name__}") from exc
 
     async def model_ids(self) -> Optional[list[str]]:
         """Ids on ``/v1/models``, or None when the listing could not be fetched (timeout, HTTP error, malformed body), which is not the same as an empty catalog."""

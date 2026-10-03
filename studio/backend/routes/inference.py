@@ -11781,6 +11781,79 @@ def _loaded_slot_ident() -> Optional[str]:
     return npu_model.model_path if npu_model is not None else None
 
 
+
+def _attached_local_memory_active() -> bool:
+    from core.inference.llama_cpp import chat_load_active
+
+    llama = get_llama_cpp_backend()
+    backend = _peek_inference_backend()
+    return bool(llama.is_active or chat_load_active()
+                or getattr(backend, "_managed_engine", None) is not None
+                or getattr(backend, "active_model_name", None)
+                or tuple(getattr(backend, "loading_models", ()) or ()))
+
+
+async def _admit_attached_local_load():
+    from core.inference.attached.arbiter import free_for_local
+
+    result = await free_for_local("local_load")
+    if result.error:
+        raise HTTPException(status_code = 503, detail = result.error,
+                            headers = {"Retry-After": "15"})
+    return result.lease
+
+
+async def _finish_attached_local_load(lease):
+    # Includes failed loads that leave the previous model resident and
+    # cancellations whose worker is still tearing down.
+    if _attached_local_memory_active():
+        await lease.watch_until(_attached_local_memory_active)
+    else:
+        await lease.release()
+
+
+class _HeldEngineStreamingResponse(StreamingResponse):
+    """Release even if ASGI disconnects before it consumes the first chunk."""
+
+    def __init__(self, response, lease):
+        super().__init__(response.body_iterator, status_code = response.status_code,
+                         media_type = response.media_type, background = response.background)
+        self.raw_headers = response.raw_headers
+        self._lease = lease
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                close = getattr(self.body_iterator, "aclose", None)
+                if close:
+                    await close()
+            finally:
+                await self._lease.release()
+
+
+async def _attached_omlx_proxy(payload, request, current_subject):
+    from core.inference.attached.arbiter import before_omlx_use
+
+    result = await before_omlx_use()
+    if result.error:
+        raise HTTPException(status_code = 503, detail = result.error,
+                            headers = {"Retry-After": "15"})
+    lease = result.lease
+    try:
+        response = await _proxy_to_external_provider(payload, request, current_subject)
+        if lease is not None and isinstance(response, StreamingResponse):
+            return _HeldEngineStreamingResponse(response, lease)
+    except BaseException:
+        if lease is not None:
+            await lease.release()
+        raise
+    if lease is not None:
+        await lease.release()
+    return response
+
+
 def release_chat_gpu_claim() -> bool:
     """Drop the CHAT claim once nothing is resident or loading, else the arbiter hides an empty GPU
     from other accounts. release_if runs under the arbiter lock, so a re-registered load keeps it."""
@@ -18095,6 +18168,7 @@ async def _load_model_impl(
 
     native_grant_backed = False
     model_log_label = request.model_path
+    _attached_lease = None
     gguf_load_stack = ExitStack()
     token_rejections = gguf_load_stack.enter_context(collecting_hub_token_rejections())
     try:
@@ -18859,9 +18933,7 @@ async def _load_model_impl(
 
             # Attached engines (oMLX, DwarfStar) share this machine's memory. Only here, once the load is
             # admitted and is no no-op reload; a no-op unless enabled.
-            from core.inference.attached.arbiter import free_for_local
-
-            await free_for_local("local_load")
+            _attached_lease = await _admit_attached_local_load()
 
             # every rejection and drain has completed. the load now owns the slot for studio.
             _set_preview_resident(None)
@@ -19043,9 +19115,7 @@ async def _load_model_impl(
                 timeout_s = _POST_CANCEL_DRAIN_TIMEOUT_S,
             )
         # Attached engines (oMLX, DwarfStar) share this machine's memory; see the GGUF path above.
-        from core.inference.attached.arbiter import free_for_local
-
-        await free_for_local("local_load")
+        _attached_lease = await _admit_attached_local_load()
         # every rejection and drain has completed. the load now owns the slot for studio.
         _set_preview_resident(None)
         # Unload any active GGUF model first, off-loop: a 600 GB teardown measures
@@ -19385,6 +19455,8 @@ async def _load_model_impl(
         msg = _maybe_unsupported_message(redacted_msg)
         raise HTTPException(status_code = 500, detail = f"Failed to load model: {msg}")
     finally:
+        if _attached_lease is not None:
+            await _finish_attached_local_load(_attached_lease)
         gguf_load_stack.close()
         # Runs for a load that failed part way too: the bytes it pulled are cached anyway.
         if _load_fetched_bytes(
@@ -21211,6 +21283,10 @@ async def _unload_model_impl(request: UnloadRequest, current_subject: str):
     except Exception as e:
         logger.error(f"Error unloading model: {e}", exc_info = True)
         raise HTTPException(status_code = 500, detail = "Failed to unload model")
+    finally:
+        from core.inference.attached.arbiter import release_local_if_idle
+
+        await release_local_if_idle(_attached_local_memory_active)
 
 
 @studio_router.post("/cancel")
@@ -29950,10 +30026,7 @@ async def produce_openai_chat_completions(
         from core.inference.attached import ATTACHED_OMLX_ID
 
         if payload.provider_id == ATTACHED_OMLX_ID:
-            # ds4 and oMLX cannot both hold weights; a no-op unless attached engines are enabled.
-            from core.inference.attached.arbiter import before_omlx_use
-
-            await before_omlx_use()
+            return await _attached_omlx_proxy(payload, request, current_subject)
         return await _proxy_to_external_provider(payload, request, current_subject)
 
     _mcp_image = await _request_mcp_image(payload, _ui_events)
