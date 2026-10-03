@@ -461,7 +461,9 @@ def _scan_models_dir(
     limit: int | None = None,
     loose_files: bool = False,
 ) -> List[LocalModelInfo]:
-    if not models_dir.exists() or not models_dir.is_dir():
+    from utils.scan_denylist import is_denied
+
+    if not models_dir.exists() or not models_dir.is_dir() or is_denied(models_dir):
         return []
 
     # A scan folder can point at a diffusers PIPELINE dir, which _is_model_directory rejects but the load path accepts.
@@ -488,7 +490,7 @@ def _scan_models_dir(
         if limit is not None and len(found) >= limit:
             break
         try:
-            if not child.is_dir():
+            if not child.is_dir() or is_denied(child):
                 continue
 
             gguf_names = _servable_gguf_names(child)

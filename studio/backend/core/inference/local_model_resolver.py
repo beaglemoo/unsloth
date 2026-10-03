@@ -289,11 +289,13 @@ def local_path_gguf_companion_roots(load_path: str) -> tuple[str, ...]:
 def local_gguf_companion_state(roots: tuple[str, ...]) -> tuple:
     from pathlib import Path
 
+    from utils.scan_denylist import is_denied
+
     state = []
     for root in roots:
         try:
             for path in sorted(Path(root).rglob("*")):
-                if path.suffix.lower() != ".gguf":
+                if path.suffix.lower() != ".gguf" or is_denied(path):
                     continue
                 try:
                     stat = path.stat()
