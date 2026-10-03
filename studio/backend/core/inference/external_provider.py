@@ -36,7 +36,9 @@ from core.inference.sse_control_frames import sanitize_provider_sse_line
 # templated just like an in-process one (#7066). "custom" is a user-supplied OpenAI-compatible base_url, i.e. how a
 # self-hosted vLLM or llama.cpp registers without its preset. Unknown endpoint means assume a template applies:
 # sweeping a hosted API costs a space in delimiter-like text, not sweeping a local one costs a forged turn.
-_TEMPLATE_APPLYING_PROVIDERS = frozenset({"vllm", "llama_cpp", "ollama", "custom", "lemonade"})
+_TEMPLATE_APPLYING_PROVIDERS = frozenset(
+    {"vllm", "llama_cpp", "ollama", "custom", "lemonade", "omlx", "dwarfstar"}
+)
 
 # The subset documenting "continue_final_message" + "add_generation_prompt" on /v1/chat/completions.
 _CONTINUATION_FLAG_PROVIDERS = frozenset({"vllm", "llama_cpp"})
@@ -45,7 +47,9 @@ _CONTINUATION_FLAG_PROVIDERS = frozenset({"vllm", "llama_cpp"})
 # providers report no llama.cpp timings either, so the monitor has no token count to derive a speed from. Same caution
 # as the flag above: "custom" is any user-supplied base_url and a strict endpoint 400s on an unknown field. "openai"
 # is absent because it routes to /v1/responses, which reports usage on its own.
-_USAGE_STREAM_OPTION_PROVIDERS = frozenset({"vllm", "openrouter", "kimi", "lemonade"})
+_USAGE_STREAM_OPTION_PROVIDERS = frozenset(
+    {"vllm", "openrouter", "kimi", "lemonade", "omlx", "dwarfstar"}
+)
 
 # llama-server reads repeat_penalty, not repetition_penalty (as routes/inference does).
 _REPETITION_PENALTY_BODY_KEY = {"llama_cpp": "repeat_penalty"}
