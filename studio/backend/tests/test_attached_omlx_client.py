@@ -302,3 +302,111 @@ def test_chat_model_ids_is_none_on_timeout_and_empty_list_for_a_real_empty_catal
     client = OmlxClient("http://127.0.0.1:8843", transport = httpx.MockTransport(slow))
     assert run(client.chat_model_ids()) is None
     assert run(Server(models = {"data": []}).client().chat_model_ids()) == []
+
+
+def _loaded_status(**swift_over):
+    rows = [dict(r) for r in STATUS["models"]]
+    for row in rows:
+        if row["id"] == SWIFT_DIR:
+            row.update(loaded = True, **swift_over)
+    return {**STATUS, "models": rows}
+
+
+class TtlServer(Server):
+    def __init__(self, *, global_ttl = 600, own_ttl = None, **kwargs):
+        super().__init__(**kwargs)
+        self.global_ttl = global_ttl
+        self.own_ttl = own_ttl
+        self.put_bodies: list[dict] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            self.calls.append((request.method, request.url.path))
+            self.put_bodies.append(__import__("json").loads(request.content))
+            return httpx.Response(200, json = {"requires_reload": True})
+        if request.url.path == "/admin/api/global-settings":
+            return httpx.Response(
+                200, json = {"idle_timeout": {"idle_timeout_seconds": self.global_ttl}}
+            )
+        if request.url.path == "/admin/api/models":
+            return httpx.Response(
+                200,
+                json = {
+                    "models": [
+                        {
+                            "id": SWIFT_DIR,
+                            "model_context_length": 262144,
+                            "settings": {"max_context_window": 131072, "ttl_seconds": self.own_ttl},
+                        }
+                    ]
+                },
+            )
+        return super().__call__(request)
+
+    def client(self) -> OmlxClient:
+        return OmlxClient("http://127.0.0.1:8843/", transport = httpx.MockTransport(self))
+
+
+def test_idle_remaining_counts_down_from_last_access():
+    import time
+
+    status = run(
+        TtlServer(status = _loaded_status(last_access = time.time() - 100)).client().status()
+    )
+    swift = next(m for m in status.models if m.id == SWIFT_DIR)
+    assert swift.ttl_s == 600
+    assert 495 <= swift.idle_remaining_s <= 500
+
+
+def test_per_model_ttl_wins_and_remaining_never_goes_negative():
+    import time
+
+    server = TtlServer(own_ttl = 60, status = _loaded_status(last_access = time.time() - 500))
+    swift = next(m for m in run(server.client().status()).models if m.id == SWIFT_DIR)
+    assert (swift.ttl_s, swift.idle_remaining_s) == (60, 0.0)
+
+
+def test_profile_row_uses_directory_ttl_and_last_access():
+    import time
+
+    server = TtlServer(own_ttl = 300, status = _loaded_status(last_access = time.time() - 50))
+    rows = {m.id: m for m in run(server.client().status()).models}
+    assert rows["swift-1.5-27b:fast"].idle_remaining_s is None  # not loaded itself
+
+
+def test_pinned_unloaded_and_ttl_less_models_have_no_countdown():
+    import time
+
+    pinned = run(TtlServer(status = _loaded_status(pinned = True, last_access = time.time())).client().status())
+    assert next(m for m in pinned.models if m.id == SWIFT_DIR).idle_remaining_s is None
+    embed = next(m for m in pinned.models if m.id == EMBED_ID)
+    assert embed.idle_remaining_s is None and embed.pinned
+    none = run(TtlServer(global_ttl = None, status = _loaded_status(last_access = time.time())).client().status())
+    assert next(m for m in none.models if m.id == SWIFT_DIR).idle_remaining_s is None
+    cold = run(TtlServer().client().status())
+    assert all(m.idle_remaining_s is None for m in cold.models)
+
+
+def test_status_survives_unreachable_ttl_endpoints():
+    import time
+
+    status = run(Server(status = _loaded_status(last_access = time.time())).client().status())
+    assert status.reachable is True
+    assert all(m.idle_remaining_s is None for m in status.models)
+
+
+def test_set_context_puts_the_setting_and_reports_requires_reload():
+    server = TtlServer()
+    assert run(server.client().set_context(SWIFT_DIR, 65536)) is True
+    assert run(server.client().set_context(SWIFT_DIR, None)) is True
+    assert server.put_bodies == [{"max_context_window": 65536}, {"max_context_window": None}]
+    assert ("PUT", f"/admin/api/models/{SWIFT_DIR}/settings") in server.calls
+
+
+def test_set_context_failure_raises():
+    def handler(request):
+        return httpx.Response(400, json = {"detail": "bad"})
+
+    client = OmlxClient("http://x", transport = httpx.MockTransport(handler))
+    with pytest.raises(AttachedEngineError):
+        run(client.set_context(SWIFT_DIR, 8192))
