@@ -22,6 +22,7 @@ from core.inference.attached import arbiter
 from core.inference.attached.ds4_client import Ds4Client
 from core.inference.attached.omlx_client import OmlxClient, OmlxContext
 from loggers import get_logger
+from routes.provider_credentials import provider_config_guard
 from storage import providers_db
 from utils.attached_engines_settings import AttachedEnginesConfig, get_config
 
@@ -78,6 +79,16 @@ def _models_hash(omlx_ids: list[str], ds4_ids: list[str]) -> str:
     return digest.hexdigest()[:16]
 
 
+def _engine_failure(name: str):
+    try:
+        from core.inference.attached.failures import read_failure
+    except ModuleNotFoundError as exc:
+        if exc.name != "core.inference.attached.failures":
+            raise
+        return None
+    return read_failure(name)
+
+
 def _start_ds4_in_background(client: Ds4Client) -> None:
     async def run() -> None:
         try:
@@ -116,10 +127,13 @@ async def attached_status(since: float = 0):
     ds4_ids = ds4_ids or []
     omlx = asdict(omlx_status)
     omlx["chat_model_ids"] = omlx_ids
+    omlx["failure"] = _engine_failure("omlx")
+    ds4 = asdict(ds4_status)
+    ds4["failure"] = _engine_failure("ds4")
     return {
         "enabled": True,
         "omlx": omlx,
-        "ds4": asdict(ds4_status),
+        "ds4": ds4,
         "models_hash": _models_hash(omlx_ids, ds4_ids),
         "notices": arbiter.recent_notices(since),
     }
@@ -134,36 +148,42 @@ def _merge_models(existing: Optional[dict], live: list[str]) -> list[str]:
     return [model for model in live if model in enabled or model not in previous]
 
 
-def _upsert_row(
+async def _upsert_row(
     row_id: str,
     provider_type: str,
     display_name: str,
     base_url: str,
     live_models: Optional[list[str]],
 ) -> str:
-    existing = providers_db.get_provider(row_id)
-    if existing is None:
-        models = live_models or []
-        providers_db.create_provider(
-            id = row_id,
-            provider_type = provider_type,
-            display_name = display_name,
+    # Keep this read-merge-write sequence beside normal provider edits. Without
+    # the guard, a sync can overwrite a model choice saved between its read and
+    # its write.
+    async with provider_config_guard(row_id):
+        existing = await asyncio.to_thread(providers_db.get_provider, row_id)
+        if existing is None:
+            models = live_models or []
+            await asyncio.to_thread(
+                providers_db.create_provider,
+                id = row_id,
+                provider_type = provider_type,
+                display_name = display_name,
+                base_url = base_url,
+                models = models,
+                available_models = models,
+            )
+            return "created"
+        # is_enabled is never touched: an engine being down is not the user turning the provider off.
+        if live_models is None:
+            await asyncio.to_thread(providers_db.update_provider, row_id, base_url = base_url)
+            return "kept_models"
+        await asyncio.to_thread(
+            providers_db.update_provider,
+            row_id,
             base_url = base_url,
-            models = models,
-            available_models = models,
+            models = _merge_models(existing, live_models),
+            available_models = live_models,
         )
-        return "created"
-    # is_enabled is never touched: an engine being down is not the user turning the provider off.
-    if live_models is None:
-        providers_db.update_provider(row_id, base_url = base_url)
-        return "kept_models"
-    providers_db.update_provider(
-        row_id,
-        base_url = base_url,
-        models = _merge_models(existing, live_models),
-        available_models = live_models,
-    )
-    return "updated"
+        return "updated"
 
 
 def _delete_rows() -> list[str]:
@@ -191,8 +211,7 @@ async def attached_sync():
         (ATTACHED_OMLX_ID, "omlx", "oMLX", config.omlx_url, omlx_ids),
         (ATTACHED_DS4_ID, "dwarfstar", "DwarfStar", config.ds4_url, ds4_ids),
     ):
-        result[ptype] = await asyncio.to_thread(
-            _upsert_row,
+        result[ptype] = await _upsert_row(
             row_id,
             ptype,
             name,
@@ -217,16 +236,38 @@ async def _resolve_omlx_dir(client: OmlxClient, model_id: str) -> str:
     return dir_id
 
 
+async def _admit_omlx_use():
+    result = await arbiter.before_omlx_use()
+    try:
+        result.require_clear()
+    except AttachedEngineError as exc:
+        if result.lease is not None:
+            await result.lease.release()
+        raise HTTPException(
+            status_code = 503,
+            detail = str(exc),
+            headers = {"Retry-After": "15"},
+        ) from exc
+    return result
+
+
+async def _release_omlx_admission(result) -> None:
+    if result.lease is not None:
+        await result.lease.release()
+
+
 @_gated.post("/omlx/load")
 async def omlx_load(body: OmlxModelRequest):
     config = get_config()
     client = _omlx(config)
     dir_id = await _resolve_omlx_dir(client, body.model_id)
-    notice = await arbiter.before_omlx_use()
+    notice = await _admit_omlx_use()
     try:
         await client.load(dir_id)
     except AttachedEngineError as exc:
         raise HTTPException(status_code = 502, detail = str(exc)) from exc
+    finally:
+        await _release_omlx_admission(notice)
     return {"loaded": dir_id, "actions": list(notice.actions)}
 
 
@@ -245,16 +286,20 @@ def _context_body(model_id: str, context: OmlxContext) -> dict:
 async def omlx_context_get(body: OmlxModelRequest):
     client = _omlx(get_config())
     dir_id = await _resolve_omlx_dir(client, body.model_id)
+    notice = await _admit_omlx_use()
     try:
         return _context_body(body.model_id, await client.context(dir_id))
     except AttachedEngineError as exc:
         raise HTTPException(status_code = 502, detail = str(exc)) from exc
+    finally:
+        await _release_omlx_admission(notice)
 
 
 @_gated.post("/omlx/context")
 async def omlx_context_set(body: OmlxContextRequest):
     client = _omlx(get_config())
     dir_id = await _resolve_omlx_dir(client, body.model_id)
+    notice = await _admit_omlx_use()
     try:
         current = await client.context(dir_id)
         if (
@@ -270,6 +315,8 @@ async def omlx_context_set(body: OmlxContextRequest):
         updated = await client.context(dir_id)
     except AttachedEngineError as exc:
         raise HTTPException(status_code = 502, detail = str(exc)) from exc
+    finally:
+        await _release_omlx_admission(notice)
     return {**_context_body(body.model_id, updated), "requires_reload": requires_reload}
 
 
@@ -326,12 +373,15 @@ async def ds4_stop():
 async def prepare(body: PrepareRequest):
     config = get_config()
     if body.provider == "omlx":
-        result = await arbiter.before_omlx_use()
-        return {
-            "provider": "omlx",
-            "actions": list(result.actions),
-            "in_flight_killed": result.in_flight_killed,
-        }
+        result = await _admit_omlx_use()
+        try:
+            return {
+                "provider": "omlx",
+                "actions": list(result.actions),
+                "in_flight_killed": result.in_flight_killed,
+            }
+        finally:
+            await _release_omlx_admission(result)
     if not config.prewarm_ds4_on_select:
         return {"provider": "dwarfstar", "starting": False, "prewarm": False}
     return {"provider": "dwarfstar", "prewarm": True, **await _kick_ds4_start(config)}
