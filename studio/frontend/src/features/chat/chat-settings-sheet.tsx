@@ -76,11 +76,14 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import type { ActiveAttached } from "@/features/attached-engines/attached-active";
+import { AttachedContextControl } from "./components/attached-context-control";
 import { OpenAICodeExecSection } from "./components/openai-code-exec-section";
 import { PermissionModeDropdown } from "./permission-mode-select";
 import { resyncInferenceStatusAfterServerModelChange } from "./hooks/use-chat-model-runtime";
 import {
   type ExternalProviderConfig,
+  attachedProviderKind,
   getExternalProviderApiKey,
   parseExternalModelId,
   promptCacheTtlAppliesToModel,
@@ -851,6 +854,14 @@ export function ChatSettingsPanel({
       activeExternalProvider.baseUrl,
     ) &&
     activeExternalProvider.providerType === "openai";
+  const attachedContextKind = attachedProviderKind(
+    activeExternalProvider?.id,
+    activeExternalProvider?.providerType,
+  );
+  const attachedContextActive: ActiveAttached | null =
+    attachedContextKind && externalSelection
+      ? { kind: attachedContextKind, modelId: externalSelection.modelId }
+      : null;
   const showFastModeControl =
     activeExternalProvider != null &&
     providerSupportsFastMode(
@@ -1426,6 +1437,12 @@ export function ChatSettingsPanel({
                 />
               </div>
             ) : null}
+          </CollapsibleSection>
+        ) : null}
+
+        {attachedContextActive && !showPromptCachingControl ? (
+          <CollapsibleSection label="Provider" defaultOpen={true}>
+            <AttachedContextControl active={attachedContextActive} />
           </CollapsibleSection>
         ) : null}
 

@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { useAppShellReadySignal } from "@/components/app-readiness";
+import { useActiveAttachedContext } from "@/features/attached-engines/use-active-attached";
 import {
   applyModelLoadConfigToRuntime,
   clearModelConfigHandoff,
@@ -2527,12 +2528,16 @@ export function ChatPage({
     () => isExternalModelId(inferenceParams.checkpoint),
     [inferenceParams.checkpoint],
   );
-  const contextWindowKnown = hasKnownContextWindow({
-    loadedContextLength,
-    modelLoading,
-    isExternalModel,
-    residentCheckpoint,
-  });
+  // oMLX / DwarfStar report their own cap; null for every other model.
+  const attachedContextWindow = useActiveAttachedContext();
+  const contextWindowKnown =
+    attachedContextWindow != null ||
+    hasKnownContextWindow({
+      loadedContextLength,
+      modelLoading,
+      isExternalModel,
+      residentCheckpoint,
+    });
   const {
     checkpoint: runtimeCheckpoint,
     isGguf: runtimeModelIsGguf,
@@ -4323,16 +4328,23 @@ export function ChatPage({
               <ContextUsageBar
                 used={contextUsage?.totalTokens ?? null}
                 // null on external providers; the bar handles that.
-                total={loadedContextLength}
+                total={
+                  isExternalModel && attachedContextWindow
+                    ? attachedContextWindow
+                    : loadedContextLength
+                }
                 cached={contextUsage?.cachedTokens}
                 cacheWrites={contextUsage?.cacheWriteTokens}
                 promptTokens={contextUsage?.promptTokens}
                 completionTokens={contextUsage?.completionTokens}
-                isMlx={isServedByMlx(
-                  Boolean(loadedIsGguf),
-                  platformDeviceType,
-                  platformChatOnlyReason,
-                )}
+                isMlx={
+                  !attachedContextWindow &&
+                  isServedByMlx(
+                    Boolean(loadedIsGguf),
+                    platformDeviceType,
+                    platformChatOnlyReason,
+                  )
+                }
                 contextEnforced={loadedContextEnforced}
                 contextUnboundedWhenBatched={loadedContextUnboundedWhenBatched}
                 parallelSlots={loadedParallelSlots}
