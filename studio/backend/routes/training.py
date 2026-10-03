@@ -1868,7 +1868,13 @@ async def start_training(
 
         # Free VRAM for training: stop export, unload chat unless it can coexist.
         # A before_spawn hook, so it runs only after start_training's guards pass and never for a refused start.
+        attached_engines_loop = asyncio.get_running_loop()
+
         def _free_vram_for_training() -> None:
+            # Attached engines (oMLX, DwarfStar) share this machine's memory; a no-op unless enabled.
+            from core.inference.attached.arbiter import free_for_local_from_thread
+
+            free_for_local_from_thread("training", attached_engines_loop)
             try:
                 from core.export import get_export_backend
                 exp_backend = get_export_backend()
