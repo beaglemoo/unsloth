@@ -252,6 +252,11 @@ function omlxModel(patch: Partial<AttachedOmlxModel>): AttachedOmlxModel {
     engineType: null,
     isHelper: false,
     modelAlias: null,
+    maxContextWindow: null,
+    modelContextLength: null,
+    maxTokens: null,
+    ttlS: null,
+    idleRemainingS: null,
     ...patch,
   };
 }
