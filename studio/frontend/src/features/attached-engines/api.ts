@@ -3,6 +3,7 @@
 
 import { authFetch } from "@/features/auth";
 import { readFastApiError } from "@/lib/format-fastapi-error";
+import { failureFromApi } from "./failure";
 import type {
   AttachedDs4Status,
   AttachedEnginesSettings,
@@ -60,6 +61,7 @@ function omlxFromApi(raw: Obj): AttachedOmlxStatus {
     chatModelIds: arr(raw.chat_model_ids).filter(
       (id): id is string => typeof id === "string",
     ),
+    failure: failureFromApi(raw.failure),
   };
 }
 
@@ -80,6 +82,7 @@ function ds4FromApi(raw: Obj): AttachedDs4Status {
     ctxActive: numOrNull(raw.ctx_active),
     pendingRestart: raw.pending_restart === true,
     error: strOrNull(raw.error),
+    failure: failureFromApi(raw.failure),
   };
 }
 
