@@ -10,6 +10,7 @@ import type {
   AttachedOmlxModel,
   AttachedOmlxStatus,
   AttachedProvider,
+  AttachedSyncResult,
   AttachedStatus,
 } from "./types";
 
@@ -111,8 +112,14 @@ async function post(path: string, body?: unknown, fallback = "Request failed") {
 }
 
 /** Upsert (or, with the flag off, delete) the saved provider rows the picker is built from. */
-export async function syncAttachedProviders(): Promise<void> {
-  await post("/sync", undefined, "Failed to sync engine models");
+export async function syncAttachedProviders(): Promise<AttachedSyncResult> {
+  const res = await post("/sync", undefined, "Failed to sync engine models");
+  const body = (await res.json().catch(() => ({}))) as Obj;
+  const rows = (body.rows ?? {}) as Obj;
+  return {
+    enabled: body.enabled === true,
+    incomplete: Object.values(rows).includes("kept_models"),
+  };
 }
 
 /** Fire-and-forget on selection: frees memory (oMLX) or pre-warms (DwarfStar). */
