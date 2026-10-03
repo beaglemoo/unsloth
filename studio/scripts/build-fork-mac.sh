@@ -158,7 +158,9 @@ quit_unsloth() {
 install_backend() {
   local py="$STUDIO_VENV/bin/python" cli="$STUDIO_VENV/bin/unsloth"
   if [ "$DRY" = 1 ] || (cd / && "$cli" -h >/dev/null 2>&1); then
-    run env STUDIO_LOCAL_REPO="$REPO" STUDIO_LOCAL_NONEDITABLE=1 "$cli" studio update --local
+    # UNSLOTH_TAURI_UPDATE=1 is what the app sets: the desktop owns its shortcuts and frontend.
+    run env STUDIO_LOCAL_REPO="$REPO" STUDIO_LOCAL_NONEDITABLE=1 UNSLOTH_TAURI_UPDATE=1 \
+      SKIP_STUDIO_FRONTEND=1 "$cli" studio update --local
   else
     log "the venv CLI cannot start; reinstalling the backend directly"
     run "$py" -m pip uninstall -y unsloth
@@ -170,7 +172,7 @@ install_backend() {
 # `unsloth studio desktop-capabilities --json`), from / like a Finder launch, plus imports of
 # the fork's own modules. studio.backend.routes cannot be imported from outside the backend
 # (routes/__init__.py uses bare `from routes...` imports that run.py makes resolvable), so the
-# fork's route module is checked by file in the installed package instead.
+# fork's modules are located (importlib find_spec), not imported.
 verify_backend() {
   local py="$STUDIO_VENV/bin/python" cli="$STUDIO_VENV/bin/unsloth"
   [ "$DRY" = 0 ] || { log "[dry-run] verify from /: unsloth -h, desktop-capabilities, imports"; return 0; }
@@ -178,13 +180,18 @@ verify_backend() {
   ( cd / && env -u PYTHONPATH -u PYTHONHOME "$cli" studio desktop-capabilities --json >/dev/null ) \
     || die "preflight probe 'unsloth studio desktop-capabilities --json' failed"
   ( cd / && env -u PYTHONPATH -u PYTHONHOME "$py" - <<'PY'
-import importlib.metadata as md, importlib.util, json, os, sys
+import importlib.metadata as md, json, os, sys
 import studio.backend.utils
-import studio.backend.utils.attached_engines_settings
-spec = importlib.util.find_spec("studio.backend.routes")
-route = os.path.join(list(spec.submodule_search_locations)[0], "attached_engines.py")
-if not os.path.isfile(route):
-    sys.exit(f"missing {route}")
+import studio.backend
+root = list(studio.backend.__path__)[0]
+if "site-packages" not in root:
+    sys.exit(f"studio.backend resolves outside site-packages: {root}")
+route = os.path.join(root, "routes", "attached_engines.py")
+for path in (route, os.path.join(root, "utils", "attached_engines_settings.py")):
+    # Located, not imported: these modules use backend-relative imports (`from loggers import
+    # ...`, `from routes.x import ...`) that only resolve once run.py has set sys.path.
+    if not os.path.isfile(path):
+        sys.exit(f"missing {path}")
 dist = md.distribution("unsloth")
 direct = json.loads(dist.read_text("direct_url.json") or "{}")
 if direct.get("dir_info", {}).get("editable"):
