@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -61,12 +62,41 @@ class Fake:
         self.loaded = {EMBED}
         self.post_status = 200
         self.models_fail = False
+        self.ctx_setting = 131072
+        self.native = 262144
+        self.ds4_cfg = {
+            "ctx": 100000,
+            "ctx_active": 100000,
+            "ctx_min": 4096,
+            "ctx_max": 393216,
+            "pending_restart": False,
+        }
 
     def omlx(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(f"omlx {request.method} {request.url.raw_path.decode()}")
         if not self.omlx_up:
             raise httpx.ConnectError("refused", request = request)
         path = request.url.path
+        if request.method == "PUT" and path.endswith("/settings"):
+            self.put_body = json.loads(request.content)
+            self.ctx_setting = self.put_body["max_context_window"]
+            return httpx.Response(200, json = {"requires_reload": False})
+        if path == "/admin/api/models":
+            return httpx.Response(
+                200,
+                json = {
+                    "models": [
+                        {
+                            "id": SWIFT_DIR,
+                            "model_context_length": self.native,
+                            "settings": {"max_context_window": self.ctx_setting},
+                        },
+                        {"id": EMBED, "model_context_length": 40960, "settings": {}},
+                    ]
+                },
+            )
+        if path == "/admin/api/global-settings":
+            return httpx.Response(200, json = {"idle_timeout": {"idle_timeout_seconds": 600}})
         if request.method == "POST":
             if path.endswith("/unload"):
                 self.loaded.discard(path.split("/")[3])
@@ -87,6 +117,8 @@ class Fake:
                     SWIFT_PATH,
                     model_alias = "swift-1.5-27b",
                     loaded = SWIFT_DIR in self.loaded,
+                    max_context_window = self.ctx_setting or self.native,
+                    model_context_length = self.native,
                 ),
                 _row("swift-1.5-27b:fast", SWIFT_PATH),
                 _row("swift-1.5-27b:low", SWIFT_PATH),
@@ -106,6 +138,12 @@ class Fake:
         self.calls.append(f"ds4 {request.method} {request.url.path}")
         if not self.ds4_up:
             raise httpx.ConnectError("refused", request = request)
+        if request.url.path == "/admin/config":
+            if request.method == "POST":
+                self.ds4_post = json.loads(request.content)
+                self.ds4_cfg["ctx"] = self.ds4_post["ctx"]
+                return httpx.Response(200, json = {**self.ds4_cfg, "applied": "next_start"})
+            return httpx.Response(200, json = self.ds4_cfg)
         if request.url.path == "/admin/start":
             self.ds4_loaded, self.ds4_pid = True, 7
             return httpx.Response(200, json = {"status": "ok"})
@@ -195,6 +233,10 @@ def test_every_route_but_sync_is_404_when_flag_off(client, fake):
         ("post", "/omlx/unload-all", None),
         ("post", "/ds4/start", None),
         ("post", "/ds4/stop", None),
+        ("post", "/omlx/context/get", {"model_id": "x"}),
+        ("post", "/omlx/context", {"model_id": "x", "max_context_window": 8192}),
+        ("get", "/ds4/context", None),
+        ("post", "/ds4/context", {"ctx": 8192}),
         ("post", "/prepare", {"provider": "omlx"}),
     ):
         response = client.request(method.upper(), f"/api/engines/attached{path}", json = body)
@@ -432,3 +474,69 @@ def test_status_reports_empty_lists_when_a_catalog_fetch_fails(client, fake):
     body = client.get("/api/engines/attached/status").json()
     assert body["omlx"]["reachable"] is True
     assert body["omlx"]["chat_model_ids"] == []
+
+
+def test_omlx_context_get_resolves_alias_and_reports_all_three_values(client, fake):
+    body = client.post(
+        "/api/engines/attached/omlx/context/get", json = {"model_id": "swift-1.5-27b:fast"}
+    ).json()
+    assert body == {
+        "model_id": "swift-1.5-27b:fast",
+        "dir": SWIFT_DIR,
+        "max_context_window": 131072,
+        "native_max": 262144,
+        "effective": 131072,
+    }
+
+
+def test_omlx_context_set_puts_to_the_directory_and_returns_the_new_state(client, fake):
+    body = client.post(
+        "/api/engines/attached/omlx/context",
+        json = {"model_id": "swift-1.5-27b", "max_context_window": 65536},
+    ).json()
+    assert fake.put_body == {"max_context_window": 65536}
+    assert any(c == f"omlx PUT /admin/api/models/{SWIFT_DIR}/settings" for c in fake.calls)
+    assert body["max_context_window"] == 65536 and body["effective"] == 65536
+    assert body["requires_reload"] is False
+
+
+def test_omlx_context_null_resets_to_default(client, fake):
+    body = client.post(
+        "/api/engines/attached/omlx/context",
+        json = {"model_id": "swift-1.5-27b", "max_context_window": None},
+    ).json()
+    assert fake.put_body == {"max_context_window": None}
+    assert body["max_context_window"] is None and body["effective"] == 262144
+
+
+def test_omlx_context_validates_against_native_and_floor(client, fake):
+    url = "/api/engines/attached/omlx/context"
+    over = client.post(url, json = {"model_id": "swift-1.5-27b", "max_context_window": 300000})
+    assert over.status_code == 422 and "262144" in over.json()["detail"]
+    under = client.post(url, json = {"model_id": "swift-1.5-27b", "max_context_window": 100})
+    assert under.status_code == 422
+    assert not any(" PUT " in c for c in fake.calls)
+
+
+def test_omlx_context_unknown_model_and_engine_down(client, fake):
+    url = "/api/engines/attached/omlx/context/get"
+    assert client.post(url, json = {"model_id": "nope"}).status_code == 404
+    fake.omlx_up = False
+    assert client.post(url, json = {"model_id": "swift-1.5-27b"}).status_code == 502
+
+
+def test_ds4_context_get_and_set_proxy_the_launcher(client, fake):
+    got = client.get("/api/engines/attached/ds4/context").json()
+    assert got["ctx_max"] == 393216 and got["pending_restart"] is False
+    done = client.post("/api/engines/attached/ds4/context", json = {"ctx": 200000}).json()
+    assert fake.ds4_post == {"ctx": 200000}
+    assert done["applied"] == "next_start" and done["ctx"] == 200000
+
+
+def test_ds4_context_rejects_out_of_range_and_reports_old_launcher(client, fake):
+    url = "/api/engines/attached/ds4/context"
+    assert client.post(url, json = {"ctx": 500000}).status_code == 422
+    assert client.post(url, json = {"ctx": 10}).status_code == 422
+    assert not hasattr(fake, "ds4_post")
+    fake.ds4_up = False
+    assert client.get(url).status_code == 502
