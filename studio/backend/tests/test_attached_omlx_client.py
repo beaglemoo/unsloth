@@ -138,7 +138,7 @@ def test_status_unreachable_never_raises():
     status = run(client.status())
     assert status.reachable is False
     assert status.models == ()
-    assert run(client.chat_model_ids()) == []
+    assert run(client.chat_model_ids()) is None
     assert run(client.loaded_ids()) == []
     assert run(client.unload_all()) == []
 
@@ -273,3 +273,32 @@ def test_chat_model_ids_reuses_a_supplied_status():
     ids = run(client.chat_model_ids(status = status))
     assert "swift-1.5-27b" in ids and EMBED_ID not in ids
     assert server.calls == [("GET", "/v1/models")]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500),
+        httpx.Response(200, content = b"not json"),
+        httpx.Response(200, json = {"object": "list"}),
+        httpx.Response(200, json = {"data": "nope"}),
+        httpx.Response(200, json = ["not", "an", "object"]),
+    ],
+)
+def test_chat_model_ids_is_none_not_empty_when_the_listing_fails(response):
+    def handler(request):
+        if request.url.path == "/v1/models":
+            return response
+        return httpx.Response(200, json = STATUS)
+
+    client = OmlxClient("http://127.0.0.1:8843", transport = httpx.MockTransport(handler))
+    assert run(client.chat_model_ids()) is None
+
+
+def test_chat_model_ids_is_none_on_timeout_and_empty_list_for_a_real_empty_catalog():
+    def slow(request):
+        raise httpx.ReadTimeout("slow", request = request)
+
+    client = OmlxClient("http://127.0.0.1:8843", transport = httpx.MockTransport(slow))
+    assert run(client.chat_model_ids()) is None
+    assert run(Server(models = {"data": []}).client().chat_model_ids()) == []
