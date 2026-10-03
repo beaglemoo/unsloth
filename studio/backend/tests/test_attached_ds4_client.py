@@ -248,3 +248,43 @@ def test_status_reads_context_fields_from_config():
     )
     old = asyncio.run(cold.status())
     assert (old.ctx, old.ctx_active, old.pending_restart) == (None, None, False)
+
+
+def test_starting_flag_precedes_process_spawn():
+    status = run(_client(_static({**COLD, "starting": True})).status())
+    assert status.starting and status.pid is None
+
+
+def test_idle_stop_conflict_blocks_and_preserves_starting():
+    def handler(request):
+        if request.method == "POST":
+            assert request.url.query == b"if_idle=1"
+            return httpx.Response(409, json = {"error": "busy", "starting": True})
+        return httpx.Response(200, json = {**COLD, "starting": True})
+    status = run(_client(handler).stop(if_idle = True))
+    assert status.error == "HTTP 409" and status.starting
+
+
+def test_hold_wire_contract_and_expired_release():
+    import json
+    calls = []
+    def handler(request):
+        calls.append((request.method, str(request.url)))
+        if request.method == "POST":
+            assert json.loads(request.content) == {"reason": "Studio training", "ttl_s": 120}
+            return httpx.Response(200, json = {"hold_id": "id/one"})
+        return httpx.Response(404)
+    async def exercise():
+        client = _client(handler)
+        hold = await client.hold("Studio training")
+        assert hold == "id/one"
+        await client.release_hold(hold)
+    run(exercise())
+    assert calls[-1][1].endswith("/admin/hold/id%2Fone")
+
+
+@pytest.mark.parametrize("response", [httpx.Response(503), httpx.Response(200, json = {})])
+def test_failed_hold_is_blocking(response):
+    from core.inference.attached import AttachedEngineError
+    with pytest.raises(AttachedEngineError, match = "Could not hold"):
+        run(_client(lambda r: response).hold("Studio local_load"))

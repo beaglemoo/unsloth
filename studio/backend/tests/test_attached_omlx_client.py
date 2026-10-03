@@ -140,7 +140,8 @@ def test_status_unreachable_never_raises():
     assert status.models == ()
     assert run(client.chat_model_ids()) is None
     assert run(client.loaded_ids()) == []
-    assert run(client.unload_all()) == []
+    with pytest.raises(AttachedEngineError, match = "Cannot verify"):
+        run(client.unload_all())
 
 
 def test_status_http_error_and_bad_json_are_unreachable():
@@ -242,13 +243,26 @@ def test_unload_all_includes_pinned_and_dedupes_by_directory():
         ],
     }
     server = Server(status = status)
-    unloaded = run(server.client().unload_all())
+    original = server.__call__
+
+    def handler(request):
+        response = original(request)
+        if request.method == "POST":
+            target = request.url.path.split("/")[3]
+            target_path = next(m["model_path"] for m in status["models"] if m["id"] == target)
+            for model in status["models"]:
+                if model["model_path"] == target_path:
+                    model["loaded"] = False
+        return response
+
+    client = OmlxClient("http://mock", transport = httpx.MockTransport(handler))
+    unloaded = run(client.unload_all())
     assert unloaded == [EMBED_ID, SWIFT_DIR]
     posts = [path for method, path in server.calls if method == "POST"]
     assert posts == [f"/v1/models/{EMBED_ID}/unload", f"/v1/models/{SWIFT_DIR}/unload"]
 
 
-def test_unload_all_continues_after_one_failure():
+def test_unload_all_reports_failure():
     status = {
         **STATUS,
         "models": [{**m, "loaded": m["id"] in (EMBED_ID, SWIFT_DIR)} for m in STATUS["models"]],
@@ -262,7 +276,8 @@ def test_unload_all_continues_after_one_failure():
         return original(request)
 
     client = OmlxClient("http://127.0.0.1:8843", transport = httpx.MockTransport(handler))
-    assert run(client.unload_all()) == [SWIFT_DIR]
+    with pytest.raises(AttachedEngineError, match = "HTTP 500"):
+        run(client.unload_all())
 
 
 def test_chat_model_ids_reuses_a_supplied_status():
@@ -410,3 +425,39 @@ def test_set_context_failure_raises():
     client = OmlxClient("http://x", transport = httpx.MockTransport(handler))
     with pytest.raises(AttachedEngineError):
         run(client.set_context(SWIFT_DIR, 8192))
+
+
+@pytest.mark.parametrize("loaded,loading", [(True, False), (False, True)])
+def test_unload_all_verifies_accepted_drain_and_loading_residency(loaded, loading):
+    calls = []
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.method == "POST":
+            return httpx.Response(202, json = {"status": "draining"})
+        if request.url.path == "/v1/models/status":
+            return httpx.Response(200, json = {"models": [_row("m", "/m", loaded = loaded, is_loading = loading)]})
+        return httpx.Response(404)
+    client = OmlxClient("http://mock", transport = httpx.MockTransport(handler))
+    with pytest.raises(AttachedEngineError, match = "still loaded or loading"):
+        run(client.unload_all(timeout_s = 0))
+    assert ("POST", "/v1/models/m/unload") in calls
+    assert calls.count(("GET", "/v1/models/status")) == 2
+
+
+def test_unload_all_waits_for_drain_to_complete(monkeypatch):
+    reads = 0
+    sleeps = []
+    async def sleep(delay):
+        sleeps.append(delay)
+    monkeypatch.setattr("core.inference.attached.omlx_client.asyncio.sleep", sleep)
+    def handler(request):
+        nonlocal reads
+        if request.method == "POST":
+            return httpx.Response(202)
+        if request.url.path == "/v1/models/status":
+            reads += 1
+            return httpx.Response(200, json = {"models": [_row("m", "/m", is_loading = reads < 3)]})
+        return httpx.Response(404)
+    client = OmlxClient("http://mock", transport = httpx.MockTransport(handler))
+    assert run(client.unload_all()) == ["m"]
+    assert sleeps == [0.2]
