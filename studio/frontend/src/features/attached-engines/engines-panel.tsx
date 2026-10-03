@@ -19,7 +19,8 @@ import {
   selectAttachedEnabled,
   useAttachedEnginesStore,
 } from "./attached-engines-store";
-import { formatIdleRemaining, formatTps, formatTtft } from "./format";
+import { formatCountdown, remainingNow } from "./attached-active";
+import { formatTps, formatTtft } from "./format";
 import {
   groupOmlxModels,
   loadableGroups,
@@ -27,6 +28,7 @@ import {
   type OmlxModelGroup,
 } from "./omlx-groups";
 import type { AttachedDs4Status, AttachedOmlxStatus } from "./types";
+import { useNow } from "./use-active-attached";
 import { refreshAttachedStatus } from "./use-attached-engines";
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -47,11 +49,26 @@ function groupLabel(group: OmlxModelGroup): string {
   return tags.length > 0 ? `${group.id} (${tags.join(", ")})` : group.id;
 }
 
+/** "unloads in m:ss", counted down from the poll that reported it, or null when no timer applies. */
+function unloadsIn(
+  seconds: number | null,
+  receivedAt: number | undefined,
+  now: number,
+): string | null {
+  if (seconds === null) return null;
+  const left = remainingNow(seconds, receivedAt, now);
+  return left <= 0 ? "unloading" : `unloads in ${formatCountdown(left)}`;
+}
+
 function OmlxBlock({
   status,
+  receivedAt,
+  now,
   busy,
   run,
 }: {
+  receivedAt: number | undefined;
+  now: number;
   status: AttachedOmlxStatus | null;
   busy: string | null;
   run: (key: string, action: () => Promise<void>, failure: string) => void;
@@ -90,7 +107,16 @@ function OmlxBlock({
           <SettingsRow
             key={group.id}
             label={groupLabel(group)}
-            description={formatBytes(group.sizeBytes)}
+            description={[
+              formatBytes(group.sizeBytes),
+              group.pinned
+                ? "pinned, never unloads"
+                : group.loaded
+                  ? unloadsIn(group.idleRemainingS, receivedAt, now)
+                  : null,
+            ]
+              .filter(Boolean)
+              .join(", ")}
           >
             <Button
               variant="outline"
@@ -163,24 +189,39 @@ function ds4State(status: AttachedDs4Status | null): string {
   return status.loaded ? "Loaded" : "Idle";
 }
 
+function ds4Description(
+  status: AttachedDs4Status,
+  receivedAt: number | undefined,
+  now: number,
+): string {
+  const state = ds4State(status);
+  if (!status.loaded) return `${state}.`;
+  if (status.inFlight > 0) return `${state}. In use, idle timer paused.`;
+  const timer = unloadsIn(status.idleRemainingS, receivedAt, now);
+  return timer ? `${state}, ${timer}.` : `${state}.`;
+}
+
 function Ds4Block({
   status,
+  receivedAt,
+  now,
   busy,
   run,
 }: {
+  receivedAt: number | undefined;
+  now: number;
   status: AttachedDs4Status | null;
   busy: string | null;
   run: (key: string, action: () => Promise<void>, failure: string) => void;
 }) {
-  const state = ds4State(status);
   const reachable = status?.reachable === true;
   const running = status?.loaded === true || status?.starting === true;
   return (
     <SettingsRow
       label="DwarfStar"
       description={
-        reachable
-          ? `${state}. Idle unload in ${formatIdleRemaining(status?.idleRemainingS ?? null)}.`
+        status && reachable
+          ? ds4Description(status, receivedAt, now)
           : "Not reachable. Check that the DwarfStar launcher is running and the URL is right."
       }
     >
@@ -221,6 +262,7 @@ export function AttachedEnginesPanel() {
   const enabled = useAttachedEnginesStore(selectAttachedEnabled);
   const status = useAttachedEnginesStore((s) => s.status);
   const [busy, setBusy] = useState<string | null>(null);
+  const now = useNow(enabled);
 
   if (!enabled) return null;
 
@@ -247,8 +289,20 @@ export function AttachedEnginesPanel() {
         <SettingsRow label="Engines" description="Checking engine status." />
       ) : (
         <>
-          <OmlxBlock status={status.omlx} busy={busy} run={run} />
-          <Ds4Block status={status.ds4} busy={busy} run={run} />
+          <OmlxBlock
+            status={status.omlx}
+            receivedAt={status.receivedAt}
+            now={now}
+            busy={busy}
+            run={run}
+          />
+          <Ds4Block
+            status={status.ds4}
+            receivedAt={status.receivedAt}
+            now={now}
+            busy={busy}
+            run={run}
+          />
         </>
       )}
     </SettingsSection>
