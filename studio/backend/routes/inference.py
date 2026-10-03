@@ -11585,6 +11585,9 @@ async def _maybe_auto_switch_model(
                             if speech_type is not None and caller_hf_token is None:
                                 load_internal_kw["anonymous_hf_access"] = True
                             try:
+                                from core.inference.attached.arbiter import free_for_local
+
+                                await free_for_local("local_load")
                                 load_request = LoadRequest(**load_kwargs)
                                 load_request._gguf_companion_roots = gguf_companion_roots
                                 load_request._gguf_companion_roots_set = True
@@ -12011,6 +12014,9 @@ async def load_model_for_preview(
                 prior_marker = _get_preview_resident()
                 loaded_ok = False
                 try:
+                    from core.inference.attached.arbiter import free_for_local
+
+                    await free_for_local("local_load")
                     await _load_model_impl(
                         request,
                         fastapi_request,
@@ -17582,6 +17588,10 @@ async def load_model_gated(
         _cancel_for_shutdown(attempt)
     try:
         _raise_if_sidecar_swap_in_progress()
+        # Attached engines (oMLX, DwarfStar) share this machine's memory; a no-op unless enabled.
+        from core.inference.attached.arbiter import free_for_local
+
+        await free_for_local("local_load")
         # Hold the lifecycle gate across the load so idle auto-unload can't unload the
         # model mid-load. Auto-switch calls the tracked impl directly since it already
         # holds this gate.
@@ -29935,6 +29945,13 @@ async def produce_openai_chat_completions(
                 status_code = 400,
                 detail = "Audio input is only supported on a local model with audio support.",
             )
+        from core.inference.attached import ATTACHED_OMLX_ID
+
+        if payload.provider_id == ATTACHED_OMLX_ID:
+            # ds4 and oMLX cannot both hold weights; a no-op unless attached engines are enabled.
+            from core.inference.attached.arbiter import before_omlx_use
+
+            await before_omlx_use()
         return await _proxy_to_external_provider(payload, request, current_subject)
 
     _mcp_image = await _request_mcp_image(payload, _ui_events)
