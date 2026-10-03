@@ -44,6 +44,20 @@ export function activeContextWindow(
   return withCap?.maxContextWindow ?? rows[0]?.modelContextLength ?? null;
 }
 
+/** The most output tokens the selected attached model accepts: oMLX's own `max_tokens` for the
+ *  model, DwarfStar's running context. Null when the engine has not said. */
+export function attachedMaxOutputTokens(
+  status: AttachedStatus | null,
+  active: ActiveAttached | null,
+): number | null {
+  if (!status || !active) return null;
+  if (active.kind === "dwarfstar") {
+    return status.ds4?.reachable ? (status.ds4.ctxActive ?? status.ds4.ctx ?? null) : null;
+  }
+  if (!status.omlx?.reachable) return null;
+  return omlxRowsFor(status.omlx, active.modelId).find((row) => row.maxTokens !== null)?.maxTokens ?? null;
+}
+
 export type UnloadState =
   | { kind: "offline" }
   | { kind: "not-loaded" }
