@@ -211,6 +211,14 @@ record_staged() { # <new dir> <key> <value> [extra key=value ...]
   printf '%s\n' "$@" > "$dir/.staged"
 }
 
+# The live venv already matches the pin, so a staged <venv>.new is left over from a pin that was
+# since reverted: swapping it in would record a commit the repo does not pin.
+discard_stale_staged() { # <new dir>
+  [ -d "$1" ] || return 0
+  log "discarding stale staged venv $1 (the live venv already matches the pin)"
+  rm -rf "$1"
+}
+
 validate_ds4_ondemand() { # <venv dir>
   "$1/bin/python" -c "import fastapi, uvicorn, httpx"
   # The launcher itself must at least compile under this interpreter.
@@ -228,6 +236,7 @@ stage_ds4_ondemand() {
   local venv="$ENGINES_HOME/ds4-ondemand" new="$ENGINES_HOME/ds4-ondemand.new" want="$DS4_COMMIT"
   if [ "$FORCE" = 0 ] && [ "$(marker_get ds4_ondemand)" = "$want" ] && [ -x "$venv/bin/python" ]; then
     log "ds4-ondemand venv: up to date ($want)"
+    discard_stale_staged "$new"
     return
   fi
   if [ "$FORCE" = 0 ] && staged_ok "$new" "$want"; then
@@ -246,6 +255,7 @@ stage_omlx() {
   local want="$OMLX_COMMIT:py$OMLX_PYTHON:kernels$OMLX_WITH_CUSTOM_KERNEL:extras[$OMLX_EXTRAS]"
   if [ "$FORCE" = 0 ] && [ "$(marker_get omlx)" = "$want" ] && [ -x "$venv/bin/python" ]; then
     log "omlx venv: up to date ($OMLX_COMMIT)"
+    discard_stale_staged "$new"
     return
   fi
   if [ "$FORCE" = 0 ] && staged_ok "$new" "$want"; then
