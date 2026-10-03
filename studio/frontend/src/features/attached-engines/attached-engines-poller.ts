@@ -4,7 +4,11 @@
 // The poll loop behind useAttachedEngines, free of React and of "@/" imports so a node test can
 // drive it with fake timers and stubbed requests.
 
-import type { AttachedNotice, AttachedStatus } from "./types.ts";
+import type {
+  AttachedNotice,
+  AttachedStatus,
+  AttachedSyncResult,
+} from "./types.ts";
 
 export const ATTACHED_POLL_INTERVAL_MS = 5000;
 
@@ -14,7 +18,7 @@ const MAX_SEEN_NOTICES = 64;
 export type AttachedPollerDeps = {
   /** null when the backend answers 404: the flag is off. */
   fetchStatus: (since: number) => Promise<AttachedStatus | null>;
-  postSync: () => Promise<void>;
+  postSync: () => Promise<AttachedSyncResult | void>;
   /** Pull the saved provider rows into the picker store. */
   syncProviders: () => Promise<void>;
   onStatus: (status: AttachedStatus | null) => void;
@@ -89,9 +93,11 @@ export function createAttachedPoller(deps: AttachedPollerDeps): AttachedPoller {
       primed = true;
       if (status.modelsHash !== lastHash) {
         try {
-          await deps.postSync();
+          const result = await deps.postSync();
           await deps.syncProviders();
-          lastHash = status.modelsHash;
+          // An incomplete catalog fetch kept the old models: leave lastHash stale so the next
+          // tick syncs again instead of treating the picker as up to date.
+          if (!(result && result.incomplete)) lastHash = status.modelsHash;
         } catch {
           // lastHash stays stale, so the next tick retries the sync.
         }

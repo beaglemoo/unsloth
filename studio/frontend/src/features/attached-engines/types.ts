@@ -62,4 +62,11 @@ export type AttachedEnginesSettings = {
   prewarmDs4OnSelect: boolean;
 };
 
+/** What POST /sync reports. `incomplete`: an engine's model catalog could not be read, so its
+ *  saved models were kept (`kept_models`) and the sync should be retried. */
+export type AttachedSyncResult = {
+  enabled: boolean;
+  incomplete: boolean;
+};
+
 export type AttachedProvider = "omlx" | "dwarfstar";
