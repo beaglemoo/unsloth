@@ -48,6 +48,7 @@ import {
   loadHuggingFaceCacheSettings,
   updateHuggingFaceCacheSettings,
 } from "../api/hugging-face-cache";
+import { AttachedEnginesPanel } from "@/features/attached-engines";
 import { InferenceEnginesSection } from "@/features/model-picker/components/inference-engines";
 import { useSettingsDialogStore } from "../stores/settings-dialog-store";
 import { CacheStorageRows } from "../components/cache-storage-rows";
@@ -1031,6 +1032,7 @@ export function ResourcesTab() {
           apply to whichever backend is selected. */}
       <LlamaBackendSection />
       <InferenceEnginesSection />
+      <AttachedEnginesPanel />
 
       <ModelMemorySection />
 
