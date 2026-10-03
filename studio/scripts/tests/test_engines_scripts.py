@@ -832,6 +832,58 @@ def test_the_app_swap_happens_with_the_helpers_out_of_launchd(tmp_path, home):
         rig.close()
 
 
+def install_app_rig(tmp_path, rig, extra_env=None, snippet="install_app"):
+    """Run install_app against the fake engines and launchctl; returns the result."""
+    make_app(tmp_path / "dist" / "Unsloth.app", "new")
+    make_app(tmp_path / "Apps" / "Unsloth.app", "old")
+    env = {k: v for k, v in rig.env.items() if k not in ("UNSLOTH_ENGINES_HOME",)}
+    return fork_fn(tmp_path, f"codesign() {{ :; }}; DRY=0; {snippet}", {**env, **(extra_env or {})})
+
+
+def test_a_failed_second_bootout_still_restarts_the_helper_that_was_stopped(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        result = install_app_rig(tmp_path, rig, {"FAKE_BOOTOUT_FAIL": "ds4"})
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert not any(c.startswith("mv ") for c in rig.calls())
+        # oMLX was booted out first, then brought back; ds4 never went down
+        assert any(c.startswith("launchctl bootout") and c.endswith(".omlx") for c in rig.calls())
+        assert any(c.startswith("launchctl bootstrap") and c.endswith("ai.unsloth.studio.omlx.plist") for c in rig.calls()[-6:])
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
+def test_a_failed_first_bootout_leaves_both_helpers_running(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        result = install_app_rig(tmp_path, rig, {"FAKE_BOOTOUT_FAIL": "omlx"})
+        assert result.returncode != 0
+        assert all(rig.loaded(label) for label in rig.labels)
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+    finally:
+        rig.close()
+
+
+def test_a_port_gate_timeout_restarts_the_stopped_helpers(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen()
+            port = held.getsockname()[1]
+            result = install_app_rig(
+                tmp_path, rig, {"ENGINE_PORTS": f"{rig.omlx_port} {rig.ds4_port} {port}", "PORT_GATE_TIMEOUT": "2"}
+            )
+        assert result.returncode != 0 and "ports still held" in result.stderr, result.stdout + result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 2
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
 def test_a_busy_engine_blocks_the_app_swap_and_leaves_the_app_alone(tmp_path, home):
     rig = Rig(tmp_path, home)
     try:
