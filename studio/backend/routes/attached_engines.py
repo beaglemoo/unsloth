@@ -98,7 +98,10 @@ async def attached_status(since: float = 0):
     omlx_status, ds4_status, ds4_ids = await asyncio.gather(
         omlx_client.status(), ds4_client.status(), ds4_client.model_ids()
     )
-    omlx_ids = await omlx_client.chat_model_ids(status = omlx_status) if omlx_status.reachable else []
+    omlx_ids = (
+        await omlx_client.chat_model_ids(status = omlx_status) if omlx_status.reachable else None
+    ) or []
+    ds4_ids = ds4_ids or []
     omlx = asdict(omlx_status)
     omlx["chat_model_ids"] = omlx_ids
     return {
