@@ -234,3 +234,17 @@ def test_config_errors_become_attached_engine_error():
 
     with pytest.raises(AttachedEngineError):
         asyncio.run(Ds4Client("http://x", transport = httpx.MockTransport(down)).set_ctx(8192))
+
+
+def test_status_reads_context_fields_from_config():
+    body = {**WARM, "config": {**CONFIG, "ctx": 100000, "ctx_active": 90000, "pending_restart": True}}
+    client = Ds4Client(
+        "http://x", transport = httpx.MockTransport(lambda r: httpx.Response(200, json = body))
+    )
+    status = asyncio.run(client.status())
+    assert (status.ctx, status.ctx_active, status.pending_restart) == (100000, 90000, True)
+    cold = Ds4Client(
+        "http://x", transport = httpx.MockTransport(lambda r: httpx.Response(200, json = COLD))
+    )
+    old = asyncio.run(cold.status())
+    assert (old.ctx, old.ctx_active, old.pending_restart) == (None, None, False)
