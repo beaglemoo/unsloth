@@ -889,6 +889,14 @@ fn installer_env(upgrade_torch: bool) -> Vec<(&'static str, &'static str)> {
     }
 }
 
+/// The bundled install.sh installs the PyPI wheel, which has none of the fork's routes. The
+/// fork backend comes from build-fork-mac.sh --install, never from the app's own installer.
+pub(crate) const FORK_INSTALLER_REFUSAL: &str = "This fork build does not run the bundled installer, which would replace the fork backend with the PyPI release. Run studio/scripts/build-fork-mac.sh --install to install the backend from the fork checkout.";
+
+pub(crate) fn installer_refusal(fork: bool) -> Option<&'static str> {
+    fork.then_some(FORK_INSTALLER_REFUSAL)
+}
+
 fn run_install_with_event_mode(
     app: AppHandle,
     state: InstallState,
@@ -897,6 +905,13 @@ fn run_install_with_event_mode(
     repair_group_id: Option<String>,
     upgrade_torch: bool,
 ) -> Result<(), String> {
+    if let Some(msg) = installer_refusal(cfg!(feature = "attached-engines")) {
+        error!("[install] refused: {}", msg);
+        if event_mode.emit_terminal_events() {
+            emit_failed(&app, msg);
+        }
+        return Err(msg.to_string());
+    }
     let attempt = match repair_group_id.as_deref() {
         Some(group_id) => diagnostics::begin_repair_child(&diagnostics, group_id, "install"),
         None => diagnostics::begin_install_attempt(&diagnostics),
@@ -1387,6 +1402,13 @@ fn capped_output_text(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fork_refuses_the_bundled_installer_and_upstream_does_not() {
+        assert_eq!(installer_refusal(true), Some(FORK_INSTALLER_REFUSAL));
+        assert!(FORK_INSTALLER_REFUSAL.contains("PyPI"));
+        assert_eq!(installer_refusal(false), None);
+    }
 
     #[cfg(windows)]
     #[test]

@@ -8356,6 +8356,15 @@ def _unsloth_zoo_git_spec() -> str:
     return _UNSLOTH_ZOO_GIT_URL + ("@" + ref if ref else "")
 
 
+def _local_overlay_non_editable() -> bool:
+    """STUDIO_LOCAL_NONEDITABLE=1 installs the --local checkout as a regular package.
+
+    The fork's desktop build sets it so the running backend is not tied to the git working
+    tree and fully replaces the files of any previously installed wheel.
+    """
+    return os.environ.get("STUDIO_LOCAL_NONEDITABLE", "").strip().lower() in ("1", "true", "yes")
+
+
 def _overlay_local_core_package(
     name: str,
     local_repo: str,
@@ -8369,7 +8378,15 @@ def _overlay_local_core_package(
     is replacing, so it has to say so rather than die mid-way.
     """
     canonical = re.sub(r"[-_.]+", "-", name).lower()
-    if canonical == "unsloth":
+    if canonical == "unsloth" and _local_overlay_non_editable():
+        # A regular install owns site-packages/studio outright. An editable install leaves
+        # the wheel's runtime-generated strays (backend/core/data_recipe/oxc-validator/
+        # node_modules) behind, and those bare directories become a namespace package that
+        # shadows the editable finder: "No module named 'studio.backend.utils'".
+        step_label = f"overlaying local repo (non-editable): {local_repo}"
+        install_label = "Overlaying local repo (non-editable)"
+        args = ("--force-reinstall", local_repo)
+    elif canonical == "unsloth":
         step_label = f"overlaying local repo (editable): {local_repo}"
         install_label = "Overlaying local repo (editable)"
         args = ("-e", local_repo)

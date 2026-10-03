@@ -2933,6 +2933,41 @@ class TestDuplicateCoreMetadataRepair:
         ]
         assert all(call[2]["constrain"] is False for call in installs)
 
+    @pytest.mark.parametrize("value", ["1", "true", "YES"])
+    def test_non_editable_local_overlay_replaces_the_installed_files(self, monkeypatch, value):
+        installs = []
+        monkeypatch.setenv("STUDIO_LOCAL_NONEDITABLE", value)
+        monkeypatch.setattr(ips, "_step", lambda *a, **k: None)
+        monkeypatch.setattr(
+            ips,
+            "pip_install",
+            lambda label, *args, **kwargs: installs.append((label, args, kwargs)),
+        )
+
+        ips._overlay_local_core_package("unsloth", "/src/unsloth")
+
+        assert [call[1] for call in installs] == [
+            ("--no-cache-dir", "--no-deps", "--force-reinstall", "/src/unsloth"),
+        ]
+        assert "-e" not in installs[0][1]
+
+    @pytest.mark.parametrize("value", ["", "0", "false"])
+    def test_local_overlay_stays_editable_unless_asked_otherwise(self, monkeypatch, value):
+        installs = []
+        monkeypatch.setenv("STUDIO_LOCAL_NONEDITABLE", value)
+        monkeypatch.setattr(ips, "_step", lambda *a, **k: None)
+        monkeypatch.setattr(
+            ips,
+            "pip_install",
+            lambda label, *args, **kwargs: installs.append((label, args, kwargs)),
+        )
+
+        ips._overlay_local_core_package("unsloth", "/src/unsloth")
+
+        assert [call[1] for call in installs] == [
+            ("--no-cache-dir", "--no-deps", "-e", "/src/unsloth"),
+        ]
+
 
 class TestDesktopBackendVersionConstraint:
     """Verify that UNSLOTH_DESKTOP_BACKEND_VERSION adds the floor pin when upgrading unsloth."""
