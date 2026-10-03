@@ -25,15 +25,23 @@
 #      (a direct `pip install --force-reinstall <wheel>` when the venv CLI cannot start; nothing
 #      is ever uninstalled first), then check the version
 #   5. verify the way the app's preflight runs it, from / : `unsloth -h`,
-#      `unsloth studio desktop-capabilities --json`, and the studio.backend imports.
-#      A failure in 4 or 5 puts the snapshot back (the broken venv is kept beside it)
-#   6. back up /Applications/Unsloth.app to ~/Applications/Unsloth-upstream-0.1.815.app.bak (once)
+#      `unsloth studio desktop-capabilities --json`, and the studio.backend imports
+#   6. back up /Applications/Unsloth.app to ~/Applications/Unsloth-upstream-0.1.815.app.bak (once;
+#      copied to a .partial name and renamed, so an interrupted copy is never taken for a backup)
 #   7. ditto the built app to /Applications/Unsloth.app.new and codesign-verify it, then unload
 #      oMLX models, stop ds4, boot the helpers out of launchd (the helpers exec from inside the
 #      bundle), move the old app to ~/Applications/Unsloth-prev.app.bak, move the new one into
 #      place and bootstrap the helpers again (kickstart as the fallback; if neither works, use
 #      Settings > Background engines, off and on)
 #   8. codesign --verify --deep --strict
+#
+# Steps 4-8 are ONE transaction. A rollback handler is armed once the snapshot exists and is
+# disarmed only after step 8. On any failure in between (the install or its checks, the app backup
+# copy, staging or verifying the new bundle, the quiesce, a bootout, the port gate, the swap, the
+# final verify) it restores the backend snapshot AND the previous app together (the broken venv is
+# kept next to the snapshot as failed-unsloth_studio), booting the helpers out again first if they
+# had already come up from the new bundle, and then restarts every helper this run owes. The
+# handler is armed before the first bootout, and a helper counts as owed before its bootout runs.
 #
 # The helper stop/restart (launchctl bootout/bootstrap of the bundled plists) has only been run
 # with --dry-run and a fake launchctl, never against the live helpers.
@@ -291,36 +299,79 @@ PY
   ) || die "the installed backend is not the fork build"
 }
 
-# EXIT handler for the install: whatever the failure, the helpers it booted out are restarted.
+# The install is one transaction from the moment the backend is replaced until the final
+# verification: the backend and the app are replaced together and put back together. The EXIT
+# handler is armed before the first mutation (phase_install) and disarmed after the last check.
+# Whatever the failure (the app backup copy, staging or verifying the new bundle, the quiesce, a
+# bootout, the port gate, the swap, the final verify), it restores the backend snapshot AND the
+# previous app, then restarts every helper this run owes a restart. It never dies: each step
+# warns and the next one still runs.
 INSTALL_ARMED=0
+APP_STAGED=0 APP_PREV_MOVED=0 APP_NEW_IN_PLACE=0
+
 rollback_install() {
+  [ "$DRY" = 0 ] || return 0
+  warn "the install failed; rolling back the backend and the app together"
+  local app_note=""
+  # Past the swap the helpers may already run from the new bundle: stop them before it goes.
+  if [ "$APP_NEW_IN_PLACE" = 1 ]; then
+    helpers_stop || warn "could not boot every helper out before restoring the app"
+    ( wait_ports_free ) || warn "the engine ports are still held; restoring the app anyway"
+    if rm -rf "$INSTALLED_APP"; then APP_NEW_IN_PLACE=0; else warn "could not remove the new app at $INSTALLED_APP"; fi
+  fi
+  [ "$APP_STAGED" = 0 ] || rm -rf "$INSTALLED_APP.new" || true
+  rm -rf "$APP_BACKUP.partial" || true
+  if [ "$APP_PREV_MOVED" = 1 ]; then
+    if [ -e "$INSTALLED_APP" ]; then
+      warn "$INSTALLED_APP exists; the previous app stays at $APP_PREV"
+    elif mv "$APP_PREV" "$INSTALLED_APP"; then
+      APP_PREV_MOVED=0
+      app_note=" and the previous app"
+    else
+      warn "could not put the previous app back from $APP_PREV"
+    fi
+  fi
+  if [ -n "$BACKEND_BACKUP" ] && [ -d "$BACKEND_BACKUP" ]; then
+    # restore_backend dies on a problem; keep that out of the handler
+    if ( restore_backend ); then
+      warn "rolled back: the previous backend was restored$app_note"
+    else
+      warn "the backend could not be restored; the snapshot is at $BACKEND_BACKUP"
+    fi
+  fi
   helpers_start || warn "the helpers did not restart; use Settings > API Keys > Background engines, off and on"
 }
+
 install_on_exit() {
   local rc=$?
   trap - EXIT
+  trap '' INT TERM HUP
   if [ "$rc" -ne 0 ] && [ "$INSTALL_ARMED" = 1 ]; then
     INSTALL_ARMED=0
     rollback_install
   fi
   exit "$rc"
 }
-arm_install_rollback() { INSTALL_ARMED=1; trap install_on_exit EXIT; }
-disarm_install_rollback() { INSTALL_ARMED=0; trap - EXIT; }
+arm_install_rollback() {
+  INSTALL_ARMED=1
+  trap install_on_exit EXIT
+  trap 'exit 130' INT TERM HUP
+}
+disarm_install_rollback() { INSTALL_ARMED=0; trap - EXIT INT TERM HUP; }
 
 # Swap the app bundle with the helpers out of launchd: they exec from inside it. The new app is
 # copied and verified beside the old one first, so the window with no app is two renames.
 install_app() {
-  local staged="$INSTALLED_APP.new"
+  local staged="$INSTALLED_APP.new" own=0
+  # Standalone use arms (and disarms) its own handler; inside phase_install it is already armed.
+  [ "$INSTALL_ARMED" = 1 ] || { arm_install_rollback; own=1; }
+  APP_STAGED=1
   run rm -rf "$staged"
   run ditto "$DIST_APP" "$staged"
   run codesign --verify --deep --strict --verbose=2 "$staged"
 
   log "unload oMLX models and stop ds4, then boot the helpers out of launchd"
   engines_quiesce
-  # Armed BEFORE the first bootout: a bootout that fails for the second helper, or a port gate
-  # that times out, must still bring back whatever was already stopped.
-  arm_install_rollback
   helpers_stop
   wait_ports_free
 
@@ -328,19 +379,14 @@ install_app() {
     run mkdir -p "$(dirname "$APP_PREV")"
     run rm -rf "$APP_PREV"
     run mv "$INSTALLED_APP" "$APP_PREV"
+    APP_PREV_MOVED=1
   fi
-  if ! run mv "$staged" "$INSTALLED_APP"; then
-    [ ! -e "$APP_PREV" ] || run mv "$APP_PREV" "$INSTALLED_APP"
-    die "could not move the new app into place; the previous app was put back"
-  fi
+  run mv "$staged" "$INSTALLED_APP" || die "could not move the new app into place"
+  APP_NEW_IN_PLACE=1
 
   log "restart the helpers"
-  if helpers_start; then
-    disarm_install_rollback
-  else
-    disarm_install_rollback
-    warn "the helpers did not restart; use Settings > API Keys > Background engines, off and on"
-  fi
+  helpers_start || warn "the helpers did not restart; use Settings > API Keys > Background engines, off and on"
+  [ "$own" = 0 ] || disarm_install_rollback
 }
 
 phase_install() {
@@ -361,16 +407,19 @@ phase_install() {
   log "3/8 snapshot the backend venv"
   snapshot_backend
 
+  # From here the backend and the app are one transaction. Any failure up to the final
+  # verification restores the backend snapshot and the previous app together, then restarts the
+  # helpers (see rollback_install). Disarmed only after step 8.
+  arm_install_rollback
+
   log "4/8 install the backend from this checkout (non-editable)"
   if ! ( install_backend && { [ "$DRY" = 1 ] || check_installed_version; } ); then
-    restore_backend
-    die "the backend install failed; the previous backend was restored"
+    die "the backend install failed; rolling back"
   fi
 
   log "5/8 verify the backend as the app's preflight sees it"
   if ! ( verify_backend ); then
-    restore_backend
-    die "the installed backend did not verify; the previous backend was restored"
+    die "the installed backend did not verify; rolling back"
   fi
 
   log "6/8 back up $INSTALLED_APP"
@@ -378,7 +427,10 @@ phase_install() {
     log "backup already exists, keeping it: $APP_BACKUP"
   else
     run mkdir -p "$HOME/Applications"
-    run ditto "$INSTALLED_APP" "$APP_BACKUP"
+    # copied beside the final name and renamed, so an interrupted copy is never mistaken for a backup
+    run rm -rf "$APP_BACKUP.partial"
+    run ditto "$INSTALLED_APP" "$APP_BACKUP.partial"
+    run mv "$APP_BACKUP.partial" "$APP_BACKUP"
   fi
 
   log "7/8 install the new app"
@@ -386,6 +438,7 @@ phase_install() {
 
   log "8/8 verify"
   run codesign --verify --deep --strict --verbose=2 "$INSTALLED_APP"
+  disarm_install_rollback
   prune_backend_backups
   log "installed. The previous app is kept at $APP_PREV, the backend snapshot under $BACKUP_ROOT."
   log "Open Unsloth and enable Settings > Background engines if it is off."
