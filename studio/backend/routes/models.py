@@ -72,6 +72,7 @@ _is_h3_bundle_gguf_hint = _catalog_classification._is_h3_bundle_gguf_hint
 SPEECH_GGUF_ARCHS = _gguf_archs.SPEECH_GGUF_ARCHS
 is_speech_gguf_architecture = _gguf_archs.is_speech_gguf_architecture
 from utils.account_context import account_thread
+from utils.scan_denylist import filter_denied, is_denied
 from utils.utils import canonical_model_repo_id, log_and_http_error
 
 import re as _re
@@ -1190,7 +1191,7 @@ def collect_local_models(
         key = lambda item: item.updated_at or 0,
         reverse = True,
     )
-    return [m for m in models if not _is_hidden_model(m.id, m.model_id, m.path)]
+    return filter_denied(m for m in models if not _is_hidden_model(m.id, m.model_id, m.path))
 
 
 _CompatLocalInventoryKey = tuple[Path, _CompatLocalInventorySources, tuple[str, ...], int]
@@ -1458,6 +1459,8 @@ def _dir_has_downloaded_model(directory: Path, max_entries: int = 4000) -> bool:
     # Ollama layout: a manifest alone is not enough, since a failed or pruned pull leaves it behind with the
     # model blob missing, so resolve the ``application/vnd.ollama.image.model`` layer to an on-disk blob before
     # counting it, else the chip leads to an empty picker.
+    from utils.scan_denylist import is_denied
+
     visited = 0
     manifests = directory / "manifests"
     blobs = directory / "blobs"
@@ -1509,6 +1512,8 @@ def _dir_has_downloaded_model(directory: Path, max_entries: int = 4000) -> bool:
             if visited > max_entries:
                 return False
             try:
+                if is_denied(entry):
+                    continue
                 if entry.is_dir():
                     if not entry.name.startswith("."):
                         queue.append(entry)
@@ -2055,7 +2060,7 @@ def browse_folders(
                 resolved_child = os.path.realpath(str(child))
             except (OSError, ValueError):
                 resolved_child = str(child)
-            if is_denied_system_path(resolved_child):
+            if is_denied_system_path(resolved_child) or is_denied(resolved_child):
                 continue
             entries.append(
                 BrowseEntry(
@@ -2102,7 +2107,7 @@ def browse_folders(
             return
         # Drop a denied system dir (e.g. a stale scan-folder row) so it never becomes a chip that
         # 403s on click. Drive roots stay: only their system subdirectories are denied.
-        if is_denied_system_path(resolved):
+        if is_denied_system_path(resolved) or is_denied(resolved):
             return
         if _safe_is_dir(resolved):
             seen_sug.add(resolved)

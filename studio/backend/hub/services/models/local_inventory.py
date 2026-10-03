@@ -41,6 +41,7 @@ from hub.services.models import common as model_common
 from hub.services.models.hermes import scan_hermes_dir
 from hub.services.models.ollama import scan_ollama_dir
 from utils.hidden_models import is_hidden_model
+from utils.scan_denylist import filter_denied
 from utils.paths.path_utils import is_appledouble_metadata
 from utils.paths.scan_folder_health import (
     annotate_scan_folders,
@@ -1387,7 +1388,7 @@ def _filter_hidden_models(local_models: List[LocalModelInfo]) -> list[LocalModel
 
 
 def _filter_and_dedupe_local_models(local_models: List[LocalModelInfo]) -> list[LocalModelInfo]:
-    return _dedupe_local_models(_filter_hidden_models(local_models))
+    return _dedupe_local_models(_filter_hidden_models(filter_denied(local_models)))
 
 
 async def _scan_local_models_response(
