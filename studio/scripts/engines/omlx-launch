@@ -1,0 +1,16 @@
+#!/bin/bash
+# Exec wrapper for the oMLX server. Reads engines.toml via the user-side venv
+# (~/.unsloth/engines/omlx) and execs `python -m omlx.cli serve`.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENGINES_HOME="${UNSLOTH_ENGINES_HOME:-$HOME/.unsloth/engines}"
+PY="$ENGINES_HOME/omlx/bin/python"
+[ -x "$PY" ] || { echo "omlx-launch: venv missing: $PY (run studio/scripts/build-engines-mac.sh)" >&2; exit 78; }
+# launchd cannot expand "~" in StandardOutPath, so the helper logs here instead.
+# A terminal run keeps its own stdout.
+LOG_DIR="${UNSLOTH_ENGINES_LOG_DIR:-$HOME/Library/Logs/Unsloth/engines}"
+if [ ! -t 1 ]; then
+  mkdir -p "$LOG_DIR"
+  exec >>"$LOG_DIR/omlx.log" 2>&1
+fi
+exec "$PY" "$HERE/engines_launch.py" omlx "$@"

@@ -272,3 +272,6 @@ studio/backend/requirements/.*-filtered-*.txt
 tests/security/fixtures/malicious_wheel.whl
 tests/security/fixtures/malicious_sdist.tar.gz
 tests/security/fixtures/clean_wheel.whl
+
+# Attached engines: ds4 build output staged for the fork app bundle
+studio/src-tauri/engines-staging/
