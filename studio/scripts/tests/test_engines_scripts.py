@@ -230,3 +230,63 @@ def test_bash_backoff_schedule_matches_python(home):
         waits.append(int(result.stdout.split("SLEEP ")[1].split()[0]))
     assert waits == [10, 20, 40, 80, 160, 300, 300, 300]
     assert read_fail(home, "ds4")["count"] == 8
+
+
+# --- migrate-engines-mac.sh rollback -----------------------------------------------------------
+
+
+def migrate(home_dir, snippet, **env):
+    """Source the migrate script (its main is guarded) under a scratch HOME and run a snippet."""
+    return run(
+        ["bash", "-c", f'. "{SCRIPTS}/migrate-engines-mac.sh"; {snippet}'],
+        {"HOME": str(home_dir), "APPS_DIR": str(home_dir / "Apps"), **env},
+    )
+
+
+def make_app(path: Path, marker="x"):
+    (path / "Contents").mkdir(parents=True)
+    (path / "Contents" / "marker").write_text(marker)
+
+
+def test_rollback_moves_the_retired_apps_back(tmp_path):
+    retired = tmp_path / ".unsloth" / "engines" / "migration" / "retired-apps"
+    make_app(retired / "oMLX.app", "omlx")
+    make_app(retired / "EngineBar.app", "bar")
+    (tmp_path / "Apps").mkdir()
+    (tmp_path / "Applications").mkdir()
+    result = migrate(tmp_path, "restore_retired_apps")
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "Apps" / "oMLX.app" / "Contents" / "marker").read_text() == "omlx"
+    assert (tmp_path / "Applications" / "EngineBar.app" / "Contents" / "marker").read_text() == "bar"
+    assert not (retired / "oMLX.app").exists() and not (retired / "EngineBar.app").exists()
+    # idempotent: a second run keeps what is in place and does not complain about the empty folder
+    again = migrate(tmp_path, "restore_retired_apps")
+    assert again.returncode == 0 and "already in place" in again.stdout
+
+
+def test_rollback_never_replaces_an_app_that_is_already_there(tmp_path):
+    retired = tmp_path / ".unsloth" / "engines" / "migration" / "retired-apps"
+    make_app(retired / "oMLX.app", "retired")
+    make_app(tmp_path / "Apps" / "oMLX.app", "current")
+    result = migrate(tmp_path, "restore_retired_apps")
+    assert result.returncode == 0
+    assert (tmp_path / "Apps" / "oMLX.app" / "Contents" / "marker").read_text() == "current"
+    assert (retired / "oMLX.app").exists()
+
+
+def test_rollback_dry_run_changes_nothing_and_warns_when_nothing_is_retired(tmp_path):
+    retired = tmp_path / ".unsloth" / "engines" / "migration" / "retired-apps"
+    make_app(retired / "oMLX.app")
+    result = migrate(tmp_path, "DRY=1; restore_retired_apps")
+    assert result.returncode == 0
+    assert "[dry-run] mv" in result.stdout
+    assert (retired / "oMLX.app").exists() and not (tmp_path / "Apps" / "oMLX.app").exists()
+    assert "no" in result.stderr and "EngineBar.app to restore" in result.stderr
+
+
+def test_the_latest_state_dir_ignores_retired_apps(tmp_path):
+    root = tmp_path / ".unsloth" / "engines" / "migration"
+    for name in ("20261001-101010", "20261003-120000", "retired-apps"):
+        (root / name).mkdir(parents=True)
+    result = migrate(tmp_path, "latest_state_dir")
+    assert result.stdout.strip().endswith("migration/20261003-120000")
