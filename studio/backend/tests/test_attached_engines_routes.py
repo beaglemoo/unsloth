@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import threading
 import time
+import types
 from pathlib import Path
 
 import httpx
@@ -23,6 +26,7 @@ from auth.authentication import get_current_subject  # noqa: E402
 from core.inference.attached import ATTACHED_DS4_ID, ATTACHED_OMLX_ID, arbiter  # noqa: E402
 from core.inference.attached.ds4_client import Ds4Client  # noqa: E402
 from core.inference.attached.omlx_client import OmlxClient  # noqa: E402
+from routes.provider_credentials import provider_config_guard  # noqa: E402
 from storage import providers_db  # noqa: E402
 from utils.attached_engines_settings import AttachedEnginesConfig  # noqa: E402
 
@@ -144,6 +148,10 @@ class Fake:
                 self.ds4_cfg["ctx"] = self.ds4_post["ctx"]
                 return httpx.Response(200, json = {**self.ds4_cfg, "applied": "next_start"})
             return httpx.Response(200, json = self.ds4_cfg)
+        if request.url.path == "/admin/hold":
+            return httpx.Response(200, json = {"hold_id": "test-hold"})
+        if request.method == "DELETE" and request.url.path.startswith("/admin/hold/"):
+            return httpx.Response(200, json = {})
         if request.url.path == "/admin/start":
             self.ds4_loaded, self.ds4_pid = True, 7
             return httpx.Response(200, json = {"status": "ok"})
@@ -312,6 +320,51 @@ def test_sync_keeps_user_choices_and_adds_new_models(client, fake):
     assert row["is_enabled"] == 0  # never re-enabled by a sync
 
 
+def test_sync_does_not_overwrite_a_choice_saved_while_it_is_reading(client, fake, monkeypatch):
+    client.post("/api/engines/attached/sync")
+    entered = threading.Event()
+    release = threading.Event()
+    original_get = providers_db.get_provider
+    calls = 0
+
+    def delayed_get(row_id):
+        nonlocal calls
+        calls += 1
+        if row_id == ATTACHED_OMLX_ID and calls == 1:
+            entered.set()
+            assert release.wait(1)
+        return original_get(row_id)
+
+    monkeypatch.setattr(providers_db, "get_provider", delayed_get)
+
+    async def run():
+        sync = asyncio.create_task(
+            routes._upsert_row(
+                ATTACHED_OMLX_ID,
+                "omlx",
+                "oMLX",
+                "http://127.0.0.1:8843/v1",
+                fake.chat_ids,
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 1)
+
+        async def choose_one_model():
+            async with provider_config_guard(ATTACHED_OMLX_ID):
+                await asyncio.to_thread(
+                    providers_db.update_provider,
+                    ATTACHED_OMLX_ID,
+                    models = ["swift-1.5-27b:fast"],
+                )
+
+        choice = asyncio.create_task(choose_one_model())
+        release.set()
+        await asyncio.gather(sync, choice)
+
+    asyncio.run(run())
+    assert providers_db.get_provider(ATTACHED_OMLX_ID)["models"] == ["swift-1.5-27b:fast"]
+
+
 def test_sync_with_engine_down_keeps_models_and_enabled_flag(client, fake):
     client.post("/api/engines/attached/sync")
     fake.omlx_up = False
@@ -474,6 +527,17 @@ def test_status_reports_empty_lists_when_a_catalog_fetch_fails(client, fake):
     body = client.get("/api/engines/attached/status").json()
     assert body["omlx"]["reachable"] is True
     assert body["omlx"]["chat_model_ids"] == []
+
+
+def test_status_exposes_engine_failure_when_the_reader_is_available(client, monkeypatch):
+    failures = types.ModuleType("core.inference.attached.failures")
+    failures.read_failure = lambda name: {"reason": f"{name} failed"}
+    monkeypatch.setitem(sys.modules, "core.inference.attached.failures", failures)
+
+    body = client.get("/api/engines/attached/status").json()
+
+    assert body["omlx"]["failure"] == {"reason": "omlx failed"}
+    assert body["ds4"]["failure"] == {"reason": "ds4 failed"}
 
 
 def test_omlx_context_get_resolves_alias_and_reports_all_three_values(client, fake):
