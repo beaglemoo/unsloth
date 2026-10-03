@@ -58,6 +58,18 @@ export function attachedMaxOutputTokens(
   return omlxRowsFor(status.omlx, active.modelId).find((row) => row.maxTokens !== null)?.maxTokens ?? null;
 }
 
+/** Max Tokens as it goes on the wire: bounded by the selected attached model's output ceiling
+ *  when the engine has reported one. Applied at send time only; the saved value is never lowered,
+ *  so a small DwarfStar context does not shrink the setting for every other model. */
+export function capMaxTokensForAttached(
+  maxTokens: number,
+  status: AttachedStatus | null,
+  active: ActiveAttached | null,
+): number {
+  const cap = attachedMaxOutputTokens(status, active);
+  return cap !== null && cap > 0 && maxTokens > cap ? cap : maxTokens;
+}
+
 export type UnloadState =
   | { kind: "offline" }
   | { kind: "not-loaded" }
