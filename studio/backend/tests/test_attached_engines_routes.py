@@ -160,7 +160,6 @@ def fake(monkeypatch, tmp_path):
     monkeypatch.setattr(providers_db, "studio_db_path", lambda: tmp_path / "studio.db")
     providers_db.reset_schema_state_for_tests()
     arbiter._notices.clear()
-    arbiter._invalidate_ds4_cache()
     return state
 
 
