@@ -23,6 +23,9 @@ export type AttachedPollerDeps = {
   syncProviders: () => Promise<void>;
   onStatus: (status: AttachedStatus | null) => void;
   onNotice: (notice: AttachedNotice) => void;
+  /** The backend says the feature is off (404): run the disabled-feature sync and reload the
+   *  provider rows so the attached models leave the picker. */
+  onDisabled?: () => Promise<void>;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
   intervalMs?: number;
@@ -77,6 +80,11 @@ export function createAttachedPoller(deps: AttachedPollerDeps): AttachedPoller {
         deps.onStatus(null);
         // The flag is off; nothing to poll until the settings say otherwise.
         running = false;
+        try {
+          await deps.onDisabled?.();
+        } catch {
+          // Best effort: the rows are only cosmetic once the engines are off.
+        }
         return;
       }
       deps.onStatus(status);
