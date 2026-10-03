@@ -20,7 +20,7 @@ from core.inference.attached import (
 )
 from core.inference.attached import arbiter
 from core.inference.attached.ds4_client import Ds4Client
-from core.inference.attached.omlx_client import OmlxClient
+from core.inference.attached.omlx_client import OmlxClient, OmlxContext
 from loggers import get_logger
 from storage import providers_db
 from utils.attached_engines_settings import AttachedEnginesConfig, get_config
@@ -36,12 +36,24 @@ async def _require_enabled() -> None:
 router = APIRouter(dependencies = [Depends(get_current_subject), Depends(policy.require_owner)])
 _gated = APIRouter(dependencies = [Depends(_require_enabled)])
 
+MIN_CONTEXT = 4096
+
 # Strong references: the loop keeps only weak ones to running tasks.
 _background: set[asyncio.Task] = set()
 
 
 class OmlxModelRequest(BaseModel):
     model_id: str = Field(min_length = 1, max_length = 512)
+
+
+class OmlxContextRequest(BaseModel):
+    model_id: str = Field(min_length = 1, max_length = 512)
+    # None (JSON null) resets the model to its default cap.
+    max_context_window: Optional[int] = Field(default = None, ge = MIN_CONTEXT)
+
+
+class Ds4ContextRequest(BaseModel):
+    ctx: int = Field(ge = MIN_CONTEXT)
 
 
 class PrepareRequest(BaseModel):
@@ -216,6 +228,72 @@ async def omlx_load(body: OmlxModelRequest):
     except AttachedEngineError as exc:
         raise HTTPException(status_code = 502, detail = str(exc)) from exc
     return {"loaded": dir_id, "actions": list(notice.actions)}
+
+
+def _context_body(model_id: str, context: OmlxContext) -> dict:
+    return {
+        "model_id": model_id,
+        "dir": context.dir,
+        "max_context_window": context.max_context_window,
+        "native_max": context.native_max,
+        "effective": context.effective,
+    }
+
+
+# POST, not GET: model ids carry colons and travel in JSON bodies only.
+@_gated.post("/omlx/context/get")
+async def omlx_context_get(body: OmlxModelRequest):
+    client = _omlx(get_config())
+    dir_id = await _resolve_omlx_dir(client, body.model_id)
+    try:
+        return _context_body(body.model_id, await client.context(dir_id))
+    except AttachedEngineError as exc:
+        raise HTTPException(status_code = 502, detail = str(exc)) from exc
+
+
+@_gated.post("/omlx/context")
+async def omlx_context_set(body: OmlxContextRequest):
+    client = _omlx(get_config())
+    dir_id = await _resolve_omlx_dir(client, body.model_id)
+    try:
+        current = await client.context(dir_id)
+        if (
+            body.max_context_window is not None
+            and current.native_max is not None
+            and body.max_context_window > current.native_max
+        ):
+            raise HTTPException(
+                status_code = 422,
+                detail = f"max_context_window exceeds the model's native length ({current.native_max}).",
+            )
+        requires_reload = await client.set_context(dir_id, body.max_context_window)
+        updated = await client.context(dir_id)
+    except AttachedEngineError as exc:
+        raise HTTPException(status_code = 502, detail = str(exc)) from exc
+    return {**_context_body(body.model_id, updated), "requires_reload": requires_reload}
+
+
+@_gated.get("/ds4/context")
+async def ds4_context_get():
+    try:
+        return await _ds4(get_config()).config()
+    except AttachedEngineError as exc:
+        raise HTTPException(status_code = 502, detail = str(exc)) from exc
+
+
+@_gated.post("/ds4/context")
+async def ds4_context_set(body: Ds4ContextRequest):
+    client = _ds4(get_config())
+    try:
+        current = await client.config()
+        low, high = current.get("ctx_min"), current.get("ctx_max")
+        if isinstance(high, int) and body.ctx > high:
+            raise HTTPException(status_code = 422, detail = f"ctx exceeds the engine maximum ({high}).")
+        if isinstance(low, int) and body.ctx < low:
+            raise HTTPException(status_code = 422, detail = f"ctx is below the engine minimum ({low}).")
+        return await client.set_ctx(body.ctx)
+    except AttachedEngineError as exc:
+        raise HTTPException(status_code = 502, detail = str(exc)) from exc
 
 
 @_gated.post("/omlx/unload")
