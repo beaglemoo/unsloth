@@ -24,6 +24,10 @@ mod desktop_update_policy;
 mod desktop_updater;
 mod diagnostics;
 mod gpu_rendering;
+#[cfg(feature = "attached-engines")]
+mod engine_helpers;
+#[cfg(feature = "attached-engines")]
+mod engine_tray;
 mod install;
 mod install_watchdog;
 #[cfg(target_os = "linux")]
@@ -1976,6 +1980,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .items(&[&open, &toggle, &quit])
         .build()?;
     app.manage(TrayServerToggle(toggle));
+    #[cfg(feature = "attached-engines")]
+    engine_tray::install(app, &menu)?;
 
     // macOS renders tray images at 18 points: embed the 36 px scale; template mode adapts the color.
     #[cfg(target_os = "macos")]
@@ -1994,6 +2000,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 let _ = app.emit("tray-toggle-server", ());
             }
             "quit" => request_quit(app),
+            #[cfg(feature = "attached-engines")]
+            other => engine_tray::on_menu_event(app, other),
+            #[cfg(not(feature = "attached-engines"))]
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -2619,6 +2628,12 @@ fn main() {
             get_tray_icon_visible,
             set_tray_icon_visible,
             set_tray_server_status,
+            #[cfg(feature = "attached-engines")]
+            engine_helpers::engine_helpers_status,
+            #[cfg(feature = "attached-engines")]
+            engine_helpers::engine_helpers_enable,
+            #[cfg(feature = "attached-engines")]
+            engine_helpers::engine_helpers_disable,
             ];
             handler(invoke)
         })
