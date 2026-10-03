@@ -123,7 +123,6 @@ import {
   modelCatalogVersion,
   providerSupportsBuiltinCodeExecution,
   providerSupportsFastMode,
-  resolveExternalMaxTokensClamp,
   subscribeModelCatalog,
 } from "./provider-capabilities";
 import {
@@ -937,37 +936,8 @@ export function ChatSettingsPanel({
 
   const setSeed = set("seed");
 
-  // Lower a live Max Tokens that no longer fits the connection's cap.
-  // `resolveExternalMaxTokensClamp` documents why an unresolved provider must not be read as
-  // the 32,768 fallback.
-  useEffect(() => {
-    const clampedMaxTokens = resolveExternalMaxTokensClamp({
-      settingsHydrated,
-      hasActiveExternalProvider: activeExternalProvider != null,
-      isExternalModel,
-      maxTokens: params.maxTokens,
-      maxTokensMax,
-    });
-    if (clampedMaxTokens == null) {
-      return;
-    }
-    const nextParams = { ...params, maxTokens: clampedMaxTokens };
-    const nextSource = isSamePresetConfig(activePresetBaseline, nextParams)
-      ? getPresetSource(activePreset)
-      : "modified";
-    setActivePresetSource(nextSource);
-    setParams(nextParams);
-  }, [
-    activeExternalProvider,
-    activePreset,
-    activePresetBaseline,
-    isExternalModel,
-    maxTokensMax,
-    setParams,
-    params,
-    settingsHydrated,
-    setActivePresetSource,
-  ]);
+  // Max Tokens is bounded at send time (chat-adapter), never in the saved params: a small
+  // DwarfStar context or a short connection cap must not lower the setting for good.
 
   function applyPresetParamsWithinCurrentLimits(
     preset: Preset,
