@@ -3585,6 +3585,7 @@ from state.tool_approvals import (
 
 from core.inference.model_ids import display_model_name, model_id_matches, public_model_id
 from core.inference.api_monitor import api_monitor
+from core.inference.attached.timings import attach_timings
 from core.inference.image_orientation import exif_upright
 from core.inference.mcp_images import (
     MAX_MODEL_IMAGES as _MCP_MAX_MODEL_IMAGES,
@@ -28691,6 +28692,7 @@ async def _proxy_to_external_provider(
                 )
             provider_compaction_reported = False
             async for line in gen:
+                line = attach_timings(line, provider_type)
                 if _is_openai_sse_done(line) and _managed_cut_short():
                     # intercept [DONE] before the monitor records a cut-short reply as complete.
                     yield _fail_cut_short()
