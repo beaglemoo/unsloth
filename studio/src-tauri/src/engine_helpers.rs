@@ -40,8 +40,47 @@ pub(crate) struct EngineHelpersStatus {
     error: Option<String>,
 }
 
-/// One state for the toggle. Approval and missing-plist problems outrank the rest because
-/// they need a user action; a mix of enabled and not registered is `Partial`.
+/// Where a bundled launch agent plist lives, resolved from the running executable
+/// (`<bundle>/Contents/MacOS/<exe>` -> `<bundle>/Contents/Library/LaunchAgents/<plist>`).
+fn bundled_plist_path(exe: &std::path::Path, plist: &str) -> Option<std::path::PathBuf> {
+    let contents = exe.parent()?.parent()?;
+    Some(contents.join("Library").join("LaunchAgents").join(plist))
+}
+
+/// The tray polls the state every few seconds; say once per plist what NotFound was mapped to.
+fn log_not_found_once(plist: &str, bundled: bool, resolved: HelperState) {
+    static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let Ok(mut seen) = SEEN.lock() else { return };
+    if seen.iter().any(|p| p == plist) {
+        return;
+    }
+    seen.push(plist.to_string());
+    log::info!(
+        "engine helper {plist}: SMAppService status NotFound (3), plist bundled={bundled}, reported as {resolved:?}"
+    );
+}
+
+fn plist_is_bundled(plist: &str) -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| bundled_plist_path(&exe, plist))
+        .is_some_and(|path| path.is_file())
+}
+
+/// macOS answers `NotFound` both for a plist that is not in the bundle and for a bundled
+/// agent that was never registered (BTM parses the plist but has no record). Only the
+/// first means "this build has no helpers", so the bundle decides.
+fn resolve_not_found(bundled: bool) -> HelperState {
+    if bundled {
+        HelperState::NotRegistered
+    } else {
+        HelperState::NotFound
+    }
+}
+
+/// One state for the toggle. Approval and unsupported platforms outrank the rest because
+/// they need a user action; a mix of enabled and not registered is `Partial`. `NotFound`
+/// (not bundled) ranks lowest, so one missing plist never hides what the others report.
 fn aggregate(states: &[HelperState]) -> HelperState {
     if states.is_empty() {
         return HelperState::NotRegistered;
@@ -49,16 +88,21 @@ fn aggregate(states: &[HelperState]) -> HelperState {
     if states.contains(&HelperState::Unsupported) {
         return HelperState::Unsupported;
     }
-    if states.contains(&HelperState::NotFound) {
-        return HelperState::NotFound;
-    }
     if states.contains(&HelperState::RequiresApproval) {
         return HelperState::RequiresApproval;
     }
-    if states.iter().all(|s| *s == HelperState::Enabled) {
+    if states.iter().all(|s| *s == HelperState::NotFound) {
+        return HelperState::NotFound;
+    }
+    let present: Vec<HelperState> = states
+        .iter()
+        .copied()
+        .filter(|s| *s != HelperState::NotFound)
+        .collect();
+    if present.iter().all(|s| *s == HelperState::Enabled) && present.len() == states.len() {
         return HelperState::Enabled;
     }
-    if states.iter().all(|s| *s == HelperState::NotRegistered) {
+    if present.iter().all(|s| *s == HelperState::NotRegistered) {
         return HelperState::NotRegistered;
     }
     HelperState::Partial
@@ -149,7 +193,10 @@ mod sm {
         } else if status == SMAppServiceStatus::RequiresApproval {
             HelperState::RequiresApproval
         } else if status == SMAppServiceStatus::NotFound {
-            HelperState::NotFound
+            let bundled = super::plist_is_bundled(plist);
+            let resolved = super::resolve_not_found(bundled);
+            super::log_not_found_once(plist, bundled, resolved);
+            resolved
         } else {
             HelperState::NotRegistered
         }
@@ -212,8 +259,56 @@ mod tests {
         assert_eq!(aggregate(&[NotRegistered, NotRegistered]), NotRegistered);
         assert_eq!(aggregate(&[Enabled, NotRegistered]), Partial);
         assert_eq!(aggregate(&[Enabled, RequiresApproval]), RequiresApproval);
-        assert_eq!(aggregate(&[RequiresApproval, NotFound]), NotFound);
+        assert_eq!(aggregate(&[RequiresApproval, NotFound]), RequiresApproval);
         assert_eq!(aggregate(&[Unsupported, Unsupported]), Unsupported);
+    }
+
+    #[test]
+    fn one_missing_plist_does_not_mask_the_others() {
+        use HelperState::*;
+        assert_eq!(aggregate(&[NotFound, NotFound]), NotFound);
+        assert_eq!(aggregate(&[NotFound, NotRegistered]), NotRegistered);
+        assert_eq!(aggregate(&[NotRegistered, NotFound]), NotRegistered);
+        assert_eq!(aggregate(&[NotFound, Enabled]), Partial);
+        assert_eq!(aggregate(&[Enabled, NotFound]), Partial);
+        assert_eq!(aggregate(&[Unsupported, NotFound]), Unsupported);
+    }
+
+    #[test]
+    fn unregistered_bundled_helpers_are_not_registered_rather_than_not_found() {
+        assert_eq!(resolve_not_found(true), HelperState::NotRegistered);
+        assert_eq!(resolve_not_found(false), HelperState::NotFound);
+        // What macOS reports for the fork build before Background engines is turned on.
+        assert_eq!(
+            aggregate(&[resolve_not_found(true), resolve_not_found(true)]),
+            HelperState::NotRegistered
+        );
+    }
+
+    #[test]
+    fn bundled_plist_path_is_resolved_from_the_executable() {
+        let exe = std::path::Path::new("/Applications/Unsloth.app/Contents/MacOS/unsloth-studio");
+        assert_eq!(
+            bundled_plist_path(exe, OMLX_PLIST).unwrap(),
+            std::path::Path::new(
+                "/Applications/Unsloth.app/Contents/Library/LaunchAgents/ai.unsloth.studio.omlx.plist"
+            )
+        );
+        assert!(bundled_plist_path(std::path::Path::new("unsloth-studio"), OMLX_PLIST).is_none());
+    }
+
+    #[test]
+    fn plist_presence_follows_the_bundle_layout() {
+        let root = std::env::temp_dir().join(format!("unsloth-helpers-{}", std::process::id()));
+        let agents = root.join("Contents/Library/LaunchAgents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::create_dir_all(root.join("Contents/MacOS")).unwrap();
+        std::fs::write(agents.join(OMLX_PLIST), "x").unwrap();
+        let exe = root.join("Contents/MacOS/unsloth-studio");
+        let exists = |plist| bundled_plist_path(&exe, plist).is_some_and(|p| p.is_file());
+        assert!(exists(OMLX_PLIST));
+        assert!(!exists(DS4_PLIST));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
