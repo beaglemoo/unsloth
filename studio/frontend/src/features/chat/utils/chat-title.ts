@@ -14,6 +14,7 @@ import {
 import {
   type ExternalProviderConfig,
   getExternalProviderApiKey,
+  isAttachedProviderType,
   isCustomProviderType,
   loadExternalProviders,
   toExternalBackendProviderType,
@@ -244,6 +245,7 @@ export function resolveExternalRouting(
     Boolean(provider.hasApiKey) ||
     provider.authKind === "chatgpt_oauth" ||
     isCustomProviderType(provider.providerType) ||
+    isAttachedProviderType(provider.providerType) ||
     (provider.providerType === "gemini" &&
       isGeminiCustomOpenAICompatBase(provider.baseUrl));
   if (!apiKey && !keyOptional)
