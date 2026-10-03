@@ -116,6 +116,61 @@ fn load_urls() -> EngineUrls {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Launch failures
+
+/// What the engine wrappers leave in `<engines home>/<name>.fail` when a precondition (missing venv,
+/// config or model, port in use) stops an engine from starting: `{"reason", "ts", "count"}`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Failure {
+    reason: String,
+    count: u64,
+}
+
+/// Wrappers and the backend resolve the home the same way: `UNSLOTH_ENGINES_HOME`, else
+/// `~/.unsloth/engines`. (`UNSLOTH_ENGINES_CONFIG` only moves the toml.)
+fn engines_home() -> Option<PathBuf> {
+    match std::env::var_os("UNSLOTH_ENGINES_HOME") {
+        Some(home) => Some(PathBuf::from(home)),
+        None => Some(dirs::home_dir()?.join(".unsloth").join("engines")),
+    }
+}
+
+/// None for anything that is not a complete marker: a half-written or foreign file is no failure.
+pub(crate) fn parse_failure(text: &str) -> Option<Failure> {
+    let body: Value = serde_json::from_str(text).ok()?;
+    let reason = body.get("reason")?.as_str()?.trim();
+    body.get("ts")?.as_f64()?;
+    let count = body.get("count")?.as_u64().filter(|c| *c >= 1)?;
+    if reason.is_empty() {
+        return None;
+    }
+    Some(Failure {
+        reason: reason.to_string(),
+        count,
+    })
+}
+
+fn read_failure(name: &str) -> Option<Failure> {
+    let path = engines_home()?.join(format!("{name}.fail"));
+    parse_failure(&std::fs::read_to_string(path).ok()?)
+}
+
+const FAILURE_REASON_MAX: usize = 90;
+
+/// "oMLX failing: <reason>", the reason cut to fit a menu row.
+fn failing_label(engine: &str, failure: &Failure) -> String {
+    let mut reason: String = failure.reason.chars().take(FAILURE_REASON_MAX).collect();
+    if failure.reason.chars().count() > FAILURE_REASON_MAX {
+        reason.push_str("...");
+    }
+    if failure.count > 1 {
+        format!("{engine} failing: {reason} (x{})", failure.count)
+    } else {
+        format!("{engine} failing: {reason}")
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Status parsing
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -139,6 +194,8 @@ pub(crate) struct OmlxStatus {
     reachable: bool,
     models: Vec<OmlxModel>,
     memory_bytes: u64,
+    /// The launch failure marker, read only while the engine is not answering.
+    failure: Option<Failure>,
 }
 
 fn str_field(row: &Value, key: &str) -> Option<String> {
@@ -180,6 +237,7 @@ pub(crate) fn parse_omlx_status(body: &Value) -> Option<OmlxStatus> {
             .get("current_model_memory")
             .and_then(Value::as_u64)
             .unwrap_or(0),
+        failure: None,
     })
 }
 
@@ -244,6 +302,7 @@ pub(crate) struct Ds4Status {
     idle_remaining_s: Option<f64>,
     live_tps: Option<f64>,
     last_tps: Option<f64>,
+    failure: Option<Failure>,
 }
 
 pub(crate) fn parse_ds4_status(body: &Value) -> Option<Ds4Status> {
@@ -266,6 +325,7 @@ pub(crate) fn parse_ds4_status(body: &Value) -> Option<Ds4Status> {
         idle_remaining_s: body.get("idle_seconds_remaining").and_then(Value::as_f64),
         live_tps: tps("live"),
         last_tps: tps("last"),
+        failure: None,
     })
 }
 
@@ -391,7 +451,10 @@ fn fmt_duration(seconds: f64) -> String {
 
 fn omlx_label(status: &OmlxStatus) -> String {
     if !status.reachable {
-        return "oMLX: not running".to_string();
+        return match &status.failure {
+            Some(failure) => failing_label("oMLX", failure),
+            None => "oMLX: not running".to_string(),
+        };
     }
     if let Some(loading) = status.models.iter().find(|m| m.is_loading) {
         let name = loading.alias.as_deref().unwrap_or(&loading.id);
@@ -415,7 +478,10 @@ fn omlx_label(status: &OmlxStatus) -> String {
 
 fn ds4_label(status: &Ds4Status) -> String {
     if !status.reachable {
-        return "DwarfStar: not running".to_string();
+        return match &status.failure {
+            Some(failure) => failing_label("DwarfStar", failure),
+            None => "DwarfStar: not running".to_string(),
+        };
     }
     if status.starting {
         return "DwarfStar: starting".to_string();
@@ -535,10 +601,18 @@ async fn post(base: &str, path: &str, timeout: Duration) -> Result<(), String> {
 }
 
 async fn fetch_omlx(urls: &EngineUrls) -> OmlxStatus {
-    let mut status = get_json(&urls.omlx, "/v1/models/status")
+    let mut status = match get_json(&urls.omlx, "/v1/models/status")
         .await
         .and_then(|body| parse_omlx_status(&body))
-        .unwrap_or_default();
+    {
+        Some(status) => status,
+        None => {
+            return OmlxStatus {
+                failure: read_failure("omlx"),
+                ..OmlxStatus::default()
+            }
+        }
+    };
     // The idle TTL lives in the admin API, so it is only asked for when a timer could show.
     if status.models.iter().any(|m| m.loaded && !m.pinned) {
         let (global, models) = tokio::join!(
@@ -557,10 +631,16 @@ async fn fetch_omlx(urls: &EngineUrls) -> OmlxStatus {
 }
 
 async fn fetch_ds4(urls: &EngineUrls) -> Ds4Status {
-    get_json(&urls.ds4, "/admin/status")
+    match get_json(&urls.ds4, "/admin/status")
         .await
         .and_then(|body| parse_ds4_status(&body))
-        .unwrap_or_default()
+    {
+        Some(status) => status,
+        None => Ds4Status {
+            failure: read_failure("ds4"),
+            ..Ds4Status::default()
+        },
+    }
 }
 
 async fn stop_ds4(urls: &EngineUrls) -> Result<(), String> {
@@ -1037,6 +1117,73 @@ mod tests {
 
         assert!(!must_stop_ds4_before_load(&Ds4Status::default()));
         assert_eq!(ds4_label(&Ds4Status::default()), "DwarfStar: not running");
+    }
+
+    fn failure(reason: &str, count: u64) -> Failure {
+        Failure {
+            reason: reason.to_string(),
+            count,
+        }
+    }
+
+    #[test]
+    fn failure_marker_parses_only_when_complete() {
+        assert_eq!(
+            parse_failure(r#"{"reason": "port 8843 already in use", "ts": 1760000000.5, "count": 3}"#),
+            Some(failure("port 8843 already in use", 3))
+        );
+        assert_eq!(
+            parse_failure(r#"{"reason": " venv missing ", "ts": 1760000000, "count": 1}"#),
+            Some(failure("venv missing", 1))
+        );
+        for bad in [
+            "",
+            "garbage",
+            "[]",
+            r#"{"reason": "x", "ts": 1}"#,
+            r#"{"reason": "", "ts": 1, "count": 1}"#,
+            r#"{"reason": "x", "ts": "now", "count": 1}"#,
+            r#"{"reason": "x", "ts": 1, "count": 0}"#,
+            r#"{"reason": "x", "ts": 1, "count": -2}"#,
+            r#"{"reason": 7, "ts": 1, "count": 1}"#,
+        ] {
+            assert_eq!(parse_failure(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn unreachable_engines_show_why_they_are_failing() {
+        let omlx_down = OmlxStatus {
+            failure: Some(failure("venv missing: /x/omlx/bin/python", 1)),
+            ..OmlxStatus::default()
+        };
+        assert_eq!(
+            omlx_label(&omlx_down),
+            "oMLX failing: venv missing: /x/omlx/bin/python"
+        );
+        let ds4_down = Ds4Status {
+            failure: Some(failure("model file missing: /m.gguf", 4)),
+            ..Ds4Status::default()
+        };
+        assert_eq!(
+            ds4_label(&ds4_down),
+            "DwarfStar failing: model file missing: /m.gguf (x4)"
+        );
+        let long = OmlxStatus {
+            failure: Some(failure(&"a".repeat(200), 1)),
+            ..OmlxStatus::default()
+        };
+        assert_eq!(
+            omlx_label(&long),
+            format!("oMLX failing: {}...", "a".repeat(FAILURE_REASON_MAX))
+        );
+        // a stale marker never hides a healthy engine
+        let mut up = omlx(OMLX_BODY);
+        up.failure = Some(failure("old", 1));
+        assert!(omlx_label(&up).starts_with("oMLX: 1 loaded"));
+        let mut up = ds4(json!({"loaded": false, "pid": null}));
+        up.failure = Some(failure("old", 1));
+        assert_eq!(ds4_label(&up), "DwarfStar: stopped");
     }
 
     #[test]
