@@ -118,8 +118,8 @@ class OmlxClient:
             ceiling_bytes = _int(body.get("final_ceiling")),
         )
 
-    async def chat_model_ids(self) -> list[str]:
-        """Ids the server lists on ``/v1/models`` minus embedding and helper (drafter) models."""
+    async def chat_model_ids(self, *, status: Optional[OmlxStatus] = None) -> list[str]:
+        """Ids the server lists on ``/v1/models`` minus embedding and helper (drafter) models. Pass an already fetched ``status`` to spare a second round trip."""
         try:
             async with self._client() as client:
                 response = await client.get("/v1/models")
@@ -132,7 +132,7 @@ class OmlxClient:
             ]
         except (httpx.HTTPError, ValueError, AttributeError, TypeError):
             return []
-        status = await self.status()
+        status = status if status is not None else await self.status()
         kept = []
         for model_id in ids:
             row = _row_for(status.models, model_id) if status.reachable else None
