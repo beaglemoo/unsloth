@@ -8,7 +8,8 @@
 #   2. Create or refresh the user-side venvs in ~/.unsloth/engines:
 #        omlx/          oMLX installed non-editable from the submodule with its pinned deps
 #        ds4-ondemand/  fastapi/uvicorn/httpx for ds4_ondemand.py
-#   3. Write ~/.unsloth/engines/engines.toml only if it is missing.
+#   3. Write ~/.unsloth/engines/engines.toml if it is missing. An existing one is kept, but an
+#      old generated file is migrated (see --migrate-config).
 #
 # Idempotent: work is skipped when the submodule commit recorded in
 # ~/.unsloth/engines/.provisioned still matches and the outputs exist.
@@ -22,10 +23,20 @@
 # this safely), or --swap-only. <venv>.old is kept for rollback (--rollback-venvs).
 #
 # Usage: studio/scripts/build-engines-mac.sh [--force] [--skip-ds4] [--skip-venvs]
-#                                            [--stage-only | --swap-only | --rollback-venvs [name...]]
+#                                            [--stage-only | --swap-only | --rollback-venvs [name...]
+#                                             | --migrate-config]
 #   --stage-only       build and validate the venvs in <venv>.new, do not swap
 #   --swap-only        swap the venvs already staged (no build, no submodule checks)
 #   --rollback-venvs   put <venv>.old back (names: omlx, ds4-ondemand; default both)
+#   --migrate-config   only migrate an existing engines.toml (the full and --stage-only runs do it
+#                      too; update-engines-mac.sh calls this explicitly). Two independent edits:
+#                        [ds4] host = "0.0.0.0" (the old generated value) -> "127.0.0.1", unless the
+#                          [ds4] section has a "# keep-lan" comment or `lan = true` (a deliberate
+#                          LAN choice is never overridden)
+#                        [omlx.env] OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" when absent
+#                      The original is copied to engines.toml.bak-<timestamp> first, every change is
+#                      logged, comments and other keys are preserved, and a second run is a no-op.
+#                      Helpers read the file when they start, so it takes effect at their next restart.
 #
 # Environment:
 #   UNSLOTH_ENGINES_HOME     engines home (default ~/.unsloth/engines)
@@ -47,6 +58,7 @@ for arg in "$@"; do
     --stage-only) MODE=stage ;;
     --swap-only) MODE=swap ;;
     --rollback-venvs) MODE=rollback ;;
+    --migrate-config) MODE=migrate ;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     omlx|ds4-ondemand)
       [ "$MODE" = rollback ] || { echo "unexpected argument: $arg" >&2; exit 2; }
@@ -356,10 +368,146 @@ rollback_venv() { # <live dir>
   fi
 }
 
+# Brings an engines.toml written by an older release up to date, without touching anything the
+# user chose. Line based, so comments, ordering and every other key survive. Two independent edits:
+#   [ds4] host = "0.0.0.0" (the old generated value, exactly) becomes "127.0.0.1", unless the
+#     [ds4] section carries an opt-out: a comment containing "keep-lan" or the key `lan = true`
+#   [omlx.env] gains OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" when the key is absent
+# Nothing is written when there is nothing to change, so a second run is a no-op; otherwise the
+# original is copied to engines.toml.bak-<timestamp> first. The result must still parse (tomllib).
+migrate_config() {
+  local cfg="$ENGINES_HOME/engines.toml"
+  if [ ! -e "$cfg" ]; then
+    log "engines.toml: not present, nothing to migrate"
+    return 0
+  fi
+  python3 - "$cfg" "$(date +%Y%m%d-%H%M%S)" <<'PY'
+import os
+import re
+import shutil
+import sys
+
+cfg, ts = sys.argv[1:3]
+try:
+    import tomllib
+except ImportError:  # python < 3.11: skip the validation, the edit is still conservative
+    tomllib = None
+
+
+def say(msg):
+    print(f"[engines] engines.toml: {msg}", flush=True)
+
+
+def parses(text):
+    if tomllib is None:
+        return True
+    try:
+        tomllib.loads(text)
+        return True
+    except tomllib.TOMLDecodeError:
+        return False
+
+
+with open(cfg, newline="") as fh:
+    text = fh.read()
+if not parses(text):
+    say("is not valid TOML; migration skipped, file left untouched")
+    sys.exit(0)
+
+lines = text.splitlines(keepends=True)
+eol = "\r\n" if "\r\n" in text else "\n"
+HEADER = re.compile(r"^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(#.*)?$")
+
+
+def span(name):
+    """(header index, end index exclusive) of a [section], or None."""
+    start = None
+    for i, line in enumerate(lines):
+        m = HEADER.match(line.rstrip("\r\n"))
+        if not m:
+            continue
+        if start is not None:
+            return start, i
+        if re.sub(r"\s+", "", m.group(1)) == name:
+            start = i
+    return (start, len(lines)) if start is not None else None
+
+
+changes = []
+LAN_OPT_OUT = re.compile(r"^\s*lan\s*=\s*true\s*(#.*)?$|#.*keep-lan", re.IGNORECASE)
+OLD_HOST = re.compile(r'^(\s*host\s*=\s*)"0\.0\.0\.0"(\s*(#.*)?)$')
+
+ds4 = span("ds4")
+if ds4:
+    body = [line.rstrip("\r\n") for line in lines[ds4[0] + 1:ds4[1]]]
+    hosts = [i for i in range(ds4[0] + 1, ds4[1]) if OLD_HOST.match(lines[i].rstrip("\r\n"))]
+    if hosts:
+        if any(LAN_OPT_OUT.search(line) for line in body):
+            say('[ds4] host = "0.0.0.0" kept: an opt-out marker (keep-lan / lan = true) is present')
+        else:
+            for i in hosts:
+                raw = lines[i]
+                tail = raw[len(raw.rstrip("\r\n")):]
+                lines[i] = OLD_HOST.sub(r'\1"127.0.0.1"\2', raw.rstrip("\r\n")) + tail
+            changes.append(
+                '[ds4] host "0.0.0.0" -> "127.0.0.1": the launcher no longer listens on the LAN '
+                "(add a '# keep-lan' comment in [ds4] to keep LAN access)"
+            )
+
+PEER = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
+PEER_NOTE = "# oMLX asks the ds4 launcher to unload when it needs memory (added by the engines.toml migration)."
+env = span("omlx.env")
+has_peer = env and any(
+    re.match(r"""^\s*["']?OMLX_PEER_EVICT_URLS["']?\s*=""", line) for line in lines[env[0] + 1:env[1]]
+)
+if not has_peer:
+    if env:
+        at = env[0]
+        for i in range(env[0] + 1, env[1]):
+            stripped = lines[i].strip()
+            if stripped and not stripped.startswith("#"):
+                at = i
+        if not lines[at].endswith("\n"):
+            lines[at] += eol
+        lines[at + 1:at + 1] = [PEER_NOTE + eol, PEER + eol]
+    else:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += eol
+        lines += [eol, "[omlx.env]" + eol, PEER_NOTE + eol, PEER + eol]
+    changes.append(f"[omlx.env] added {PEER}")
+
+if not changes:
+    say("up to date, nothing to migrate")
+    sys.exit(0)
+
+new_text = "".join(lines)
+if not parses(new_text):
+    say("the migrated file would not parse; left untouched")
+    sys.exit(1)
+
+backup = f"{cfg}.bak-{ts}"
+n = 0
+while os.path.exists(backup):
+    n += 1
+    backup = f"{cfg}.bak-{ts}-{n}"
+shutil.copy2(cfg, backup)
+say(f"backup written: {backup}")
+tmp = f"{cfg}.migrate.tmp"
+with open(tmp, "w", newline="") as fh:
+    fh.write(new_text)
+shutil.copymode(cfg, tmp)
+os.replace(tmp, cfg)
+for change in changes:
+    say(f"migrated {change}")
+say("takes effect when the helpers next restart")
+PY
+}
+
 write_default_config() {
   local cfg="$ENGINES_HOME/engines.toml"
   if [ -e "$cfg" ]; then
-    log "engines.toml: present, left untouched"
+    log "engines.toml: present, keeping your settings"
+    migrate_config
   else
     install -m 0644 "$WRAPPERS/engines.default.toml" "$cfg"
     log "engines.toml: wrote defaults to $cfg"
@@ -377,6 +525,9 @@ main() {
       swap_venv "$ENGINES_HOME/omlx"
       [ "$PENDING_SWAPS" = 0 ] || die "$PENDING_SWAPS staged venv(s) not swapped (an engine is running)"
       log "swap done"
+      return 0 ;;
+    migrate)
+      migrate_config
       return 0 ;;
     rollback)
       local name
