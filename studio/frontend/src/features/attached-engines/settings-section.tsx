@@ -21,7 +21,11 @@ import {
   engineHelpersToggle,
 } from "./engine-helpers-state";
 import type { AttachedEnginesSettings } from "./types";
-import { removeAttachedProviderRows } from "./use-attached-engines";
+import { settingsSaveSyncAction } from "./settings-save-sync";
+import {
+  removeAttachedProviderRows,
+  resyncAttachedProviderRows,
+} from "./use-attached-engines";
 
 const INFO_CLASS =
   "max-w-[calc(260px*var(--ui-space-scale,1))] text-right text-xs text-muted-foreground";
@@ -101,10 +105,11 @@ export function AttachedEnginesSettingsSection() {
       setSettings(saved);
       setOmlxUrl(null);
       setDs4Url(null);
-      // Turning the flag off must also take the seeded rows out of the picker.
-      if (update.enabled === false && !saved.enabled) {
-        await removeAttachedProviderRows();
-      }
+      // Turning the flag off takes the seeded rows out of the picker; a changed URL rewrites
+      // their base_url, which the poller's models_hash would never trigger.
+      const action = settingsSaveSyncAction(settings, saved, update);
+      if (action === "remove") await removeAttachedProviderRows();
+      else if (action === "sync") await resyncAttachedProviderRows();
     } catch (saveError) {
       setError(
         saveError instanceof Error
