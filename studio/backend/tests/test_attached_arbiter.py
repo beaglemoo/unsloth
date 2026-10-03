@@ -629,10 +629,271 @@ def test_renewal_scheduler_runs_at_sixty_seconds_and_retries_without_dropping_ho
         monkeypatch.setattr(lease.client, "_transport", httpx.MockTransport(fail_replacement))
         allow_renewal.set()
         await retried.wait()
-        assert durations == [60, 5]
+        assert durations == [60, arbiter.HOLD_RETRY_S]
         assert lease.hold_id == original_id and original_id in state.holds
         assert lease.error is not None
         await lease.release()
         await original_sleep(0)
+
+    asyncio.run(exercise())
+
+
+# --- Hold loss: renewal failure through expiry, recovery, launcher restart ---------------
+
+
+class VirtualTime:
+    """Deterministic clock for the lease renewer: sleeps park until advance() reaches them."""
+
+    def __init__(self, monkeypatch):
+        self.now = 0.0
+        self.delays: list[float] = []
+        self._sleepers: list[tuple[float, int, asyncio.Future]] = []
+        self._seq = 0
+        self._real_sleep = asyncio.sleep
+        monkeypatch.setattr(arbiter, "_clock", lambda: self.now)
+        monkeypatch.setattr(arbiter.asyncio, "sleep", self._sleep)
+
+    async def _sleep(self, delay):
+        self.delays.append(delay)
+        future = asyncio.get_running_loop().create_future()
+        self._seq += 1
+        self._sleepers.append((self.now + delay, self._seq, future))
+        await future
+
+    async def settle(self):
+        for _ in range(30):
+            await self._real_sleep(0)
+
+    async def advance_to(self, target: float):
+        while True:
+            due = sorted((s for s in self._sleepers if s[0] <= target), key = lambda s: s[:2])
+            if not due:
+                break
+            wake, _, future = due[0]
+            self._sleepers.remove(due[0])
+            self.now = max(self.now, wake)
+            future.set_result(None)
+            await self.settle()
+        self.now = target
+        await self.settle()
+
+
+class LauncherFake(Engines):
+    """Engines with launcher semantics: holds expire in virtual time, DELETE of an unknown id is
+    404, renewal can be made to fail, and the launcher can restart (persisting its holds)."""
+
+    def __init__(self, vt: VirtualTime, **kw):
+        super().__init__(**kw)
+        self.vt = vt
+        self.expiry: dict[str, float] = {}
+        self.fail_hold = False
+
+    def ds4_handler(self, request: httpx.Request) -> httpx.Response:
+        for hold_id in [h for h, t in self.expiry.items() if t <= self.vt.now]:
+            self.expiry.pop(hold_id)
+            self.holds.pop(hold_id, None)
+        if self.ds4_up and request.method == "POST" and request.url.path == "/admin/hold" and self.fail_hold:
+            self.log.append("ds4 POST /admin/hold (failed)")
+            return httpx.Response(503)
+        if (self.ds4_up and request.method == "DELETE"
+                and request.url.path.rsplit("/", 1)[-1] not in self.holds):
+            self.log.append(f"ds4 DELETE {request.url.path} (404)")
+            return httpx.Response(404, json = {"detail": "no such hold"})
+        response = super().ds4_handler(request)
+        if request.method == "POST" and request.url.path == "/admin/hold" and response.status_code == 200:
+            body = __import__("json").loads(request.content)
+            self.expiry[response.json()["hold_id"]] = self.vt.now + body["ttl_s"]
+        if request.method == "DELETE":
+            self.expiry.pop(request.url.path.rsplit("/", 1)[-1], None)
+        return response
+
+    def restart(self, *, persist_holds: bool = True):
+        """Launcher restart: ds4-server dies with it; holds survive only when persisted."""
+        self.ds4_loaded, self.ds4_pid = False, None
+        if not persist_holds:
+            self.holds.clear()
+            self.expiry.clear()
+
+    def start_attempt(self) -> int:
+        return self.ds4_handler(httpx.Request("POST", DS4_URL + "/admin/start")).status_code
+
+
+def _loss_notices():
+    return [n for n in arbiter.recent_notices() if arbiter.PROTECTION_LOST in n["actions"]]
+
+
+def test_failed_renewals_through_expiry_alert_then_stop_a_ds4_that_started(monkeypatch):
+    async def exercise():
+        vt = VirtualTime(monkeypatch)
+        state = LauncherFake(vt, ds4_loaded = False)
+        install(monkeypatch, state)
+        lease = await arbiter.HoldLease.create(DS4_URL, "training")
+        await vt.settle()
+        assert lease.deadline == 120
+        await vt.advance_to(59)
+        state.fail_hold = True
+        await vt.advance_to(119)
+        # Blocked just before the original TTL, with retries every 10 s since t=60.
+        assert state.start_attempt() == 503
+        assert lease.lost is False and _loss_notices() == []
+        assert vt.delays[:2] == [60, 10]
+        await vt.advance_to(121)
+        assert lease.lost is True and len(_loss_notices()) == 1
+        # The launcher purged the lapsed hold, so a cold start is admitted ...
+        assert state.start_attempt() == 200 and state.ds4_loaded
+        # ... and the next retry stops it, without touching the lease/training.
+        await vt.advance_to(131)
+        assert state.ds4_loaded is False
+        assert "ds4 POST /admin/stop" in state.log
+        assert lease.closed is False and lease.lost is True
+        assert len(_loss_notices()) == 1
+        assert any("Stopped DwarfStar" in a for n in arbiter.recent_notices() for a in n["actions"])
+        # Retry cadence: 60 once, then every 10 s.
+        assert set(vt.delays[1:]) == {10}
+        await lease.release()
+        await vt.settle()
+
+    asyncio.run(exercise())
+
+
+def test_busy_ds4_after_loss_is_noticed_once_and_stopped_when_idle(monkeypatch):
+    async def exercise():
+        vt = VirtualTime(monkeypatch)
+        state = LauncherFake(vt, ds4_loaded = False)
+        install(monkeypatch, state)
+        lease = await arbiter.HoldLease.create(DS4_URL, "local_load")
+        await vt.settle()
+        state.fail_hold = True
+        await vt.advance_to(121)
+        state.start_attempt()
+        state.ds4_in_flight = 1
+        await vt.advance_to(160)
+        busy = [n for n in arbiter.recent_notices() if arbiter.PROTECTION_BUSY in n["actions"]]
+        assert len(busy) == 1
+        assert state.ds4_loaded is True  # never stopped mid-reply
+        assert state.log.count("ds4 POST /admin/stop") >= 2  # kept retrying
+        state.ds4_in_flight = 0
+        await vt.advance_to(175)
+        assert state.ds4_loaded is False
+        await lease.release()
+        await vt.settle()
+
+    asyncio.run(exercise())
+
+
+def test_recovery_when_renewal_works_again_restores_the_barrier(monkeypatch):
+    async def exercise():
+        vt = VirtualTime(monkeypatch)
+        state = LauncherFake(vt, ds4_loaded = False)
+        install(monkeypatch, state)
+        lease = await arbiter.HoldLease.create(DS4_URL, "training")
+        await vt.settle()
+        state.fail_hold = True
+        await vt.advance_to(121)
+        assert lease.lost is True
+        assert state.start_attempt() == 200 and state.ds4_loaded
+        state.fail_hold = False
+        await vt.advance_to(131)
+        # The renewal created a brand-new hold, ds4 was stopped, and protection is back.
+        assert lease.lost is False and lease.error is None
+        assert state.ds4_loaded is False
+        assert lease.deadline == 130 + arbiter.HOLD_TTL_S
+        assert lease.hold_id in state.holds
+        assert state.start_attempt() == 503
+        # Back on the normal 60 s cadence, and still silent after the one notice.
+        assert vt.delays[-1] == arbiter.HOLD_RENEW_S
+        await vt.advance_to(300)
+        assert state.start_attempt() == 503
+        assert len(_loss_notices()) == 1
+        await lease.release()
+        await vt.settle()
+
+    asyncio.run(exercise())
+
+
+def test_recovery_with_ds4_busy_keeps_enforcing_until_it_can_stop(monkeypatch):
+    async def exercise():
+        vt = VirtualTime(monkeypatch)
+        state = LauncherFake(vt, ds4_loaded = False)
+        install(monkeypatch, state)
+        lease = await arbiter.HoldLease.create(DS4_URL, "training")
+        await vt.settle()
+        state.fail_hold = True
+        await vt.advance_to(121)
+        state.start_attempt()
+        state.ds4_in_flight = 1
+        state.fail_hold = False
+        await vt.advance_to(131)
+        assert lease.lost is True and state.ds4_loaded is True
+        state.ds4_in_flight = 0
+        await vt.advance_to(141)
+        assert lease.lost is False and state.ds4_loaded is False
+        await lease.release()
+        await vt.settle()
+
+    asyncio.run(exercise())
+
+
+def test_launcher_restart_mid_lease_keeps_the_barrier_and_never_flags_a_loss(monkeypatch):
+    async def exercise():
+        vt = VirtualTime(monkeypatch)
+        state = LauncherFake(vt, ds4_loaded = False)
+        install(monkeypatch, state)
+        lease = await arbiter.HoldLease.create(DS4_URL, "training")
+        await vt.settle()
+        await vt.advance_to(61)
+        assert lease.deadline == 60 + arbiter.HOLD_TTL_S
+        # The launcher is down at the t=120 renewal, then returns with its persisted holds.
+        await vt.advance_to(100)
+        state.ds4_up = False
+        await vt.advance_to(125)
+        assert lease.error is not None and lease.lost is False
+        state.ds4_up = True
+        state.restart(persist_holds = True)
+        assert state.start_attempt() == 503
+        await vt.advance_to(131)
+        assert lease.error is None and lease.lost is False
+        assert state.start_attempt() == 503
+        assert _loss_notices() == []
+        await lease.release()
+        await vt.settle()
+
+    asyncio.run(exercise())
+
+
+def test_launcher_restart_that_forgot_the_hold_is_recovered_and_404_is_ignored(monkeypatch):
+    async def exercise():
+        vt = VirtualTime(monkeypatch)
+        state = LauncherFake(vt, ds4_loaded = False)
+        install(monkeypatch, state)
+        lease = await arbiter.HoldLease.create(DS4_URL, "training")
+        await vt.settle()
+        await vt.advance_to(30)
+        state.restart(persist_holds = False)
+        assert state.start_attempt() == 200
+        await vt.advance_to(61)
+        # Renewal at t=60: new hold accepted, DELETE of the forgotten id answers 404 and is ignored.
+        assert any(entry.endswith("(404)") for entry in state.log)
+        assert lease.error is None and lease.hold_id in state.holds
+        await lease.release()
+        await vt.settle()
+
+    asyncio.run(exercise())
+
+
+def test_a_late_successful_renewal_after_a_lapse_is_still_a_loss(monkeypatch):
+    async def exercise():
+        vt = VirtualTime(monkeypatch)
+        state = LauncherFake(vt, ds4_loaded = False)
+        install(monkeypatch, state)
+        lease = await arbiter.HoldLease.create(DS4_URL, "training")
+        await vt.settle()
+        # A stalled loop: the renewal wakes only after the deadline, then succeeds.
+        vt.now = 200
+        await vt.advance_to(200)
+        await vt.advance_to(261)
+        assert len(_loss_notices()) == 1
+        await lease.release()
+        await vt.settle()
 
     asyncio.run(exercise())
