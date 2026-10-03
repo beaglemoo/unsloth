@@ -625,7 +625,8 @@ def test_renewal_scheduler_runs_at_sixty_seconds_and_retries_without_dropping_ho
                 return httpx.Response(503)
             return original_handler(request)
 
-        monkeypatch.setattr(state, "ds4_handler", fail_replacement)
+        # The existing lease client captured its transport when created.
+        monkeypatch.setattr(lease.client, "_transport", httpx.MockTransport(fail_replacement))
         allow_renewal.set()
         await retried.wait()
         assert durations == [60, 5]
