@@ -1,5 +1,7 @@
 {
   "bundle": {
+    "createUpdaterArtifacts": false,
+    "targets": ["app"],
     "resources": {
       "engines-staging/": "engines/"
     },

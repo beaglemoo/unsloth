@@ -20,6 +20,8 @@
 	<true/>
 	<key>ProcessType</key>
 	<string>Interactive</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
 	<key>ExitTimeOut</key>
 	<integer>120</integer>
 	<key>LimitLoadToSessionType</key>
