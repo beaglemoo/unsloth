@@ -24,6 +24,60 @@ pub fn new_update_state() -> UpdateState {
 
 const UPDATE_ARGS: &[&str] = &["studio", "update"];
 
+/// The fork checkout this build installs its backend from, baked in by build-fork-mac.sh.
+pub(crate) const FORK_REPO: Option<&str> = option_env!("UNSLOTH_FORK_REPO");
+
+/// How to invoke `unsloth studio update`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct UpdatePlan {
+    pub(crate) args: Vec<&'static str>,
+    pub(crate) env: Vec<(&'static str, String)>,
+}
+
+/// The fork never updates from PyPI: it would replace the fork's backend with the release
+/// wheel (which lacks the attached-engines routes). Under the fork feature the update is
+/// always `--local` from the baked checkout, installed non-editable so the running backend
+/// is not tied to the git working tree; without that checkout it refuses.
+pub(crate) fn plan_update(
+    fork: bool,
+    baked_repo: Option<&str>,
+    has_pyproject: impl Fn(&std::path::Path) -> bool,
+) -> Result<UpdatePlan, String> {
+    if !fork {
+        return Ok(UpdatePlan {
+            args: UPDATE_ARGS.to_vec(),
+            env: Vec::new(),
+        });
+    }
+    let repo = baked_repo.map(str::trim).filter(|r| !r.is_empty()).ok_or_else(|| {
+        "This fork build does not know its source checkout (UNSLOTH_FORK_REPO was not set at \
+         build time), so it will not update or repair the backend from PyPI. Rebuild with \
+         studio/scripts/build-fork-mac.sh."
+            .to_string()
+    })?;
+    if !has_pyproject(&std::path::Path::new(repo).join("pyproject.toml")) {
+        return Err(format!(
+            "This fork build installs its backend from {repo}, but no checkout exists there, so \
+             it will not update or repair the backend from PyPI. Restore the checkout or run \
+             studio/scripts/build-fork-mac.sh --install."
+        ));
+    }
+    let mut args = UPDATE_ARGS.to_vec();
+    args.push("--local");
+    Ok(UpdatePlan {
+        args,
+        env: vec![
+            ("STUDIO_LOCAL_REPO", repo.to_string()),
+            ("STUDIO_LOCAL_NONEDITABLE", "1".to_string()),
+        ],
+    })
+}
+
+/// The plan for this build: the fork feature is a compile-time switch.
+pub(crate) fn current_update_plan() -> Result<UpdatePlan, String> {
+    plan_update(cfg!(feature = "attached-engines"), FORK_REPO, |p| p.is_file())
+}
+
 pub(crate) enum UpdateKind {
     Backend,
     Repair(String),
@@ -99,7 +153,11 @@ fn spawn_update(
     }
     update.intentional_stop = false;
 
-    let mut cmd = build_update_command(bin, UPDATE_ARGS)?;
+    let plan = current_update_plan()?;
+    let mut cmd = build_update_command(bin, &plan.args)?;
+    for (name, value) in &plan.env {
+        cmd.env(name, value);
+    }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     // A login-started desktop inherits C:\Windows\system32, which the CLI refuses to run from.
@@ -567,6 +625,56 @@ pub fn stop_update(state: &UpdateState) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn upstream_builds_update_from_the_release_channel() {
+        let plan = plan_update(false, Some("/ignored"), |_| false).unwrap();
+        assert_eq!(plan.args, vec!["studio", "update"]);
+        assert!(plan.env.is_empty());
+    }
+
+    #[test]
+    fn fork_builds_update_local_non_editable_from_the_baked_checkout() {
+        let plan = plan_update(true, Some("/src/unsloth"), |p| {
+            p == std::path::Path::new("/src/unsloth/pyproject.toml")
+        })
+        .unwrap();
+        assert_eq!(plan.args, vec!["studio", "update", "--local"]);
+        assert_eq!(
+            plan.env,
+            vec![
+                ("STUDIO_LOCAL_REPO", "/src/unsloth".to_string()),
+                ("STUDIO_LOCAL_NONEDITABLE", "1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn fork_builds_refuse_instead_of_updating_from_pypi() {
+        for baked in [None, Some(""), Some("   ")] {
+            let error = plan_update(true, baked, |_| true).unwrap_err();
+            assert!(error.contains("UNSLOTH_FORK_REPO"), "{error}");
+            assert!(error.contains("PyPI"), "{error}");
+        }
+        let error = plan_update(true, Some("/gone"), |_| false).unwrap_err();
+        assert!(error.contains("/gone"), "{error}");
+        assert!(error.contains("PyPI"), "{error}");
+    }
+
+    #[cfg(not(feature = "attached-engines"))]
+    #[test]
+    fn the_current_plan_is_upstream_without_the_fork_feature() {
+        assert_eq!(current_update_plan().unwrap().args, vec!["studio", "update"]);
+    }
+
+    #[cfg(feature = "attached-engines")]
+    #[test]
+    fn the_current_plan_never_falls_back_to_the_release_channel() {
+        match current_update_plan() {
+            Ok(plan) => assert!(plan.args.contains(&"--local")),
+            Err(error) => assert!(error.contains("PyPI")),
+        }
+    }
 
     #[test]
     fn a_repair_is_running_until_its_claim_drops() {

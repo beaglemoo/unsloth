@@ -192,6 +192,36 @@ fn should_emit_repair_failed(msg: &str) -> bool {
     !msg.contains("NEEDS_ELEVATION")
 }
 
+/// Whether a repair that the update could not finish may run the bundled installer. The
+/// fork never may: the installer puts the PyPI wheel over the fork backend.
+fn repair_may_run_installer(fork: bool) -> bool {
+    !fork
+}
+
+/// Decided before the backend is stopped, so a refused repair changes nothing. The fork
+/// repairs only through `update --local` from its checkout; a forced reinstall (Settings'
+/// "Repair installation") is the bundled installer and is refused outright.
+fn repair_refusal(
+    fork: bool,
+    force_installer: bool,
+    plan: &Result<update::UpdatePlan, String>,
+) -> Option<String> {
+    if !fork {
+        return None;
+    }
+    if force_installer && !repair_may_run_installer(fork) {
+        return Some(install::FORK_INSTALLER_REFUSAL.to_string());
+    }
+    plan.as_ref().err().cloned()
+}
+
+/// What a fork repair reports when the update could not fix the install.
+fn fork_repair_failure(reason: &str) -> String {
+    format!(
+        "Fork repair did not complete: {reason}. The bundled installer is never used here because it would install the PyPI release. Run studio/scripts/build-fork-mac.sh --install."
+    )
+}
+
 fn external_conflict_message(conflict: &crate::preflight::ExternalBackendConflict) -> String {
     match conflict.reason.as_str() {
         "desktop_owned_backend_active" => format!(
@@ -1083,6 +1113,13 @@ pub async fn start_managed_repair(
 
     let diagnostics_state = diagnostics.inner().clone();
 
+    let fork = cfg!(feature = "attached-engines");
+    if let Some(msg) = repair_refusal(fork, force_installer, &update::current_update_plan()) {
+        error!("Managed repair refused: {}", msg);
+        let _ = app.emit("repair-failed", &msg);
+        return Err(msg);
+    }
+
     let owned_port = owned_backend_port(&backend_state)?;
     let has_owned = has_owned_backend(&backend_state)?;
     if has_owned {
@@ -1132,6 +1169,18 @@ pub async fn start_managed_repair(
         }
         // The forced path already emitted its own progress line and ran no update.
         Ok(()) if force_installer => {}
+        Ok(()) if !repair_may_run_installer(fork) => {
+            let msg = fork_repair_failure("the update finished but the install is still not desktop-ready");
+            error!("{}", msg);
+            diagnostics::finish_repair_group(
+                &diagnostics_state,
+                &repair_group_id,
+                "failed",
+                Some(msg.clone()),
+            );
+            let _ = app.emit("repair-failed", &msg);
+            return Err(msg);
+        }
         Ok(()) => {
             warn!("Managed repair update finished, but preflight is still not ready; falling back to installer");
             let _ = app.emit(
@@ -1167,6 +1216,18 @@ pub async fn start_managed_repair(
                 return Err(msg);
             }
 
+            if !repair_may_run_installer(fork) {
+                let msg = fork_repair_failure(&format!("the update failed ({msg})"));
+                error!("{}", msg);
+                diagnostics::finish_repair_group(
+                    &diagnostics_state,
+                    &repair_group_id,
+                    "failed",
+                    Some(msg.clone()),
+                );
+                let _ = app.emit("repair-failed", &msg);
+                return Err(msg);
+            }
             warn!(
                 "Managed repair update failed, falling back to bundled installer: {}",
                 msg
@@ -1352,6 +1413,52 @@ mod tests {
         assert!(super::should_emit_repair_failed(
             "Installer exited with code 1"
         ));
+    }
+
+    fn ok_plan() -> Result<crate::update::UpdatePlan, String> {
+        crate::update::plan_update(true, Some("/src/unsloth"), |_| true)
+    }
+
+    #[test]
+    fn only_upstream_repairs_may_run_the_bundled_installer() {
+        assert!(super::repair_may_run_installer(false));
+        assert!(!super::repair_may_run_installer(true));
+    }
+
+    #[test]
+    fn upstream_repair_is_never_refused_up_front() {
+        let missing = crate::update::plan_update(true, None, |_| true);
+        assert!(super::repair_refusal(false, false, &missing).is_none());
+        assert!(super::repair_refusal(false, true, &missing).is_none());
+    }
+
+    #[test]
+    fn fork_repair_runs_when_the_checkout_exists() {
+        assert!(super::repair_refusal(true, false, &ok_plan()).is_none());
+    }
+
+    #[test]
+    fn fork_repair_refuses_without_a_checkout_and_never_names_the_installer_as_a_fallback() {
+        let missing = crate::update::plan_update(true, Some("/gone"), |_| false);
+        let msg = super::repair_refusal(true, false, &missing).unwrap();
+        assert!(msg.contains("/gone") && msg.contains("PyPI"), "{msg}");
+        let unset = crate::update::plan_update(true, None, |_| true);
+        let msg = super::repair_refusal(true, false, &unset).unwrap();
+        assert!(msg.contains("UNSLOTH_FORK_REPO"), "{msg}");
+    }
+
+    #[test]
+    fn fork_forced_reinstall_is_the_bundled_installer_and_is_refused() {
+        let msg = super::repair_refusal(true, true, &ok_plan()).unwrap();
+        assert_eq!(msg, crate::install::FORK_INSTALLER_REFUSAL);
+    }
+
+    #[test]
+    fn fork_repair_failure_points_at_the_fork_install() {
+        let msg = super::fork_repair_failure("the update failed (Update exited with code 1)");
+        assert!(msg.contains("Update exited with code 1"));
+        assert!(msg.contains("build-fork-mac.sh --install"));
+        assert!(msg.contains("never used"));
     }
 
     #[test]
