@@ -53,7 +53,6 @@ import {
 import {
   type ExternalReasoningCapabilities,
   externalReasoningTakesEffort,
-  getExternalMaxOutputTokens,
   resolveExternalReasoningEffort,
 } from "../provider-capabilities";
 import {
@@ -4804,29 +4803,9 @@ export const useChatRuntimeStore = create<ChatRuntimeStore>((set, get) => ({
         checkpointChanged,
         options?.maxTokensCap,
       );
-      // Clamp maxTokens to the new model's cap when switching into an external model, so a value
-      // carried over from a local session cannot exceed the slider's max.
-      let nextMaxTokens = baseParams.maxTokens;
-      if (checkpointChanged && isExternalModelId(modelId)) {
-        const parsed = parseExternalModelId(modelId);
-        const provider = parsed
-          ? useExternalProvidersStore
-              .getState()
-              .providers.find((p) => p.id === parsed.providerId)
-          : null;
-        // Only when the connection is known: a checkpoint restored before the provider store hydrates
-        // reads the 32,768 fallback and lowers a value nothing puts back.
-        if (provider) {
-          const cap = getExternalMaxOutputTokens(
-            provider.providerType,
-            parsed?.modelId,
-            provider.maxOutputTokens,
-          );
-          if (nextMaxTokens > cap) {
-            nextMaxTokens = cap;
-          }
-        }
-      }
+      // Max Tokens is bounded when the request is built, not here: a value saved on another
+      // model must survive a visit to a model with a smaller cap.
+      const nextMaxTokens = baseParams.maxTokens;
       const nextGgufVariant = ggufVariant ?? null;
       const nextDeepResearchEnabled = clampsDeepResearch
         ? false

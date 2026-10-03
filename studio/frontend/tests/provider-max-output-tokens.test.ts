@@ -21,12 +21,8 @@ test("all max-output cap callers pass the selected connection override", () => {
     settings,
     /getExternalMaxOutputTokens\([\s\S]*?activeExternalProvider\?\.maxOutputTokens/,
   );
-  assert.match(
-    runtime,
-    // inside the `if (provider)` guard, so no optional chain: an unresolved
-    // provider must not clamp at all, rather than clamp to the fallback.
-    /if \(provider\) \{[\s\S]*?getExternalMaxOutputTokens\([\s\S]*?provider\.maxOutputTokens/,
-  );
+  // the store no longer clamps: the saved value is only bounded on the wire
+  assert.doesNotMatch(runtime, /getExternalMaxOutputTokens/);
   assert.match(
     adapter,
     /getExternalMaxOutputTokens\([\s\S]*?externalProvider\?\.maxOutputTokens/,
@@ -105,14 +101,19 @@ test("preset application clamps live Max Tokens to the active external cap", () 
   );
 });
 
-test("lowering an active external cap immediately clamps live Max Tokens", () => {
+test("a lower cap never rewrites the saved Max Tokens", () => {
   const settings = source("chat-settings-sheet.tsx");
+  const runtime = source("stores/chat-runtime-store.ts");
+  const adapter = source("api/chat-adapter.ts");
 
-  // `resolveExternalMaxTokensClamp` decides (unit-tested in the guards test); this
-  // asserts the effect still asks it, still passes the availability inputs, and still
-  // writes back through the preset-source bookkeeping.
+  // no effect writes a lowered value back through onParamsChange
+  assert.doesNotMatch(settings, /resolveExternalMaxTokensClamp/);
+  assert.doesNotMatch(settings, /maxTokens: clampedMaxTokens/);
+  // the external switch keeps the saved value
+  assert.match(runtime, /const nextMaxTokens = baseParams\.maxTokens;/);
+  // the request is where the attached engine's ceiling applies
   assert.match(
-    settings,
-    /useEffect\(\(\) => \{\s*const clampedMaxTokens = resolveExternalMaxTokensClamp\(\{[\s\S]*?settingsHydrated,[\s\S]*?hasActiveExternalProvider: activeExternalProvider != null,[\s\S]*?isExternalModel,[\s\S]*?maxTokens: params\.maxTokens,[\s\S]*?maxTokensMax,[\s\S]*?\}\);[\s\S]*?if \(clampedMaxTokens == null\) \{[\s\S]*?maxTokens: clampedMaxTokens[\s\S]*?setActivePresetSource\(nextSource\)[\s\S]*?onParamsChange\(nextParams\)/,
+    adapter,
+    /max_tokens: capMaxTokensForAttached\([\s\S]*?useAttachedEnginesStore\.getState\(\)\.status/,
   );
 });

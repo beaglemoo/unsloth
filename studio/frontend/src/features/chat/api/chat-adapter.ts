@@ -153,7 +153,10 @@ import {
 import type { MessageTiming, ToolCallMessagePart } from "@assistant-ui/core";
 import type { ChatModelAdapter } from "@assistant-ui/react";
 import { parsePartialJsonObject } from "assistant-stream/utils";
+import { capMaxTokensForAttached } from "@/features/attached-engines/attached-active";
+import { useAttachedEnginesStore } from "@/features/attached-engines/attached-engines-store";
 import {
+  attachedProviderKind,
   isExternalModelId,
   isPromptCacheTtl,
   loadExternalProviders,
@@ -6491,16 +6494,29 @@ export function createOpenAIStreamAdapter(
                 ? { top_p: params.topP }
                 : {}),
               // Floor at the provider's documented min (Kimi thinking needs >=16k); clamp at the per-model max.
-              max_tokens: Math.min(
-                Math.max(
-                  params.maxTokens,
-                  getExternalMinOutputTokens(externalProvider?.providerType),
+              // oMLX and DwarfStar then bound it by their own ceiling, here and not in the saved params.
+              max_tokens: capMaxTokensForAttached(
+                Math.min(
+                  Math.max(
+                    params.maxTokens,
+                    getExternalMinOutputTokens(externalProvider?.providerType),
+                  ),
+                  getExternalMaxOutputTokens(
+                    externalProvider?.providerType,
+                    externalSelection?.modelId,
+                    externalProvider?.maxOutputTokens,
+                  ),
                 ),
-                getExternalMaxOutputTokens(
-                  externalProvider?.providerType,
-                  externalSelection?.modelId,
-                  externalProvider?.maxOutputTokens,
-                ),
+                useAttachedEnginesStore.getState().status,
+                (() => {
+                  const kind = attachedProviderKind(
+                    externalProvider?.id,
+                    externalProvider?.providerType,
+                  );
+                  return kind && externalSelection
+                    ? { kind, modelId: externalSelection.modelId }
+                    : null;
+                })(),
               ),
 
               ...(externalCapabilities?.topK ? { top_k: params.topK } : {}),
