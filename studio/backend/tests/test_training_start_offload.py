@@ -17,6 +17,9 @@ import contextlib
 import threading
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
 import routes.training as tr
 from models import TrainingStartRequest
 
@@ -45,21 +48,42 @@ class _FakeBackend:
         return self._result
 
 
-def _request() -> TrainingStartRequest:
-    return TrainingStartRequest(
-        model_name = "unsloth/tiny-model",
-        training_type = "LoRA/QLoRA",
-        format_type = "alpaca",
-        hf_dataset = "org/data",
-        load_in_4bit = False,
-        # Skip the YAML trust_remote_code lookup (needs the model catalog on disk).
-        trust_remote_code = True,
-    )
+class _HookBackend(_FakeBackend):
+    def __init__(self, result = True):
+        super().__init__(result)
+        self.active = False
+        self.trainer = SimpleNamespace(
+            training_progress = SimpleNamespace(error = "spawn failed")
+        )
+
+    def is_training_active(self):
+        return self.active
+
+    def start_training(self, job_id, *, before_spawn = None, **kwargs):
+        self.start_thread = threading.current_thread()
+        self.hook = before_spawn
+        self.current_job_id = job_id
+        before_spawn()
+        self.active = self._result
+        return self._result
 
 
-def test_start_route_offloads_blocking_start(monkeypatch):
-    fake = _FakeBackend()
-    monkeypatch.setattr(tr, "get_training_backend", lambda: fake)
+class _Lease:
+    def __init__(self):
+        self.released = 0
+        self.watched = 0
+        self.active_when_watched = None
+
+    async def release(self):
+        self.released += 1
+
+    async def watch_until(self, predicate):
+        self.watched += 1
+        self.active_when_watched = predicate()
+
+
+def _route_setup(monkeypatch, backend):
+    monkeypatch.setattr(tr, "get_training_backend", lambda: backend)
     monkeypatch.setattr(tr, "_diffusion_training_active", lambda: False)
     monkeypatch.setattr(tr, "_diffusion_gpu_admission", contextlib.nullcontext)
     monkeypatch.setattr(
@@ -74,6 +98,23 @@ def test_start_route_offloads_blocking_start(monkeypatch):
     monkeypatch.setattr(tr, "_preflight_hf_dataset_request", lambda *_args: None)
     monkeypatch.setattr("utils.hardware.ensure_hardware_detected", lambda: None)
 
+
+def _request() -> TrainingStartRequest:
+    return TrainingStartRequest(
+        model_name = "unsloth/tiny-model",
+        training_type = "LoRA/QLoRA",
+        format_type = "alpaca",
+        hf_dataset = "org/data",
+        load_in_4bit = False,
+        # Skip the YAML trust_remote_code lookup (needs the model catalog on disk).
+        trust_remote_code = True,
+    )
+
+
+def test_start_route_offloads_blocking_start(monkeypatch):
+    fake = _FakeBackend()
+    _route_setup(monkeypatch, fake)
+
     async def _run():
         return threading.current_thread(), await tr.start_training(
             request = _request(), current_subject = "test-user", via_api_key = False
@@ -86,6 +127,82 @@ def test_start_route_offloads_blocking_start(monkeypatch):
     assert fake.hook is not None
     assert fake.start_thread is not None
     assert fake.start_thread is not loop_thread
+
+
+def test_training_hold_watches_until_training_is_no_longer_active(monkeypatch):
+    from core.inference.attached import arbiter
+
+    backend = _HookBackend()
+    lease = _Lease()
+    _route_setup(monkeypatch, backend)
+    monkeypatch.setattr(
+        arbiter,
+        "free_for_local_from_thread",
+        lambda *_args: SimpleNamespace(require_clear = lambda: None, lease = lease),
+    )
+
+    async def _run():
+        response = await tr.start_training(
+            request = _request(), current_subject = "test-user", via_api_key = False
+        )
+        await asyncio.sleep(0)
+        return response
+
+    response = asyncio.run(_run())
+
+    assert response.status == "queued"
+    assert lease.released == 0
+    assert lease.watched == 1
+    assert lease.active_when_watched is True
+
+
+def test_training_hold_releases_when_spawn_fails(monkeypatch):
+    from core.inference.attached import arbiter
+
+    backend = _HookBackend(result = False)
+    lease = _Lease()
+    _route_setup(monkeypatch, backend)
+    monkeypatch.setattr(
+        arbiter,
+        "free_for_local_from_thread",
+        lambda *_args: SimpleNamespace(require_clear = lambda: None, lease = lease),
+    )
+
+    response = asyncio.run(
+        tr.start_training(request = _request(), current_subject = "test-user", via_api_key = False)
+    )
+
+    assert response.status == "error"
+    assert lease.released == 1
+    assert lease.watched == 0
+
+
+def test_training_admission_failure_returns_retryable_clear_message(monkeypatch):
+    from core.inference.attached import arbiter
+    from core.inference.attached.arbiter import AttachedAdmissionError
+
+    backend = _HookBackend()
+    _route_setup(monkeypatch, backend)
+    monkeypatch.setattr(
+        arbiter,
+        "free_for_local_from_thread",
+        lambda *_args: SimpleNamespace(
+            require_clear = lambda: (_ for _ in ()).throw(
+                AttachedAdmissionError("DwarfStar is still starting")
+            ),
+            lease = None,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(
+            tr.start_training(request = _request(), current_subject = "test-user", via_api_key = False)
+        )
+
+    error = caught.value
+    assert error.status_code == 503
+    assert error.headers["Retry-After"] == "15"
+    assert "residency is cleared" in error.detail
 
 
 def test_backend_start_guard_blocks_overlapping_starts():
