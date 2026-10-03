@@ -660,3 +660,188 @@ def test_update_dry_run_changes_nothing(rig):
     assert not (rig.home / "omlx.new").exists() and not (rig.home / "omlx.old").exists()
     assert not any(c.startswith("launchctl bootout") for c in rig.calls())
     assert all(rig.loaded(label) for label in rig.labels)
+
+
+# --- build-fork-mac.sh --install pieces -------------------------------------------------------
+
+FORK = SCRIPTS / "build-fork-mac.sh"
+
+
+def fork_fn(tmp_path, snippet, extra_env=None):
+    """Source build-fork-mac.sh (its main is guarded) under a scratch HOME with fake venv/app paths."""
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "UNSLOTH_STUDIO_VENV": str(tmp_path / "studio" / "unsloth_studio"),
+        "BACKUP_ROOT": str(tmp_path / "backups"),
+        "INSTALLED_APP": str(tmp_path / "Apps" / "Unsloth.app"),
+        "APP_PREV": str(tmp_path / "prev" / "Unsloth-prev.app.bak"),
+        "DIST_DIR": str(tmp_path / "dist"),
+        **(extra_env or {}),
+    }
+    (tmp_path / "home").mkdir(exist_ok=True)
+    return run(["bash", "-c", f'set -euo pipefail; . "{FORK}"; {snippet}'], env)
+
+
+def make_backend(tmp_path):
+    venv = tmp_path / "studio" / "unsloth_studio"
+    fake_python(venv / "bin" / "python")
+    (venv / "lib").mkdir()
+    (venv / "lib" / "mod.py").write_text("original")
+    (venv / "bin" / "python3").symlink_to("python")
+    return venv
+
+
+def test_snapshot_and_restore_bring_back_the_original_backend(tmp_path):
+    venv = make_backend(tmp_path)
+    snippet = (
+        'DRY=0; TS=t1; snapshot_backend; '
+        'echo changed >"$STUDIO_VENV/lib/mod.py"; echo stray >"$STUDIO_VENV/lib/stray.py"; '
+        'restore_backend'
+    )
+    result = fork_fn(tmp_path, snippet)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (venv / "lib" / "mod.py").read_text() == "original"
+    assert not (venv / "lib" / "stray.py").exists()
+    assert (venv / "bin" / "python3").is_symlink() and os.readlink(venv / "bin" / "python3") == "python"
+    failed = tmp_path / "backups" / "t1" / "failed-unsloth_studio"
+    assert (failed / "lib" / "stray.py").exists()
+
+
+def test_the_snapshot_is_independent_of_later_changes(tmp_path):
+    venv = make_backend(tmp_path)
+    result = fork_fn(tmp_path, 'DRY=0; TS=t2; snapshot_backend; rm -rf "$STUDIO_VENV/lib"')
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "backups" / "t2" / "unsloth_studio" / "lib" / "mod.py").read_text() == "original"
+    assert not (venv / "lib").exists()
+
+
+def test_restore_without_a_snapshot_refuses(tmp_path):
+    make_backend(tmp_path)
+    result = fork_fn(tmp_path, "DRY=0; BACKEND_BACKUP=; restore_backend")
+    assert result.returncode != 0 and "no backend snapshot" in result.stderr
+
+
+def test_only_the_newest_two_snapshots_are_kept(tmp_path):
+    for name in ("20261001-000000", "20261002-000000", "20261003-000000", "20261004-000000"):
+        (tmp_path / "backups" / name).mkdir(parents=True)
+    (tmp_path / "backups" / "notes").mkdir()
+    result = fork_fn(tmp_path, "prune_backend_backups")
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in (tmp_path / "backups").iterdir()) == ["20261003-000000", "20261004-000000", "notes"]
+
+
+def test_wheel_gate_fails_before_anything_is_touched(tmp_path):
+    result = fork_fn(tmp_path, 'DRY=0; uv() { echo "boom" >&2; return 1; }; build_fork_wheel')
+    assert result.returncode != 0 and "does not build" in result.stderr
+
+
+def test_wheel_gate_requires_the_fork_modules(tmp_path):
+    builder = (
+        'uv() { python3 - "$4" <<PY\nimport sys, zipfile\n'
+        'z = zipfile.ZipFile(sys.argv[1] + "/unsloth-1.0-py3-none-any.whl", "w")\n'
+        'z.writestr("unsloth/x.py", "")\nz.close()\nPY\n}; '
+    )
+    result = fork_fn(tmp_path, f"DRY=0; {builder} build_fork_wheel")
+    assert result.returncode != 0 and "attached-engines backend" in result.stderr
+    good = builder.replace('z.writestr("unsloth/x.py", "")', 'z.writestr("studio/backend/routes/attached_engines.py", "")')
+    result = fork_fn(tmp_path, f'DRY=0; {good} build_fork_wheel; echo "wheel=$WHEEL"')
+    assert result.returncode == 0, result.stderr
+    assert "wheel=" in result.stdout and result.stdout.strip().endswith("unsloth-1.0-py3-none-any.whl")
+
+
+STUBS = (
+    "quit_unsloth() { :; }; engines_require_idle() { :; }; build_fork_wheel() { WHEEL=/none; }; "
+    "install_app() { echo app-installed; }; prune_backend_backups() { echo pruned; }; "
+    "codesign() { :; }; DRY=0; "
+)
+
+
+def phase(tmp_path, overrides):
+    make_backend(tmp_path)
+    (tmp_path / "dist" / "Unsloth.app").mkdir(parents=True)
+    (tmp_path / "Apps" / "Unsloth.app").mkdir(parents=True)
+    return fork_fn(tmp_path, STUBS + overrides + "; phase_install")
+
+
+def test_install_restores_the_backend_when_the_install_fails(tmp_path):
+    result = phase(
+        tmp_path,
+        'install_backend() { echo half >"$STUDIO_VENV/lib/mod.py"; return 1; }; verify_backend() { :; }; check_installed_version() { :; }',
+    )
+    assert result.returncode != 0 and "previous backend was restored" in result.stderr, result.stdout + result.stderr
+    assert (tmp_path / "studio" / "unsloth_studio" / "lib" / "mod.py").read_text() == "original"
+    assert "app-installed" not in result.stdout  # the app was never swapped
+
+
+def test_install_restores_the_backend_when_verification_fails(tmp_path):
+    result = phase(
+        tmp_path,
+        'install_backend() { echo new >"$STUDIO_VENV/lib/mod.py"; }; check_installed_version() { :; }; verify_backend() { die "bad"; }',
+    )
+    assert result.returncode != 0 and "did not verify" in result.stderr, result.stdout + result.stderr
+    assert (tmp_path / "studio" / "unsloth_studio" / "lib" / "mod.py").read_text() == "original"
+    assert "app-installed" not in result.stdout
+
+
+def test_install_restores_the_backend_when_the_version_is_unacceptable(tmp_path):
+    result = phase(
+        tmp_path,
+        'install_backend() { echo new >"$STUDIO_VENV/lib/mod.py"; }; check_installed_version() { die "too old"; }; verify_backend() { :; }',
+    )
+    assert result.returncode != 0 and "previous backend was restored" in result.stderr
+    assert (tmp_path / "studio" / "unsloth_studio" / "lib" / "mod.py").read_text() == "original"
+
+
+def test_a_good_install_keeps_the_new_backend_and_swaps_the_app(tmp_path):
+    result = phase(
+        tmp_path,
+        'install_backend() { echo new >"$STUDIO_VENV/lib/mod.py"; }; check_installed_version() { :; }; verify_backend() { :; }; APP_BACKUP=/nonexistent-ok; ditto() { :; }',
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "studio" / "unsloth_studio" / "lib" / "mod.py").read_text().strip() == "new"
+    assert "app-installed" in result.stdout and "pruned" in result.stdout
+    snapshots = list((tmp_path / "backups").glob("*/unsloth_studio/lib/mod.py"))
+    assert len(snapshots) == 1 and snapshots[0].read_text() == "original"
+
+
+def test_the_app_swap_happens_with_the_helpers_out_of_launchd(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        make_app(tmp_path / "dist" / "Unsloth.app", "new")
+        make_app(tmp_path / "Apps" / "Unsloth.app", "old")
+        log = rig.lc / "calls.log"
+        snippet = (
+            "codesign() { :; }; DRY=0; "
+            f'mv() {{ echo "mv $1" >>"{log}"; command mv "$@"; }}; '
+            "install_app"
+        )
+        env = {k: v for k, v in rig.env.items() if k not in ("UNSLOTH_ENGINES_HOME",)}
+        result = fork_fn(tmp_path, snippet, {**env, "DIST_DIR": str(tmp_path / "dist")})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
+        assert (tmp_path / "prev" / "Unsloth-prev.app.bak" / "Contents" / "marker").read_text() == "old"
+        assert not (tmp_path / "Apps" / "Unsloth.app.new").exists()
+        calls = rig.calls()
+        stops = [i for i, c in enumerate(calls) if c.startswith("launchctl bootout")]
+        moves = [i for i, c in enumerate(calls) if c.startswith("mv ")]
+        starts = [i for i, c in enumerate(calls) if c.startswith("launchctl bootstrap")][-2:]
+        assert len(stops) == 2 and len(moves) == 2 and len(starts) == 2
+        assert max(stops) < min(moves) and max(moves) < min(starts)
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
+def test_a_busy_engine_blocks_the_app_swap_and_leaves_the_app_alone(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        make_app(tmp_path / "dist" / "Unsloth.app", "new")
+        make_app(tmp_path / "Apps" / "Unsloth.app", "old")
+        (home / "ds4-busy").write_text("1")
+        env = {k: v for k, v in rig.env.items() if k not in ("UNSLOTH_ENGINES_HOME",)}
+        result = fork_fn(tmp_path, "codesign() { :; }; DRY=0; install_app", env)
+        assert result.returncode != 0 and "in flight" in result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+    finally:
+        rig.close()
