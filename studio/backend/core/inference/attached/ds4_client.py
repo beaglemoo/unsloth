@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import httpx
 
+from core.inference.attached import AttachedEngineError
 from loggers import get_logger
 
 logger = get_logger(__name__)
@@ -132,6 +133,40 @@ class Ds4Client:
             ]
         except (httpx.HTTPError, ValueError, AttributeError, TypeError):
             return None
+
+    async def config(self) -> dict[str, Any]:
+        """``GET /admin/config``: ``{ctx, ctx_active, ctx_min, ctx_max, pending_restart}``. Raises ``AttachedEngineError`` (a launcher that predates the endpoint answers 404)."""
+        return await self._config_call("get", None)
+
+    async def set_ctx(self, ctx: int) -> dict[str, Any]:
+        """``POST /admin/config {"ctx": N}``: the same fields plus ``applied`` (``next_start``, ``restarted`` or ``after_current_requests``). A restart can block, so this waits as long as a start."""
+        return await self._config_call("post", {"ctx": ctx})
+
+    async def _config_call(self, method: str, body: Optional[dict[str, Any]]) -> dict[str, Any]:
+        timeout = httpx.Timeout(self._start_timeout_s + _ADMIN_SLACK_S, connect = 2.0)
+        try:
+            async with self._client(timeout if body is not None else _TIMEOUT) as client:
+                if body is None:
+                    response = await client.get("/admin/config")
+                else:
+                    response = await client.post("/admin/config", json = body)
+                response.raise_for_status()
+                data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("unexpected /admin/config payload")
+        except httpx.HTTPStatusError as exc:
+            raise AttachedEngineError(
+                f"DwarfStar launcher returned HTTP {exc.response.status_code} for config"
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise AttachedEngineError(
+                f"DwarfStar launcher is unreachable ({type(exc).__name__})"
+            ) from exc
+        return {
+            key: data[key]
+            for key in ("ctx", "ctx_active", "ctx_min", "ctx_max", "pending_restart", "applied")
+            if key in data
+        }
 
     async def _admin(self, path: str) -> Ds4Status:
         error: Optional[str] = None
