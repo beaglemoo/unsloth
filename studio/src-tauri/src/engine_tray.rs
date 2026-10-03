@@ -118,18 +118,23 @@ fn load_urls() -> EngineUrls {
 // ---------------------------------------------------------------------------------------------
 // Status parsing
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub(crate) struct OmlxModel {
     id: String,
     model_path: String,
     loaded: bool,
     is_loading: bool,
+    pinned: bool,
     engine_type: Option<String>,
     is_helper: bool,
     alias: Option<String>,
+    /// Epoch seconds of the last load or request, as oMLX reports it.
+    last_access: Option<f64>,
+    /// Seconds before the idle unload; set by `apply_idle_ttl`, None while pinned or untimed.
+    idle_remaining_s: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub(crate) struct OmlxStatus {
     reachable: bool,
     models: Vec<OmlxModel>,
@@ -156,12 +161,15 @@ pub(crate) fn parse_omlx_status(body: &Value) -> Option<OmlxStatus> {
                     .get("is_loading")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                pinned: row.get("pinned").and_then(Value::as_bool).unwrap_or(false),
                 engine_type: str_field(row, "engine_type"),
                 is_helper: row
                     .get("is_helper")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 alias: str_field(row, "model_alias"),
+                last_access: row.get("last_access").and_then(Value::as_f64),
+                idle_remaining_s: None,
             })
         })
         .collect();
@@ -173,6 +181,58 @@ pub(crate) fn parse_omlx_status(body: &Value) -> Option<OmlxStatus> {
             .and_then(Value::as_u64)
             .unwrap_or(0),
     })
+}
+
+/// The global idle timeout and each model directory's own `ttl_seconds`, from oMLX's admin API.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub(crate) struct OmlxTtl {
+    global: Option<u64>,
+    per_model: std::collections::HashMap<String, u64>,
+}
+
+pub(crate) fn parse_omlx_ttl(global_settings: &Value, models: &Value) -> OmlxTtl {
+    let positive = |v: Option<&Value>| v.and_then(Value::as_u64).filter(|t| *t > 0);
+    let global = positive(
+        global_settings
+            .get("idle_timeout")
+            .and_then(|t| t.get("idle_timeout_seconds")),
+    );
+    let per_model = models
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let id = str_field(row, "id")?;
+                    let ttl = positive(row.get("settings").and_then(|s| s.get("ttl_seconds")))?;
+                    Some((id, ttl))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    OmlxTtl { global, per_model }
+}
+
+/// Mirrors `EnginePool.check_ttl_expirations`: a loaded, unpinned model unloads once idle for its
+/// own TTL (else the global one), counted from `last_access`.
+pub(crate) fn apply_idle_ttl(status: &mut OmlxStatus, ttl: &OmlxTtl, now_epoch_s: f64) {
+    let snapshot = status.models.clone();
+    for model in status.models.iter_mut() {
+        if !model.loaded || model.pinned || model.is_loading {
+            continue;
+        }
+        let dir = resolve_dir(&snapshot, model);
+        let limit = ttl.per_model.get(&dir).or(ttl.global.as_ref());
+        let last = model.last_access.or_else(|| {
+            snapshot
+                .iter()
+                .find(|m| m.id == dir)
+                .and_then(|m| m.last_access)
+        });
+        if let (Some(limit), Some(last)) = (limit, last) {
+            model.idle_remaining_s = Some((*limit as f64 - (now_epoch_s - last)).max(0.0));
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -338,7 +398,19 @@ fn omlx_label(status: &OmlxStatus) -> String {
         return format!("oMLX: loading {name}");
     }
     let loaded = all_loaded_dirs(status).len();
-    format!("oMLX: {loaded} loaded ({} GB)", gib(status.memory_bytes))
+    let mut label = format!("oMLX: {loaded} loaded ({} GB)", gib(status.memory_bytes));
+    let soonest = status
+        .models
+        .iter()
+        .filter(|m| m.loaded)
+        .filter_map(|m| m.idle_remaining_s)
+        .reduce(f64::min);
+    if let Some(idle) = soonest {
+        label.push_str(&format!(", unloads in {}", fmt_duration(idle)));
+    } else if loaded > 0 && status.models.iter().filter(|m| m.loaded).all(|m| m.pinned) {
+        label.push_str(", pinned");
+    }
+    label
 }
 
 fn ds4_label(status: &Ds4Status) -> String {
@@ -355,7 +427,7 @@ fn ds4_label(status: &Ds4Status) -> String {
     if status.in_flight > 0 {
         parts.push("generating".to_string());
     } else if let Some(idle) = status.idle_remaining_s {
-        parts.push(format!("idle, stops in {}", fmt_duration(idle)));
+        parts.push(format!("idle, unloads in {}", fmt_duration(idle)));
     }
     if let Some(tps) = status.live_tps.or(status.last_tps) {
         parts.push(format!("{tps:.1} tok/s"));
@@ -463,10 +535,25 @@ async fn post(base: &str, path: &str, timeout: Duration) -> Result<(), String> {
 }
 
 async fn fetch_omlx(urls: &EngineUrls) -> OmlxStatus {
-    get_json(&urls.omlx, "/v1/models/status")
+    let mut status = get_json(&urls.omlx, "/v1/models/status")
         .await
         .and_then(|body| parse_omlx_status(&body))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // The idle TTL lives in the admin API, so it is only asked for when a timer could show.
+    if status.models.iter().any(|m| m.loaded && !m.pinned) {
+        let (global, models) = tokio::join!(
+            get_json(&urls.omlx, "/admin/api/global-settings"),
+            get_json(&urls.omlx, "/admin/api/models")
+        );
+        if let (Some(global), Some(models)) = (global, models) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            apply_idle_ttl(&mut status, &parse_omlx_ttl(&global, &models), now);
+        }
+    }
+    status
 }
 
 async fn fetch_ds4(urls: &EngineUrls) -> Ds4Status {
@@ -879,6 +966,47 @@ mod tests {
     }
 
     #[test]
+    fn omlx_label_counts_down_to_the_idle_unload() {
+        let mut status = omlx(OMLX_BODY);
+        status.models[1].loaded = true;
+        status.models[1].last_access = Some(1_000.0);
+        let global = json!({"idle_timeout": {"idle_timeout_seconds": 600}});
+        let listing = json!({"models": [
+            {"id": "ukisai--Swift-1.5-27B-oQ4e-mtp", "settings": {"ttl_seconds": null}}
+        ]});
+        apply_idle_ttl(&mut status, &parse_omlx_ttl(&global, &listing), 1_348.0);
+        assert_eq!(status.models[1].idle_remaining_s, Some(252.0));
+        assert_eq!(
+            omlx_label(&status),
+            "oMLX: 2 loaded (4.2 GB), unloads in 4m 12s"
+        );
+        // pinned embedding model never gets a timer
+        assert_eq!(status.models[0].idle_remaining_s, None);
+    }
+
+    #[test]
+    fn per_model_ttl_wins_and_expired_clamps_to_zero() {
+        let mut status = omlx(OMLX_BODY);
+        status.models[1].loaded = true;
+        status.models[1].last_access = Some(1_000.0);
+        let global = json!({"idle_timeout": {"idle_timeout_seconds": 600}});
+        let listing = json!({"models": [
+            {"id": "ukisai--Swift-1.5-27B-oQ4e-mtp", "settings": {"ttl_seconds": 60}}
+        ]});
+        apply_idle_ttl(&mut status, &parse_omlx_ttl(&global, &listing), 1_500.0);
+        assert_eq!(status.models[1].idle_remaining_s, Some(0.0));
+    }
+
+    #[test]
+    fn omlx_label_without_ttl_or_with_only_pinned_models() {
+        let mut status = omlx(OMLX_BODY);
+        assert_eq!(omlx_label(&status), "oMLX: 1 loaded (4.2 GB), pinned");
+        status.models[1].loaded = true;
+        apply_idle_ttl(&mut status, &OmlxTtl::default(), 1_000.0);
+        assert_eq!(omlx_label(&status), "oMLX: 2 loaded (4.2 GB)");
+    }
+
+    #[test]
     fn ds4_state_and_labels() {
         let stopped = ds4(json!({"loaded": false, "pid": null, "in_flight": 0,
             "idle_seconds_remaining": null, "stats": {"live": null, "last": null}}));
@@ -896,7 +1024,7 @@ mod tests {
             "stats": {"live": null, "last": {"gen_tps": 31.24, "ttft_ms": 800.0}}}));
         assert_eq!(
             ds4_label(&loaded),
-            "DwarfStar: loaded, idle, stops in 4m 12s, 31.2 tok/s"
+            "DwarfStar: loaded, idle, unloads in 4m 12s, 31.2 tok/s"
         );
         assert!(must_stop_ds4_before_load(&loaded));
 
