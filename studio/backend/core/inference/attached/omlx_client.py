@@ -283,25 +283,37 @@ class OmlxClient:
     async def unload(self, model_id: str) -> None:
         await self._post(f"/v1/models/{quote(model_id, safe = '')}/unload", _TIMEOUT)
 
-    async def unload_all(self) -> list[str]:
-        """Unload every loaded model, pinned included. Returns the directory ids actually unloaded."""
+    async def unload_all(self, *, timeout_s: float = 10.0) -> list[str]:
+        """Unload pinned and loading models too, and verify that draining has finished.
+
+        A 202 only acknowledges a drain; it is not proof that weights are gone.
+        Fail closed if the status cannot be read or residency remains at the deadline.
+        """
         status = await self.status()
+        if not status.reachable:
+            raise AttachedEngineError("Cannot verify oMLX residency: engine is unreachable.")
         targets: list[str] = []
         for model in status.models:
-            if not model.loaded:
+            if not (model.loaded or model.is_loading):
                 continue
             target = self.resolve_dir(list(status.models), model.id) or model.id
             if target not in targets:
                 targets.append(target)
-        unloaded: list[str] = []
         for target in targets:
-            try:
-                await self.unload(target)
-            except AttachedEngineError as exc:
-                logger.warning("oMLX unload of %s failed: %s", target, exc)
-                continue
-            unloaded.append(target)
-        return unloaded
+            await self.unload(target)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            status = await self.status()
+            if not status.reachable:
+                raise AttachedEngineError("Cannot verify oMLX residency after unload.")
+            resident = [m.id for m in status.models if m.loaded or m.is_loading]
+            if not resident:
+                return targets
+            if time.monotonic() >= deadline:
+                raise AttachedEngineError(
+                    "oMLX models are still loaded or loading: " + ", ".join(resident)
+                )
+            await asyncio.sleep(0.2)
 
     async def _post(self, path: str, timeout: httpx.Timeout) -> None:
         try:
