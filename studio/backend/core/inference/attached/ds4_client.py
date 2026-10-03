@@ -35,6 +35,11 @@ class Ds4Status:
     last_ttft_ms: Optional[float] = None
     totals: Optional[dict[str, int]] = None
     start_timeout_s: float = DEFAULT_START_TIMEOUT_S
+    # Context length: the configured value, the one the running server was started with (None
+    # while stopped), and whether a restart is waiting to apply a change.
+    ctx: Optional[int] = None
+    ctx_active: Optional[int] = None
+    pending_restart: bool = False
     error: Optional[str] = None
 
 
@@ -107,6 +112,9 @@ class Ds4Client:
             last_ttft_ms = _float(last.get("ttft_ms")),
             totals = {k: v for k, v in totals.items() if _int(v) is not None} if totals else None,
             start_timeout_s = self._start_timeout_s,
+            ctx = _int(config.get("ctx")),
+            ctx_active = _int(config.get("ctx_active")),
+            pending_restart = config.get("pending_restart") is True,
         )
 
     async def start(self) -> Ds4Status:
