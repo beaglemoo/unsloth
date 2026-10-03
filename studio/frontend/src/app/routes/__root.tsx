@@ -34,6 +34,7 @@ import { useExportRuntimeLifecycle } from "@/features/export";
 import { FIND_SCOPE_ATTRIBUTE, FindInPage } from "@/features/find-in-page";
 import { HfTokenWarningDialog } from "@/features/hf-auth";
 import { InterfaceZoom, zoomInterfaceFromMenu } from "@/features/interface-zoom";
+import { AttachedEnginesMount } from "@/features/attached-engines";
 import { bootstrapPersistedCredentials } from "@/features/credentials/bootstrap";
 import { SharedRunConfigLinkHandler } from "@/features/model-picker";
 import { backfillModelOverrides } from "@/features/model-picker/api/migrate-model-overrides";
@@ -678,6 +679,7 @@ function RootLayout() {
       <InterfaceZoom />
       <ReloadSnapshotPrivacy />
       {!isAuthFlowRoute && <ChatSettingsHydrationMount />}
+      {!isAuthFlowRoute && <AttachedEnginesMount />}
       {!isAuthFlowRoute && <LowDiskNoticeMount />}
       {/* Opens itself when API traffic arrives; hides on the full monitor page. */}
       {!isAuthFlowRoute && <ApiMonitorOverlay />}

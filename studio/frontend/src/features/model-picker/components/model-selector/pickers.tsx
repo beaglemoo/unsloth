@@ -23,6 +23,10 @@ import {
 } from "@/components/ui/tooltip";
 import { isTouchClick } from "@/components/ui/touch-click";
 import { usePlatformStore } from "@/config/env";
+import { prepareAttachedEngineOnSelect } from "@/features/attached-engines/prepare-on-select";
+import { isAttachedEngineOffline } from "@/features/attached-engines/attached-state";
+import { useAttachedEnginesStore } from "@/features/attached-engines/attached-engines-store";
+import { attachedProviderKind } from "@/features/chat/external-providers";
 import { ApiProviderLogo } from "@/features/chat";
 import {
   type ScanFolderInfo,
@@ -1153,10 +1157,13 @@ function ModelRow({
   showSize,
   memory,
   className,
+  disabled,
 }: {
   label: string;
   meta?: string | null;
   selected?: boolean;
+  /** An unreachable row: not selectable, dimmed. */
+  disabled?: boolean;
   /** Override badge state when authoritative runtime state is available. */
   loaded?: boolean;
   onClick: () => void;
@@ -1333,6 +1340,9 @@ function ModelRow({
     <button
       type="button"
       {...optionProps}
+      // aria-disabled, not disabled: the roving list moves focus with element.focus(), which a
+      // disabled button ignores, so arrow keys would stall on an offline row.
+      aria-disabled={disabled || undefined}
       onKeyDown={(event) => {
         if (event.key === "ArrowDown" && onArrowDownIntoChildren?.()) {
           event.preventDefault();
@@ -1340,13 +1350,14 @@ function ModelRow({
         }
         optionProps?.onKeyDown(event);
       }}
-      onClick={onClick}
+      onClick={disabled ? undefined : onClick}
       className={cn(
         // pl-[calc(5.5px*var(--ui-space-scale,1))]: the dot is centred in a 14px hover target, so 5.5 + (14 - 5) / 2 lands it on
         // 10px, level with the section labels at px-2.5.
         "group/row flex w-full flex-col items-stretch py-1.5 pl-[calc(5.5px*var(--ui-space-scale,1))] pr-2 text-left text-sm transition-colors hover:bg-sidebar-accent focus-visible:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         showMemoryBar ? "rounded-2xl" : "rounded-full",
         selected && "bg-sidebar-accent",
+        disabled && "cursor-not-allowed opacity-50 hover:bg-transparent",
         className,
       )}
     >
@@ -4802,6 +4813,8 @@ export function HubModelPicker({
   // Connections behind those models, read for the base URL a capability check needs: a Gemini
   // connection pointed at an OpenAI-compatible proxy returns no inline images.
   const externalProviders = useExternalProvidersStore((s) => s.providers);
+  // Null unless the owner turned attached engines on, so every row below renders as upstream.
+  const attachedStatus = useAttachedEnginesStore((s) => s.status);
   const externalBaseUrlById = useMemo(
     () =>
       new Map(
@@ -6116,6 +6129,13 @@ export function HubModelPicker({
     const providerModelId =
       parseExternalModelId(model.id)?.modelId ?? model.name;
     const baseUrl = externalBaseUrlById.get(model.providerId) ?? null;
+    const attachedKind = attachedProviderKind(
+      model.providerId,
+      model.providerType,
+    );
+    const attachedOffline =
+      attachedKind !== null &&
+      isAttachedEngineOffline(attachedKind, attachedStatus);
     const marks = connectedModelMarks({
       providerType: model.providerType,
       modelId: providerModelId,
@@ -6153,9 +6173,12 @@ export function HubModelPicker({
             showVision={marks.vision}
             selected={isSelected}
             optionProps={hubModelList.getOptionProps(optionKey, isSelected)}
-            onClick={() =>
-              onSelect(model.id, { source: "external", isLora: false })
-            }
+            onClick={() => {
+              if (attachedKind) prepareAttachedEngineOnSelect(attachedKind);
+              onSelect(model.id, { source: "external", isLora: false });
+            }}
+            disabled={attachedOffline}
+            tags={attachedOffline ? ["offline"] : undefined}
             vramStatus={null}
             // The name's own inset, since nothing precedes it in the row now: the leading slot a
             // local row gives its format dot is gone with the logo that briefly filled it.
