@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-import { useIsAccountOwner } from "@/features/auth";
+import {
+  getAuthSessionEpoch,
+  hasAuthToken,
+  useIsAccountOwner,
+} from "@/features/auth";
 import { useExternalProvidersStore } from "@/features/chat/stores/external-providers-store";
 import { syncExternalProvidersFromBackend } from "@/features/chat/sync-external-providers";
 import { toast } from "@/lib/toast";
@@ -20,14 +24,26 @@ import {
   useAttachedEnginesStore,
 } from "./attached-engines-store";
 import { noticeMessage } from "./notice-message";
+import { applyProviderSync } from "./provider-sync";
 
 let activePoller: AttachedPoller | null = null;
 
-/** Pull the saved provider rows into the picker, the way credential bootstrap does. */
+/** Pull the saved provider rows into the picker, the way credential bootstrap does. A reply that
+ *  lands after the account changed is dropped. */
 export async function syncAttachedProviderRows(): Promise<void> {
-  const store = useExternalProvidersStore.getState();
-  const synced = await syncExternalProvidersFromBackend(store.providers);
-  store.setProviders(synced);
+  await applyProviderSync({
+    captureSession: () => {
+      const sessionEpoch = getAuthSessionEpoch();
+      return () => hasAuthToken() && getAuthSessionEpoch() === sessionEpoch;
+    },
+    fetchProviders: (isCurrent) =>
+      syncExternalProvidersFromBackend(
+        useExternalProvidersStore.getState().providers,
+        isCurrent,
+      ),
+    apply: (providers) =>
+      useExternalProvidersStore.getState().setProviders(providers),
+  });
 }
 
 /** Poll the engines now, e.g. right after a Load or Start, instead of waiting for the next tick. */
