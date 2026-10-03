@@ -861,7 +861,7 @@ def test_launcher_restart_mid_lease_keeps_the_barrier_and_never_flags_a_loss(mon
     asyncio.run(exercise())
 
 
-def test_launcher_restart_that_forgot_the_hold_is_recovered_and_404_is_ignored(monkeypatch):
+def test_launcher_restart_that_forgot_the_hold_places_a_new_hold_and_ignores_the_404(monkeypatch):
     async def exercise():
         vt = VirtualTime(monkeypatch)
         state = LauncherFake(vt, ds4_loaded = False)
