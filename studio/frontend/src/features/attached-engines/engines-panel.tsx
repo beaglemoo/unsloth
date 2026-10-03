@@ -20,6 +20,7 @@ import {
   useAttachedEnginesStore,
 } from "./attached-engines-store";
 import { formatCountdown, remainingNow } from "./attached-active";
+import { failureMessage } from "./failure";
 import { formatTps, formatTtft } from "./format";
 import {
   groupOmlxModels,
@@ -77,7 +78,11 @@ function OmlxBlock({
     return (
       <SettingsRow
         label="oMLX"
-        description="Not reachable. Check that the oMLX server is running and the URL is right."
+        description={
+          status?.failure
+            ? failureMessage("oMLX", status.failure)
+            : "Not reachable. Check that the oMLX server is running and the URL is right."
+        }
       />
     );
   }
@@ -222,7 +227,9 @@ function Ds4Block({
       description={
         status && reachable
           ? ds4Description(status, receivedAt, now)
-          : "Not reachable. Check that the DwarfStar launcher is running and the URL is right."
+          : status?.failure
+            ? failureMessage("DwarfStar", status.failure)
+            : "Not reachable. Check that the DwarfStar launcher is running and the URL is right."
       }
     >
       <div className="flex items-center gap-4">
