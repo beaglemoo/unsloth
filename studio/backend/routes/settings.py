@@ -142,6 +142,11 @@ from utils.openai_auto_switch_settings import (
     set_model_override,
     set_openai_auto_switch,
 )
+from utils.attached_engines_settings import (
+    AttachedEnginesConfig,
+    get_config as get_attached_engines_config,
+    set_config as set_attached_engines_config,
+)
 from utils.keyless_api_access import (
     access_exposure,
     get_keyless_api_access_settings,
@@ -900,6 +905,36 @@ class OpenAIAutoSwitchResponse(BaseModel):
     media_idle_unload_active: bool = False
     # When true, a media request may load the image or video model it names.
     media_auto_switch_model: bool = DEFAULT_MEDIA_AUTO_SWITCH_ENABLED
+
+
+class AttachedEnginesPayload(BaseModel):
+    # None leaves the stored value untouched (partial updates can't clobber it).
+    enabled: Optional[bool] = None
+    omlx_url: Optional[str] = Field(default = None, max_length = 256)
+    ds4_url: Optional[str] = Field(default = None, max_length = 256)
+    scan_denylist: Optional[list[str]] = Field(default = None, max_length = 64)
+    arbitrate_local_loads: Optional[bool] = None
+    prewarm_ds4_on_select: Optional[bool] = None
+
+
+class AttachedEnginesResponse(BaseModel):
+    enabled: bool
+    omlx_url: str
+    ds4_url: str
+    scan_denylist: list[str]
+    arbitrate_local_loads: bool
+    prewarm_ds4_on_select: bool
+
+
+def _attached_engines_response(config: AttachedEnginesConfig) -> AttachedEnginesResponse:
+    return AttachedEnginesResponse(
+        enabled = config.enabled,
+        omlx_url = config.omlx_url,
+        ds4_url = config.ds4_url,
+        scan_denylist = list(config.scan_denylist),
+        arbitrate_local_loads = config.arbitrate_local_loads,
+        prewarm_ds4_on_select = config.prewarm_ds4_on_select,
+    )
 
 
 # A quant suffix as modelOverrideKey builds it, matched against the loader's quant pattern rather
@@ -2022,6 +2057,30 @@ def update_openai_auto_switch(
         media_idle_unload_active = get_media_auto_unload_idle_seconds() > 0,
         media_auto_switch_model = media_auto_switch,
     )
+
+
+@_owner_settings_router.get("/attached-engines", response_model = AttachedEnginesResponse)
+def get_attached_engines_settings(
+    current_subject: str = Depends(get_current_subject),
+) -> AttachedEnginesResponse:
+    return _attached_engines_response(get_attached_engines_config())
+
+
+@_owner_settings_router.put("/attached-engines", response_model = AttachedEnginesResponse)
+def update_attached_engines_settings(
+    payload: AttachedEnginesPayload, current_subject: str = Depends(get_current_subject)
+) -> AttachedEnginesResponse:
+    try:
+        config = set_attached_engines_config(**payload.model_dump(exclude_none = True))
+    except ValueError as exc:
+        raise log_and_http_error(
+            exc,
+            400,
+            safe_curated_detail(exc, fallback = "Invalid attached-engines setting."),
+            event = "settings.update_attached_engines_failed",
+            log = logger,
+        ) from exc
+    return _attached_engines_response(config)
 
 
 @_owner_settings_router.get("/openai-auto-switch/overrides", response_model = ModelOverridesResponse)
