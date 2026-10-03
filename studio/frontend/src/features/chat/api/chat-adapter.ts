@@ -181,7 +181,10 @@ import {
 } from "../utils/continued-timing";
 import type { ChatModelAdapter } from "@assistant-ui/react";
 import { parsePartialJsonObject } from "assistant-stream/utils";
+import { capMaxTokensForAttached } from "@/features/attached-engines/attached-active";
+import { useAttachedEnginesStore } from "@/features/attached-engines/attached-engines-store";
 import {
+  attachedProviderKind,
   externalModelTakesVideo,
   isExternalModelId,
   isPromptCacheTtl,
@@ -6922,9 +6925,24 @@ export function createOpenAIStreamAdapter(
               ...(externalCapabilities?.topP !== false && params.topP < 1
                 ? { top_p: params.topP }
                 : {}),
+              // oMLX then bounds it by its own ceiling, here and not in the saved params.
               ...(externalMaxTokens == null
                 ? {}
-                : { max_tokens: externalMaxTokens }),
+                : {
+                    max_tokens: capMaxTokensForAttached(
+                      externalMaxTokens,
+                      useAttachedEnginesStore.getState().status,
+                      (() => {
+                        const kind = attachedProviderKind(
+                          externalProvider?.id,
+                          externalProvider?.providerType,
+                        );
+                        return kind && externalSelection
+                          ? { kind, modelId: externalSelection.modelId }
+                          : null;
+                      })(),
+                    ),
+                  }),
 
               ...(externalCapabilities?.topK ? { top_k: params.topK } : {}),
               ...(externalCapabilities?.minP
