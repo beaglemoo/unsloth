@@ -43,7 +43,7 @@ export const MessageTiming: FC<{
     message.metadata as Record<string, unknown> | undefined
   )?.custom as
     | {
-        serverTimings?: Record<string, number>;
+        serverTimings?: Record<string, number> & { approx?: boolean };
         contextUsage?: {
           cachedTokens?: number;
           cacheWriteTokens?: number;
@@ -74,8 +74,9 @@ export const MessageTiming: FC<{
       : undefined;
 
   // Badge text: show tok/s if available, otherwise total time
+  const approx = st?.approx === true;
   const badgeText = predictedRate != null
-    ? `${predictedRate.toFixed(1)} tok/s`
+    ? `${approx ? "~" : ""}${predictedRate.toFixed(1)} tok/s`
     : formatTimingMs(timing.totalStreamTime);
 
   return (
@@ -225,8 +226,11 @@ export const MessageTiming: FC<{
               )}
               {predictedRate != null && (
                 <div className="flex items-center justify-between gap-4">
-                  <span className="text-muted-foreground">Speed</span>
+                  <span className="text-muted-foreground">
+                    {approx ? "Speed (approx.)" : "Speed"}
+                  </span>
                   <span className="font-mono tabular-nums">
+                    {approx ? "~" : ""}
                     {predictedRate.toFixed(1)} tok/s
                   </span>
                 </div>
