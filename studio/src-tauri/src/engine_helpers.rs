@@ -252,6 +252,10 @@ mod tests {
                 "{label} ProcessType"
             );
             assert!(
+                text.contains("<key>ThrottleInterval</key>\n\t<integer>10</integer>"),
+                "{label} ThrottleInterval"
+            );
+            assert!(
                 text.contains("<key>ExitTimeOut</key>\n\t<integer>120</integer>"),
                 "{label} ExitTimeOut"
             );

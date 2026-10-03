@@ -218,11 +218,21 @@ pub(crate) async fn desktop_update_cleanup_armed() -> Result<bool, String> {
     }
 }
 
+/// The fork build (`attached-engines`) is installed by build-fork-mac.sh and runs engines that
+/// keep serving other clients, so it must never offer, download or install the upstream
+/// release. Both the startup check and a manual one come through `check_desktop_update`.
+pub(crate) const fn updates_disabled_by_build() -> bool {
+    cfg!(feature = "attached-engines")
+}
+
 #[tauri::command]
 pub(crate) async fn check_desktop_update(
     webview: tauri::Webview,
     state: tauri::State<'_, DesktopUpdateState>,
 ) -> Result<Option<DesktopUpdateMetadata>, String> {
+    if updates_disabled_by_build() {
+        return Ok(None);
+    }
     let app = webview.app_handle().clone();
     let builder = webview.updater_builder().on_before_exit(move || {
         #[cfg(windows)]
@@ -395,6 +405,11 @@ pub(crate) fn desktop_update_bundle_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fork_feature_disables_update_checks() {
+        assert_eq!(updates_disabled_by_build(), cfg!(feature = "attached-engines"));
+    }
 
     const TEST_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgOEVDM0EzRDFDODFDNjZDNgpSV1RHWmh6STBhUERqdC9BQXhnMEJIcGFLYlVFc2pQbDBid1llM0tRc3FDdERKNVVTbEpZNHQ1bwo=";
     const TEST_SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIG1pbmlzaWduIHNlY3JldCBrZXkKUlVUR1poekkwYVBEamxUdGdMVDl5VG1NbWJ0ZEYzcE40UGNRU0VBV3MyNiswOGVpclovSGRkbXBTVDI4Y3MzY3JaaHAyYXlrZUtaREVqYytGUXl1Rm1MWHBVRVpCbE5PNUE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRlc3QgZml4dHVyZQpCeWlPRW53ZzF4azBBdHh4WVhOWENDOGJzMjRFM2Zvc1lTM1BKU1JhV2Z1TzJac0ZmVXhMS1J1TnY4aWl1S2xrWTRMMkd6Wis2ZWloT0pmM2NlOXBBdz09Cg==";
