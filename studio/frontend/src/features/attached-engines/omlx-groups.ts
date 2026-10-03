@@ -14,6 +14,8 @@ export type OmlxModelGroup = {
   loading: boolean;
   sizeBytes: number;
   pinned: boolean;
+  /** Seconds left before the idle unload as of the poll, from the loaded row; null when none applies. */
+  idleRemainingS: number | null;
   kind: "chat" | "embedding" | "helper";
 };
 
@@ -30,6 +32,13 @@ function groupKind(
   if (rows.some((row) => row.engineType === "embedding")) return "embedding";
   if (rows.some((row) => row.isHelper)) return "helper";
   return "chat";
+}
+
+function minIdleRemaining(rows: AttachedOmlxModel[]): number | null {
+  const values = rows
+    .map((row) => row.idleRemainingS)
+    .filter((value): value is number => value !== null);
+  return values.length > 0 ? Math.min(...values) : null;
 }
 
 export function groupOmlxModels(status: AttachedOmlxStatus): OmlxModelGroup[] {
@@ -52,6 +61,7 @@ export function groupOmlxModels(status: AttachedOmlxStatus): OmlxModelGroup[] {
       loading: rows.some((row) => row.isLoading),
       sizeBytes: Math.max(...rows.map((row) => row.estimatedSize)),
       pinned: rows.some((row) => row.pinned),
+      idleRemainingS: minIdleRemaining(rows),
       kind: groupKind(rows, chatIds),
     });
   }
