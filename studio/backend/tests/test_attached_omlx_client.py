@@ -263,3 +263,13 @@ def test_unload_all_continues_after_one_failure():
 
     client = OmlxClient("http://127.0.0.1:8843", transport = httpx.MockTransport(handler))
     assert run(client.unload_all()) == [SWIFT_DIR]
+
+
+def test_chat_model_ids_reuses_a_supplied_status():
+    server = Server()
+    client = server.client()
+    status = run(client.status())
+    server.calls.clear()
+    ids = run(client.chat_model_ids(status = status))
+    assert "swift-1.5-27b" in ids and EMBED_ID not in ids
+    assert server.calls == [("GET", "/v1/models")]
