@@ -426,6 +426,50 @@ PROVIDER_REGISTRY: dict[str, dict[str, Any]] = {
         "hidden": True,
         "managed": True,
     },
+    "omlx": {
+        "display_name": "oMLX",
+        "base_url": "http://127.0.0.1:8843/v1",
+        "default_models": [],
+        "supports_streaming": True,
+        "supports_vision": True,
+        "supports_tool_calling": True,
+        "studio_tools": True,
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer ",
+        "notes": (
+            "Attached oMLX server (Apple Silicon MLX). OpenAI-compatible /v1/chat/completions; "
+            "seeded by the attached-engines sync, which lists models from the live server."
+        ),
+        # oMLX applies the model's chat template and reads chat_template_kwargs.enable_thinking.
+        "supports_chat_template_kwargs": True,
+        "hidden": True,
+    },
+    "dwarfstar": {
+        "display_name": "DwarfStar",
+        "base_url": "http://127.0.0.1:8001/v1",
+        "default_models": [],
+        "supports_streaming": True,
+        "supports_vision": True,
+        "supports_tool_calling": True,
+        "studio_tools": True,
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer ",
+        "notes": (
+            "Attached DwarfStar (ds4) on-demand launcher. OpenAI-compatible /v1/chat/completions; "
+            "cold start can take up to two minutes before the first byte."
+        ),
+        # The launcher fills its per-alias sampling presets only for keys absent from the body, but Studio always sends
+        # temperature, top_p and presence_penalty, so every sampling key is dropped to let the presets apply.
+        "body_omit": (
+            "temperature",
+            "top_p",
+            "top_k",
+            "presence_penalty",
+            "min_p",
+            "repetition_penalty",
+        ),
+        "hidden": True,
+    },
     "openrouter": {
         "display_name": "OpenRouter",
         "base_url": "https://openrouter.ai/api/v1",
