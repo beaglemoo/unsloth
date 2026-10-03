@@ -3682,6 +3682,91 @@ router = APIRouter()
 studio_router = APIRouter()
 
 
+class _ToolLoopTimingTransport:
+    """Keep attached-engine timing facts while the tool loop withholds each turn's usage."""
+
+    _USAGE_DURATION_FIELDS = (
+        "generation_duration",
+        "prompt_eval_duration",
+        "time_to_first_token",
+    )
+    _TIMING_TOTAL_FIELDS = ("predicted_n", "predicted_ms", "prompt_n", "prompt_ms", "cache_n")
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.heals_text_tool_calls = inner.heals_text_tool_calls
+        self.sanitizes_provider_frames = inner.sanitizes_provider_frames
+        self.preserves_reasoning = getattr(inner, "preserves_reasoning", False)
+        self._durations: dict[str, float] = {}
+        self._timings: dict[str, float] = {}
+        self._last_timings: dict[str, Any] = {}
+
+    @staticmethod
+    def _payload(line: Any) -> Optional[dict]:
+        if not isinstance(line, str) or not line.startswith("data:"):
+            return None
+        try:
+            payload = json.loads(line[5:].strip())
+        except (TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _number(value: Any) -> Optional[float]:
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    def _capture(self, line: Any) -> None:
+        payload = self._payload(line)
+        if payload is None:
+            return
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            for field in self._USAGE_DURATION_FIELDS:
+                value = self._number(usage.get(field))
+                if value is not None:
+                    self._durations[field] = self._durations.get(field, 0.0) + value
+        timings = payload.get("timings")
+        if not isinstance(timings, dict):
+            return
+        self._last_timings = dict(timings)
+        for field in self._TIMING_TOTAL_FIELDS:
+            value = self._number(timings.get(field))
+            if value is not None:
+                self._timings[field] = self._timings.get(field, 0.0) + value
+
+    def stream(self, **kwargs):
+        async def _stream():
+            async for line in self._inner.stream(**kwargs):
+                self._capture(line)
+                yield line
+
+        return _stream()
+
+    def enrich_final_usage(self, line: Any) -> Any:
+        payload = self._payload(line)
+        if payload is None or payload.get("id") != "chatcmpl-external-tools":
+            return line
+        usage = payload.get("usage")
+        if isinstance(usage, dict) and self._durations:
+            usage = dict(usage)
+            usage.update(self._durations)
+            payload["usage"] = usage
+        if self._timings:
+            timings = dict(self._last_timings)
+            timings.update(self._timings)
+            predicted_n = timings.get("predicted_n") or 0.0
+            predicted_ms = timings.get("predicted_ms") or 0.0
+            prompt_n = timings.get("prompt_n") or 0.0
+            prompt_ms = timings.get("prompt_ms") or 0.0
+            timings["predicted_per_token_ms"] = predicted_ms / predicted_n if predicted_n else 0.0
+            timings["predicted_per_second"] = (
+                predicted_n / (predicted_ms / 1000.0) if predicted_ms else 0.0
+            )
+            timings["prompt_per_second"] = prompt_n / (prompt_ms / 1000.0) if prompt_ms else 0.0
+            payload["timings"] = timings
+        return "data: " + json.dumps(payload, separators = (",", ":"), ensure_ascii = False)
+
+
 # Allow tauri origins plus any localhost dev origin; the shell exposes no server resource.
 _ARTIFACT_PREVIEW_FRAME_ANCESTORS = (
     "'self' tauri://localhost http://tauri.localhost http://localhost:* http://127.0.0.1:*"
@@ -28663,6 +28748,7 @@ async def _proxy_to_external_provider(
         )
         # A managed runtime that drops a reply still closes with [DONE]; it is cut short, not done.
         managed_finish = _TurnFinish()
+        tool_loop_timings = None
         if run_studio_tool_loop:
             # Drop caller catalog and hosted names Unsloth runs; endpoint check must match Responses translator.
             hosted_provider_type = (
@@ -28679,7 +28765,7 @@ async def _proxy_to_external_provider(
                 if not _ui_events:
                     _tool_call_stripper.end_turn()
 
-            gen = stream_with_studio_tools(
+            tool_loop_timings = _ToolLoopTimingTransport(
                 OAICompatTransport(
                     client,
                     model = model,
@@ -28688,7 +28774,10 @@ async def _proxy_to_external_provider(
                     enabled_tools = loop_hosted_tools or None,
                     stream = True,
                     **_provider_kwargs,
-                ),
+                )
+            )
+            gen = stream_with_studio_tools(
+                tool_loop_timings,
                 run = ToolLoopRun(
                     messages = chat_messages,
                     session_id = payload.session_id,
@@ -28768,6 +28857,8 @@ async def _proxy_to_external_provider(
                 )
             provider_compaction_reported = False
             async for line in gen:
+                if tool_loop_timings is not None:
+                    line = tool_loop_timings.enrich_final_usage(line)
                 line = attach_timings(line, provider_type)
                 if _is_openai_sse_done(line) and _managed_cut_short():
                     # intercept [DONE] before the monitor records a cut-short reply as complete.
