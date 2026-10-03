@@ -10,6 +10,10 @@ mod desktop_backend_owner;
 mod desktop_update_policy;
 mod desktop_updater;
 mod diagnostics;
+#[cfg(feature = "attached-engines")]
+mod engine_helpers;
+#[cfg(feature = "attached-engines")]
+mod engine_tray;
 mod install;
 mod install_watchdog;
 #[cfg(target_os = "linux")]
@@ -1788,6 +1792,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .items(&[&open, &toggle, &quit])
         .build()?;
     app.manage(TrayServerToggle(toggle));
+    #[cfg(feature = "attached-engines")]
+    engine_tray::install(app, &menu)?;
 
     // macOS renders tray images at 18 points. Embed the 36 px scale for crisp Retina output;
     // template mode lets AppKit choose the correct monochrome color for the current menu bar.
@@ -1808,6 +1814,9 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 let _ = app.emit("tray-toggle-server", ());
             }
             "quit" => request_quit(app),
+            #[cfg(feature = "attached-engines")]
+            other => engine_tray::on_menu_event(app, other),
+            #[cfg(not(feature = "attached-engines"))]
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -2262,6 +2271,12 @@ fn main() {
             get_launch_at_login,
             set_launch_at_login,
             set_tray_server_status,
+            #[cfg(feature = "attached-engines")]
+            engine_helpers::engine_helpers_status,
+            #[cfg(feature = "attached-engines")]
+            engine_helpers::engine_helpers_enable,
+            #[cfg(feature = "attached-engines")]
+            engine_helpers::engine_helpers_disable,
         ])
         .setup(|app| {
             // Resolve here, before any window path can ask: this consumes the relaunch marker.
