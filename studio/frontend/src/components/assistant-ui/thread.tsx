@@ -50,6 +50,7 @@ import {
   MessageResponseModelBadge,
 } from "@/components/assistant-ui/message-response-details-sheet";
 import { ComposerDraftPreview } from "@/components/assistant-ui/composer-draft-preview";
+import { DwarfStarWarmingIndicator } from "@/features/attached-engines/dwarfstar-warming-indicator";
 import { PromptQueueList } from "@/components/assistant-ui/lazy-prompt-queue-list";
 import { QueueResumeIcon } from "@/components/assistant-ui/queue-resume-icon";
 import { observeReplyPaint } from "@/components/assistant-ui/reply-paint";
@@ -6176,6 +6177,7 @@ const Composer: FC<{
       {!isDictating ? attachments : null}
       {!isDictating ? <ComposerDraftPreview text={composerText} /> : null}
       {!isDictating ? toolStatus : null}
+      {!isDictating ? <DwarfStarWarmingIndicator /> : null}
       <div
         className="unsloth-composer-line"
         // The permission pill is always visible, so stay two-row unless dictating.

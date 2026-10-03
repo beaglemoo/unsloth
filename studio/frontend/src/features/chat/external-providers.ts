@@ -566,6 +566,39 @@ export function isVertexBaseUrl(baseUrl: string | null | undefined): boolean {
   return url != null && !url.pathname.toLowerCase().includes("/endpoints/openapi");
 }
 
+/** Saved provider rows owned by the attached-engines sync (oMLX, DwarfStar). Ids mirror
+ *  core/inference/attached/__init__.py. */
+export const ATTACHED_PROVIDER_IDS = {
+  omlx: "attachedomlx0001",
+  dwarfstar: "attachedds400001",
+} as const;
+
+export type AttachedProviderKind = keyof typeof ATTACHED_PROVIDER_IDS;
+
+const ATTACHED_PROVIDER_LABELS: Record<AttachedProviderKind, string> = {
+  omlx: "oMLX",
+  dwarfstar: "DwarfStar",
+};
+
+/** Which attached engine a connection is, by its saved id or, failing that, its type. */
+export function attachedProviderKind(
+  providerId: string | null | undefined,
+  providerType?: string | null,
+): AttachedProviderKind | null {
+  for (const kind of Object.keys(ATTACHED_PROVIDER_IDS) as AttachedProviderKind[]) {
+    if (providerId === ATTACHED_PROVIDER_IDS[kind] || providerType === kind) {
+      return kind;
+    }
+  }
+  return null;
+}
+
+export function isAttachedProviderType(
+  providerType: string | null | undefined,
+): boolean {
+  return attachedProviderKind(null, providerType) !== null;
+}
+
 const CUSTOM_PROVIDER_LABELS: Record<string, string> = {
   [LEGACY_CUSTOM_PROVIDER_TYPE]: CUSTOM_PROVIDER_DISPLAY_NAME,
   ...Object.fromEntries(
@@ -639,6 +672,8 @@ export function customProviderDisplayName(
   providerType: string | null | undefined,
 ): string {
   if (!providerType) return CUSTOM_PROVIDER_DISPLAY_NAME;
+  const attached = attachedProviderKind(null, providerType);
+  if (attached) return ATTACHED_PROVIDER_LABELS[attached];
   return CUSTOM_PROVIDER_LABELS[providerType] ?? providerType;
 }
 

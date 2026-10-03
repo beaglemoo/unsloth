@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { DashboardSquare01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useLayoutEffect, useRef, useState } from "react";
-import { isCustomProviderType } from "./external-providers";
+import { isAttachedProviderType, isCustomProviderType } from "./external-providers";
 import { providerLogoPath } from "./provider-logo-path";
 
 export function apiProviderLogoSrc(
@@ -119,7 +119,7 @@ export function ApiProviderLogo({ providerType, className, title, name }: ApiPro
       />
     );
   }
-  if (!src && isCustomProviderType(providerType)) {
+  if (!src && (isCustomProviderType(providerType) || isAttachedProviderType(providerType))) {
     return (
       <span title={title} aria-hidden className="inline-flex shrink-0">
         <HugeiconsIcon icon={DashboardSquare01Icon} className={cn("shrink-0", className)} />
