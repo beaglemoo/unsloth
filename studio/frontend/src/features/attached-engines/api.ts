@@ -12,6 +12,9 @@ import type {
   AttachedProvider,
   AttachedSyncResult,
   AttachedStatus,
+  Ds4ApplyResult,
+  Ds4ContextInfo,
+  OmlxContextInfo,
 } from "./types";
 
 const STATUS_URL = "/api/engines/attached/status";
@@ -39,6 +42,11 @@ function omlxModelFromApi(raw: Obj): AttachedOmlxModel {
     engineType: strOrNull(raw.engine_type),
     isHelper: raw.is_helper === true,
     modelAlias: strOrNull(raw.model_alias),
+    maxContextWindow: numOrNull(raw.max_context_window),
+    modelContextLength: numOrNull(raw.model_context_length),
+    maxTokens: numOrNull(raw.max_tokens),
+    ttlS: numOrNull(raw.ttl_s),
+    idleRemainingS: numOrNull(raw.idle_remaining_s),
   };
 }
 
@@ -68,6 +76,9 @@ function ds4FromApi(raw: Obj): AttachedDs4Status {
     lastGenTps: numOrNull(raw.last_gen_tps),
     lastTtftMs: numOrNull(raw.last_ttft_ms),
     startTimeoutS: num(raw.start_timeout_s, 120),
+    ctx: numOrNull(raw.ctx),
+    ctxActive: numOrNull(raw.ctx_active),
+    pendingRestart: raw.pending_restart === true,
     error: strOrNull(raw.error),
   };
 }
@@ -98,6 +109,7 @@ export async function fetchAttachedStatus(
     ds4: body.ds4 ? ds4FromApi(body.ds4 as Obj) : null,
     modelsHash: typeof body.models_hash === "string" ? body.models_hash : "",
     notices: arr(body.notices).map((row) => noticeFromApi(row as Obj)),
+    receivedAt: Date.now(),
   };
 }
 
@@ -139,6 +151,78 @@ export async function unloadOmlxModel(modelId: string): Promise<void> {
 
 export async function unloadAllOmlxModels(): Promise<void> {
   await post("/omlx/unload-all", undefined, "Failed to unload models");
+}
+
+function omlxContextFromApi(raw: Obj): OmlxContextInfo {
+  return {
+    modelId: String(raw.model_id ?? ""),
+    dir: String(raw.dir ?? ""),
+    maxContextWindow: numOrNull(raw.max_context_window),
+    nativeMax: numOrNull(raw.native_max),
+    effective: numOrNull(raw.effective),
+  };
+}
+
+const APPLIED = new Set<string>([
+  "next_start",
+  "restarted",
+  "after_current_requests",
+  "unchanged",
+]);
+
+function ds4ContextFromApi(raw: Obj): Ds4ContextInfo {
+  return {
+    ctx: num(raw.ctx),
+    ctxActive: numOrNull(raw.ctx_active),
+    ctxMin: num(raw.ctx_min, 4096),
+    ctxMax: num(raw.ctx_max),
+    pendingRestart: raw.pending_restart === true,
+    applied:
+      typeof raw.applied === "string" && APPLIED.has(raw.applied)
+        ? (raw.applied as Ds4ApplyResult)
+        : null,
+  };
+}
+
+export async function getOmlxContext(modelId: string): Promise<OmlxContextInfo> {
+  const res = await post(
+    "/omlx/context/get",
+    { model_id: modelId },
+    "Failed to read the context length",
+  );
+  return omlxContextFromApi((await res.json()) as Obj);
+}
+
+/** `null` resets the model to its default cap. */
+export async function setOmlxContext(
+  modelId: string,
+  maxContextWindow: number | null,
+): Promise<OmlxContextInfo> {
+  const res = await post(
+    "/omlx/context",
+    { model_id: modelId, max_context_window: maxContextWindow },
+    "Failed to set the context length",
+  );
+  return omlxContextFromApi((await res.json()) as Obj);
+}
+
+export async function getDs4Context(): Promise<Ds4ContextInfo> {
+  const res = await authFetch("/api/engines/attached/ds4/context");
+  if (!res.ok) {
+    throw new Error(
+      await readFastApiError(res, "Failed to read the DwarfStar context length"),
+    );
+  }
+  return ds4ContextFromApi((await res.json()) as Obj);
+}
+
+export async function setDs4Context(ctx: number): Promise<Ds4ContextInfo> {
+  const res = await post(
+    "/ds4/context",
+    { ctx },
+    "Failed to set the DwarfStar context length",
+  );
+  return ds4ContextFromApi((await res.json()) as Obj);
 }
 
 export async function startDs4(): Promise<void> {
