@@ -126,12 +126,14 @@ def contains_sensitive_path_component(path: str) -> bool:
 
 
 def list_scan_folders() -> list[dict]:
+    from utils.scan_denylist import is_denied
+
     conn = get_connection()
     try:
         rows = conn.execute(
             "SELECT id, path, created_at FROM scan_folders ORDER BY created_at"
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in rows if not is_denied(row["path"])]
     finally:
         conn.close()
 
@@ -156,6 +158,11 @@ def add_scan_folder_with_status(path: str) -> tuple[dict, bool]:
 
     if not within_account(Path(normalized)):
         raise ValueError("Path is outside this account's workspace")
+
+    from utils.scan_denylist import is_denied
+
+    if is_denied(normalized):
+        raise ValueError("Path is excluded by the model scan deny-list")
 
     is_win = platform.system() == "Windows"
     denied = _denied_prefix(normalized)
