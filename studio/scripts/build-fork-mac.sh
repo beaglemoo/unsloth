@@ -291,6 +291,23 @@ PY
   ) || die "the installed backend is not the fork build"
 }
 
+# EXIT handler for the install: whatever the failure, the helpers it booted out are restarted.
+INSTALL_ARMED=0
+rollback_install() {
+  helpers_start || warn "the helpers did not restart; use Settings > API Keys > Background engines, off and on"
+}
+install_on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [ "$rc" -ne 0 ] && [ "$INSTALL_ARMED" = 1 ]; then
+    INSTALL_ARMED=0
+    rollback_install
+  fi
+  exit "$rc"
+}
+arm_install_rollback() { INSTALL_ARMED=1; trap install_on_exit EXIT; }
+disarm_install_rollback() { INSTALL_ARMED=0; trap - EXIT; }
+
 # Swap the app bundle with the helpers out of launchd: they exec from inside it. The new app is
 # copied and verified beside the old one first, so the window with no app is two renames.
 install_app() {
@@ -301,10 +318,11 @@ install_app() {
 
   log "unload oMLX models and stop ds4, then boot the helpers out of launchd"
   engines_quiesce
+  # Armed BEFORE the first bootout: a bootout that fails for the second helper, or a port gate
+  # that times out, must still bring back whatever was already stopped.
+  arm_install_rollback
   helpers_stop
   wait_ports_free
-  # If anything below fails the helpers are still owed a restart.
-  trap 'helpers_start || true' EXIT
 
   if [ -e "$INSTALLED_APP" ]; then
     run mkdir -p "$(dirname "$APP_PREV")"
@@ -318,9 +336,9 @@ install_app() {
 
   log "restart the helpers"
   if helpers_start; then
-    trap - EXIT
+    disarm_install_rollback
   else
-    trap - EXIT
+    disarm_install_rollback
     warn "the helpers did not restart; use Settings > API Keys > Background engines, off and on"
   fi
 }
