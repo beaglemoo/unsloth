@@ -877,3 +877,168 @@ def test_an_up_to_date_omlx_venv_discards_a_stale_staged_one(home):
     assert result.returncode == 0, result.stderr
     assert not (home / "omlx.new").exists()
     assert marker(home) == {"omlx": key}
+
+
+# --- engines.toml migration ---------------------------------------------------------------------
+
+# What the first release generated: ds4 on the LAN, no peer eviction.
+OLD_CONFIG = """\
+# Unsloth attached engines (oMLX and DwarfStar/ds4).
+# my own note: keep this file tidy
+
+[omlx]
+base_path = "~/.omlx-tuned"
+port = 8843
+# host = "127.0.0.1"   # unset: oMLX uses the host from <base_path>/settings.json
+
+[omlx.env]
+OMLX_QWEN35_SPARSE_BOUNDARIES = "1"
+OMLX_NAX = "1"
+OMLX_SUPERVISED = "launchd"
+
+[ds4]
+model = "~/Homelab/dwarfstar/ds4flash.gguf"
+# Launcher (OpenAI-compatible, on demand) and the internal ds4-server port.
+host = "0.0.0.0"
+launcher_port = 8001
+ctx = 65536
+"""
+
+
+def write_config(home, text):
+    cfg = home / "engines.toml"
+    cfg.write_text(text)
+    return cfg
+
+
+def backups(home):
+    return sorted(p.name for p in home.glob("engines.toml.bak-*"))
+
+
+def migrate_cfg(home):
+    return build_fn(home, "migrate_config")
+
+
+def parsed(cfg):
+    import tomllib
+
+    return tomllib.loads(cfg.read_text())
+
+
+def test_an_old_generated_config_is_migrated_with_a_backup(home):
+    cfg = write_config(home, OLD_CONFIG)
+    cfg.chmod(0o640)
+    result = migrate_cfg(home)
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = parsed(cfg)
+    assert data["ds4"]["host"] == "127.0.0.1"
+    assert data["omlx"]["env"]["OMLX_PEER_EVICT_URLS"] == "http://127.0.0.1:8001"
+    # the backup is the untouched original, written before the edit
+    (backup,) = backups(home)
+    assert (home / backup).read_text() == OLD_CONFIG
+    # every other key, comment and the file mode survive
+    assert data["ds4"]["ctx"] == 65536 and data["omlx"]["env"]["OMLX_NAX"] == "1"
+    new = cfg.read_text()
+    assert "# my own note: keep this file tidy" in new and "# Launcher (OpenAI-compatible" in new
+    assert stat.S_IMODE(cfg.stat().st_mode) == 0o640
+    removed = [line for line in OLD_CONFIG.splitlines() if line not in new.splitlines()]
+    assert removed == ['host = "0.0.0.0"']
+    # the peer URL sits inside [omlx.env], before [ds4]
+    assert new.index("OMLX_PEER_EVICT_URLS") < new.index("[ds4]")
+    # every change is logged
+    assert 'host "0.0.0.0" -> "127.0.0.1"' in result.stdout and "OMLX_PEER_EVICT_URLS" in result.stdout
+    assert str(home / backup) in result.stdout
+
+
+@pytest.mark.parametrize(
+    "marker",
+    ["# keep-lan", "# KEEP-LAN: the iPad reads this", "lan = true"],
+)
+def test_a_deliberate_lan_config_is_left_on_the_lan(home, marker):
+    text = OLD_CONFIG.replace('host = "0.0.0.0"', f'host = "0.0.0.0"\n{marker}' if marker.startswith("lan") else f'{marker}\nhost = "0.0.0.0"')
+    cfg = write_config(home, text)
+    result = migrate_cfg(home)
+    assert result.returncode == 0, result.stdout + result.stderr
+    data = parsed(cfg)
+    assert data["ds4"]["host"] == "0.0.0.0"
+    assert "opt-out marker" in result.stdout
+    # the opt-out only covers the host; the missing peer URL is still added
+    assert data["omlx"]["env"]["OMLX_PEER_EVICT_URLS"] == "http://127.0.0.1:8001"
+    assert 'host "0.0.0.0" -> ' not in result.stdout
+    (backup,) = backups(home)
+    assert (home / backup).read_text() == text
+
+
+def test_a_custom_host_is_never_touched(home):
+    text = OLD_CONFIG.replace('host = "0.0.0.0"', 'host = "192.168.3.78"')
+    cfg = write_config(home, text)
+    assert migrate_cfg(home).returncode == 0
+    assert parsed(cfg)["ds4"]["host"] == "192.168.3.78"
+
+
+def test_a_second_run_changes_nothing(home):
+    cfg = write_config(home, OLD_CONFIG)
+    assert migrate_cfg(home).returncode == 0
+    first, first_backups = cfg.read_bytes(), backups(home)
+    assert len(first_backups) == 1
+    result = migrate_cfg(home)
+    assert result.returncode == 0, result.stderr
+    assert cfg.read_bytes() == first and backups(home) == first_backups
+    assert "up to date" in result.stdout
+
+
+def test_a_current_config_gets_no_backup(home):
+    cfg = write_config(home, (ENGINES / "engines.default.toml").read_text())
+    before = cfg.read_bytes()
+    result = migrate_cfg(home)
+    assert result.returncode == 0 and "up to date" in result.stdout
+    assert cfg.read_bytes() == before and backups(home) == []
+
+
+def test_a_config_without_omlx_env_gets_the_section_even_without_a_final_newline(home):
+    text = '[ds4]\nhost = "0.0.0.0"  # lan\nctx = 1'
+    cfg = write_config(home, text)
+    assert migrate_cfg(home).returncode == 0
+    data = parsed(cfg)
+    assert data["ds4"]["host"] == "127.0.0.1" and data["ds4"]["ctx"] == 1
+    assert data["omlx"]["env"] == {"OMLX_PEER_EVICT_URLS": "http://127.0.0.1:8001"}
+    assert 'host = "127.0.0.1"  # lan' in cfg.read_text()
+
+
+def test_an_existing_peer_url_is_kept(home):
+    text = OLD_CONFIG.replace('OMLX_SUPERVISED = "launchd"', 'OMLX_SUPERVISED = "launchd"\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:9001"')
+    cfg = write_config(home, text)
+    assert migrate_cfg(home).returncode == 0
+    assert parsed(cfg)["omlx"]["env"]["OMLX_PEER_EVICT_URLS"] == "http://127.0.0.1:9001"
+    assert cfg.read_text().count("OMLX_PEER_EVICT_URLS") == 1
+
+
+def test_an_invalid_config_is_left_alone(home):
+    cfg = write_config(home, "[ds4\nhost = oops\n")
+    result = migrate_cfg(home)
+    assert result.returncode == 0 and "not valid TOML" in result.stdout
+    assert cfg.read_text() == "[ds4\nhost = oops\n" and backups(home) == []
+
+
+def test_a_missing_config_is_not_created_by_the_migration(home):
+    result = migrate_cfg(home)
+    assert result.returncode == 0 and "nothing to migrate" in result.stdout
+    assert not (home / "engines.toml").exists()
+
+
+def test_the_build_script_migrates_through_its_flag(home):
+    cfg = write_config(home, OLD_CONFIG)
+    result = run(["bash", str(SCRIPTS / "build-engines-mac.sh"), "--migrate-config"], {"UNSLOTH_ENGINES_HOME": str(home)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert parsed(cfg)["ds4"]["host"] == "127.0.0.1" and len(backups(home)) == 1
+
+
+def test_update_migrates_the_config_and_dry_run_does_not(rig):
+    cfg = write_config(rig.home, OLD_CONFIG)
+    dry = rig.update("--dry-run")
+    assert dry.returncode == 0, dry.stdout + dry.stderr
+    assert cfg.read_text() == OLD_CONFIG and backups(rig.home) == []
+    result = rig.update()
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert parsed(cfg)["ds4"]["host"] == "127.0.0.1" and len(backups(rig.home)) == 1
+    assert "migrated" in result.stdout

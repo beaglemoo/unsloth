@@ -4,7 +4,10 @@
 #
 #   update-engines-mac.sh [--dry-run] [--yes] [--force]
 #
-#   1. preflight: the engines must be idle (nothing generating, loading or starting)
+#   1. preflight: the engines must be idle (nothing generating, loading or starting), then
+#      build-engines-mac.sh --migrate-config brings an old engines.toml up to date (ds4 host
+#      0.0.0.0 -> 127.0.0.1 unless "# keep-lan" / `lan = true`, OMLX_PEER_EVICT_URLS added; a
+#      backup engines.toml.bak-<timestamp> is written first and every change is logged)
 #   2. stage: build-engines-mac.sh --stage-only builds and validates <venv>.new while the helpers
 #      keep serving, so they are down only for the swap, not for the multi-minute build
 #      (the submodule pin check runs here; the build fails on a mismatch or a dirty submodule)
@@ -124,6 +127,7 @@ trap on_exit EXIT
 log "1/6 preflight$([ "$DRY" = 1 ] && echo ' (dry-run)')"
 [ -x "$BUILD_ENGINES" ] || die "$BUILD_ENGINES not found"
 engines_require_idle
+run "$BUILD_ENGINES" --migrate-config
 for _label in "${HELPER_LABELS[@]}"; do
   if helper_loaded "$_label"; then
     case "$_label" in *.omlx) WANT_OMLX=1 ;; *.ds4) WANT_DS4=1 ;; esac
