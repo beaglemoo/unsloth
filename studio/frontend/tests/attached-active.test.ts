@@ -170,3 +170,18 @@ test("a group carries the smallest idle countdown of its loaded rows", () => {
   );
   assert.equal(groups[0].idleRemainingS, 100);
 });
+
+test("output ceiling: oMLX's max_tokens, DwarfStar's context", async () => {
+  const { attachedMaxOutputTokens } = await import(
+    "../src/features/attached-engines/attached-active.ts"
+  );
+  const withTokens = status([model({ maxTokens: 8192 })]);
+  assert.equal(attachedMaxOutputTokens(withTokens, omlx("Swift")), 8192);
+  assert.equal(attachedMaxOutputTokens(status([model({})]), omlx("Swift")), null);
+  assert.equal(
+    attachedMaxOutputTokens(status([], ds4({ ctx: 100000, ctxActive: 65536 })), star),
+    65536,
+  );
+  assert.equal(attachedMaxOutputTokens(status([], ds4({ reachable: false })), star), null);
+  assert.equal(attachedMaxOutputTokens(null, star), null);
+});

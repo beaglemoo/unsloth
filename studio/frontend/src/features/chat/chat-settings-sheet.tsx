@@ -77,7 +77,11 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import type { ActiveAttached } from "@/features/attached-engines/attached-active";
+import {
+  type ActiveAttached,
+  attachedMaxOutputTokens,
+} from "@/features/attached-engines/attached-active";
+import { useAttachedEnginesStore } from "@/features/attached-engines/attached-engines-store";
 import { AttachedContextControl } from "./components/attached-context-control";
 import { OpenAICodeExecSection } from "./components/openai-code-exec-section";
 import { PermissionModeDropdown } from "./permission-mode-select";
@@ -838,13 +842,29 @@ export function ChatSettingsPanel({
     activeExternalProvider?.enablePromptCaching !== false;
   // The OpenRouter cap comes from the live catalog, which can land after this panel renders.
   useSyncExternalStore(subscribeModelCatalog, modelCatalogVersion);
-  const maxTokensMax = isExternalModel
+  const attachedStatus = useAttachedEnginesStore((s) => s.status);
+  const attachedKind = attachedProviderKind(
+    activeExternalProvider?.id,
+    activeExternalProvider?.providerType,
+  );
+  const attachedOutputCap = attachedMaxOutputTokens(
+    attachedStatus,
+    attachedKind && externalSelection
+      ? { kind: attachedKind, modelId: externalSelection.modelId }
+      : null,
+  );
+  const providerMaxTokensMax = isExternalModel
     ? getExternalMaxOutputTokens(
         externalProviderType,
         externalSelection?.modelId,
         activeExternalProvider?.maxOutputTokens,
       )
     : localMaxTokensCeiling(baseContext, params.maxSeqLength);
+  // oMLX and DwarfStar report their own output ceiling (the model's max_tokens, the context).
+  const maxTokensMax =
+    attachedOutputCap != null
+      ? Math.min(providerMaxTokensMax, attachedOutputCap)
+      : providerMaxTokensMax;
   const showOpenAICodeExecSection =
     activeExternalProvider != null &&
     providerSupportsBuiltinCodeExecution(
