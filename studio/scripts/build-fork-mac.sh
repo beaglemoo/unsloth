@@ -202,7 +202,10 @@ build_fork_wheel() {
   fi
   WHEEL="$(find "$out" -maxdepth 1 -name 'unsloth-*.whl' | head -n 1)"
   [ -n "$WHEEL" ] || die "no wheel was produced in $out"
-  python3 -m zipfile -l "$WHEEL" | grep -q 'studio/backend/routes/attached_engines.py' \
+  # Capture first: `zipfile -l | grep -q` trips pipefail when grep exits early (SIGPIPE).
+  local listing
+  listing="$(python3 -m zipfile -l "$WHEEL")" || die "cannot list $WHEEL"
+  grep -q 'studio/backend/routes/attached_engines.py' <<<"$listing" \
     || die "$WHEEL does not contain the fork's attached-engines backend"
   log "fork wheel built: $WHEEL"
 }
@@ -398,7 +401,7 @@ phase_install() {
   log "1/8 quit Unsloth and check the engines are idle"
   quit_unsloth
   # update.rs: a pending staged-update journal has the next idle launch restore the old trees.
-  if ls "$HOME/.unsloth/studio" 2>/dev/null | grep -qi -E 'stag|rollback'; then
+  if grep -qi -E 'stag|rollback' <<<"$(ls "$HOME/.unsloth/studio" 2>/dev/null || true)"; then
     die "a staged-update journal exists in ~/.unsloth/studio; resolve it before installing"
   fi
   engines_require_idle
