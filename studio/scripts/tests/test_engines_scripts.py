@@ -795,9 +795,10 @@ def test_install_restores_the_backend_when_the_version_is_unacceptable(tmp_path)
 def test_a_good_install_keeps_the_new_backend_and_swaps_the_app(tmp_path):
     result = phase(
         tmp_path,
-        'install_backend() { echo new >"$STUDIO_VENV/lib/mod.py"; }; check_installed_version() { :; }; verify_backend() { :; }; APP_BACKUP=/nonexistent-ok; ditto() { :; }',
+        'install_backend() { echo new >"$STUDIO_VENV/lib/mod.py"; }; check_installed_version() { :; }; verify_backend() { :; }; APP_BACKUP="$HOME/app.bak"; ditto() { mkdir -p "$2"; }',
     )
     assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "home" / "app.bak").is_dir() and not (tmp_path / "home" / "app.bak.partial").exists()
     assert (tmp_path / "studio" / "unsloth_studio" / "lib" / "mod.py").read_text().strip() == "new"
     assert "app-installed" in result.stdout and "pruned" in result.stdout
     snapshots = list((tmp_path / "backups").glob("*/unsloth_studio/lib/mod.py"))
@@ -895,6 +896,112 @@ def test_a_busy_engine_blocks_the_app_swap_and_leaves_the_app_alone(tmp_path, ho
         assert result.returncode != 0 and "in flight" in result.stderr
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
         assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+    finally:
+        rig.close()
+
+
+# --- build-fork-mac.sh --install: backend and app are one transaction ---------------------------
+
+TXN_STUBS = (
+    "quit_unsloth() { :; }; build_fork_wheel() { WHEEL=/none; }; prune_backend_backups() { echo pruned; }; "
+    "codesign() { :; }; DRY=0; install_backend() { echo new >\"$STUDIO_VENV/lib/mod.py\"; }; "
+    "check_installed_version() { :; }; verify_backend() { :; }; APP_BACKUP=\"$HOME/app.bak\"; "
+)
+
+
+def txn(tmp_path, rig, overrides="true", extra_env=None):
+    """phase_install against the fake engines and launchctl with every backend step stubbed."""
+    make_backend(tmp_path)
+    make_app(tmp_path / "dist" / "Unsloth.app", "new")
+    make_app(tmp_path / "Apps" / "Unsloth.app", "old")
+    env = {k: v for k, v in rig.env.items() if k not in ("UNSLOTH_ENGINES_HOME",)}
+    return fork_fn(tmp_path, TXN_STUBS + overrides + "; phase_install", {**env, **(extra_env or {})})
+
+
+def assert_rolled_back(tmp_path, rig, result):
+    out = result.stdout + result.stderr
+    assert result.returncode != 0, out
+    # the backend snapshot and the previous app come back together
+    assert (tmp_path / "studio" / "unsloth_studio" / "lib" / "mod.py").read_text() == "original", out
+    assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old", out
+    assert not (tmp_path / "Apps" / "Unsloth.app.new").exists()
+    assert not (tmp_path / "home" / "app.bak.partial").exists()
+    assert not (tmp_path / "prev" / "Unsloth-prev.app.bak").exists()  # moved back, not left behind
+    assert "pruned" not in result.stdout
+    assert "previous backend was restored" in result.stderr
+    assert all(rig.loaded(label) for label in rig.labels), out
+
+
+FAILURES = {
+    "app-backup-copy": ('ditto() { case "$2" in *.partial) mkdir -p "$2"; return 1;; esac; command ditto "$@"; }', {}),
+    "staging-the-new-app": ('ditto() { case "$2" in *.new) mkdir -p "$2"; return 1;; esac; command ditto "$@"; }', {}),
+    "verifying-the-new-bundle": ('codesign() { case "$*" in *Unsloth.app.new*) return 1;; esac; }', {}),
+    "quiesce": ('engines_quiesce() { die "ds4 became busy"; }', {}),
+    "second-bootout": ("true", {"FAKE_BOOTOUT_FAIL": "ds4"}),
+    "swap": ('mv() { [ "$1" = "$INSTALLED_APP.new" ] && return 1; command mv "$@"; }', {}),
+    "final-verify": ('codesign() { [ "${!#}" = "$INSTALLED_APP" ] && return 1; return 0; }', {}),
+}
+
+
+@pytest.mark.parametrize("phase_name", list(FAILURES))
+def test_a_failure_after_the_backend_swap_restores_the_backend_and_the_app(tmp_path, home, phase_name):
+    overrides, extra_env = FAILURES[phase_name]
+    rig = Rig(tmp_path, home)
+    try:
+        result = txn(tmp_path, rig, overrides, extra_env)
+        assert_rolled_back(tmp_path, rig, result)
+        if phase_name == "app-backup-copy":
+            assert not (tmp_path / "home" / "app.bak").exists()  # an interrupted copy is not a backup
+        if phase_name == "final-verify":
+            # the helpers had come up from the new bundle: they were booted out again for the restore
+            assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 4
+    finally:
+        rig.close()
+
+
+def test_a_port_gate_timeout_after_the_backend_swap_restores_everything(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen()
+            result = txn(
+                tmp_path,
+                rig,
+                extra_env={
+                    "ENGINE_PORTS": f"{rig.omlx_port} {rig.ds4_port} {held.getsockname()[1]}",
+                    "PORT_GATE_TIMEOUT": "2",
+                },
+            )
+        assert "ports still held" in result.stderr, result.stdout + result.stderr
+        assert_rolled_back(tmp_path, rig, result)
+    finally:
+        rig.close()
+
+
+def test_a_successful_transaction_keeps_the_new_backend_and_app_and_disarms(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        result = txn(tmp_path, rig)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "studio" / "unsloth_studio" / "lib" / "mod.py").read_text().strip() == "new"
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
+        assert (tmp_path / "prev" / "Unsloth-prev.app.bak" / "Contents" / "marker").read_text() == "old"
+        assert (tmp_path / "home" / "app.bak" / "Contents" / "marker").read_text() == "old"
+        assert "pruned" in result.stdout and "rolling back" not in result.stderr
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
+def test_a_failure_in_the_prune_after_verification_does_not_roll_back(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        result = txn(tmp_path, rig, "prune_backend_backups() { return 1; }")
+        assert result.returncode != 0
+        assert (tmp_path / "studio" / "unsloth_studio" / "lib" / "mod.py").read_text().strip() == "new"
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
+        assert "rolling back" not in result.stderr
     finally:
         rig.close()
 
