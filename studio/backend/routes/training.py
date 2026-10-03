@@ -2398,12 +2398,35 @@ async def start_training(
 
         # before_spawn hook: runs only after start_training's guards pass.
         attached_engines_loop = asyncio.get_running_loop()
+        training_hold_lease = None
+
+        def _release_training_hold() -> None:
+            """Release a ds4 admission hold from the spawn worker thread."""
+            nonlocal training_hold_lease
+            lease = training_hold_lease
+            training_hold_lease = None
+            if lease is None:
+                return
+            asyncio.run_coroutine_threadsafe(lease.release(), attached_engines_loop).result()
+
+        def _watch_training_hold() -> None:
+            """Keep ds4 held until the training worker has released its model residency."""
+            lease = training_hold_lease
+            if lease is None:
+                return
+            asyncio.run_coroutine_threadsafe(
+                lease.watch_until(lambda: backend.is_training_active()),
+                attached_engines_loop,
+            )
 
         def _free_vram_for_training() -> None:
+            nonlocal training_hold_lease
             # Attached engines (oMLX, DwarfStar) share this machine's memory; a no-op unless enabled.
             from core.inference.attached.arbiter import free_for_local_from_thread
 
-            free_for_local_from_thread("training", attached_engines_loop)
+            admission = free_for_local_from_thread("training", attached_engines_loop)
+            admission.require_clear()
+            training_hold_lease = admission.lease
             try:
                 from core.export import get_export_backend
                 exp_backend = get_export_backend()
@@ -2494,6 +2517,7 @@ async def start_training(
                 logger.warning("Inference/training memory coordination failed; proceeding: %s", e)
 
         # The hook runs only once start guards pass -> VRAM freed iff training starts.
+        from core.inference.attached.arbiter import AttachedAdmissionError
         from core.inference.gpu_arbiter import SegmenterStillRunningError
         from core.training.provenance import ExactResumeResourcesUnavailable
         from routes.training_vram import ManagedEngineStillRunning
@@ -2515,12 +2539,15 @@ async def start_training(
                 ManagedEngineStillRunning,
                 SegmenterStillRunningError,
             ) as exc:
+                _release_training_hold()
                 _reject_start_request(backend, reserved_start_request_id, str(exc))
                 raise
             except ValueError as exc:
+                _release_training_hold()
                 _reject_start_request(backend, reserved_start_request_id, str(exc))
                 raise
             except Exception:
+                _release_training_hold()
                 _reject_start_request(
                     backend,
                     reserved_start_request_id,
@@ -2529,6 +2556,11 @@ async def start_training(
                 raise
 
             if success:
+                try:
+                    _watch_training_hold()
+                except Exception:
+                    _release_training_hold()
+                    raise
                 if reserved_start_request_id is not None:
                     backend.resolve_start_request(
                         reserved_start_request_id,
@@ -2536,6 +2568,7 @@ async def start_training(
                         message = "Training job queued and starting in subprocess",
                     )
             else:
+                _release_training_hold()
                 progress_error = backend.trainer.training_progress.error
                 _reject_start_request(
                     backend,
@@ -2576,6 +2609,12 @@ async def start_training(
             SegmenterStillRunningError,
         ) as exc:
             raise HTTPException(status_code = 409, detail = str(exc))
+        except AttachedAdmissionError as exc:
+            raise HTTPException(
+                status_code = 503,
+                detail = f"Cannot start training until attached engine residency is cleared: {exc}",
+                headers = {"Retry-After": "15"},
+            )
 
         if not success:
             progress_error = backend.trainer.training_progress.error
