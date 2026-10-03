@@ -22,14 +22,12 @@ logger = get_logger(__name__)
 
 Reason = Literal["training", "local_load"]
 
-_DS4_STATUS_TTL_S = 2.0
 _THREAD_WAIT_S = 360.0
 
 _notices: deque[dict[str, Any]] = deque(maxlen = 20)
 _locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
     weakref.WeakKeyDictionary()
 )
-_ds4_cache: Optional[tuple[float, Ds4Status]] = None
 
 
 @dataclass(frozen = True)
@@ -66,30 +64,15 @@ def recent_notices(since: float = 0) -> list[dict]:
     return [dict(notice) for notice in list(_notices) if notice["ts"] > since]
 
 
-async def _ds4_status(client: Ds4Client, *, fresh: bool) -> Ds4Status:
-    global _ds4_cache
-    now = time.monotonic()
-    if not fresh and _ds4_cache is not None and now - _ds4_cache[0] < _DS4_STATUS_TTL_S:
-        return _ds4_cache[1]
-    status = await client.status()
-    _ds4_cache = (time.monotonic(), status)
-    return status
-
-
-def _invalidate_ds4_cache() -> None:
-    global _ds4_cache
-    _ds4_cache = None
-
-
-async def _stop_ds4(url: str, *, fresh: bool) -> tuple[list[str], int]:
+async def _stop_ds4(url: str) -> tuple[list[str], int]:
     """Stop ds4 when it is loaded or starting. Returns (actions, in-flight requests killed)."""
     client = Ds4Client(url)
-    status = await _ds4_status(client, fresh = fresh)
+    # Always a fresh read: ds4 also starts itself on the first chat request, so a cached "idle" can be stale.
+    status = await client.status()
     if not status.reachable or not (status.loaded or status.starting):
         return [], 0
     killed = status.in_flight
     stopped = await client.stop()
-    _invalidate_ds4_cache()
     if stopped.error is not None or stopped.loaded or stopped.starting:
         logger.warning("DwarfStar did not stop cleanly (%s)", stopped.error or "still running")
         return ["DwarfStar stop failed"], 0
@@ -105,7 +88,7 @@ async def free_for_local(reason: Reason) -> ArbiterResult:
         if not config.arbitrate_local_loads:
             return ArbiterResult(skipped = "arbitration_off")
         async with _lock():
-            actions, killed = await _stop_ds4(config.ds4_url, fresh = True)
+            actions, killed = await _stop_ds4(config.ds4_url)
             unloaded = await OmlxClient(config.omlx_url).unload_all()
             if unloaded:
                 actions.append(f"Unloaded oMLX: {', '.join(unloaded)}")
@@ -127,7 +110,7 @@ async def before_omlx_use() -> ArbiterResult:
         if not config.enabled:
             return ArbiterResult(skipped = "disabled")
         async with _lock():
-            actions, killed = await _stop_ds4(config.ds4_url, fresh = False)
+            actions, killed = await _stop_ds4(config.ds4_url)
             if actions:
                 _record("omlx_use", actions, killed)
                 logger.info("DwarfStar stopped before oMLX use: %s", "; ".join(actions))
