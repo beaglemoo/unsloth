@@ -14,11 +14,18 @@
 #   5. copy the app to ~/Homelab/unsloth/dist/Unsloth.app
 #
 # install phase (changes the machine; run it deliberately):
-#   1. STUDIO_LOCAL_REPO=<repo> unsloth studio update --local, then check the backend version
-#   2. back up /Applications/Unsloth.app to ~/Applications/Unsloth-upstream-0.1.815.app.bak
-#   3. quit Unsloth (never killed; aborts if it does not exit)
-#   4. ditto the built app into /Applications
-#   5. codesign --verify --deep --strict
+#   1. quit Unsloth (never killed; aborts if it does not exit) and stop a surviving :8888 backend
+#   2. install the backend from this checkout, NON-editable, replacing the old wheel's files:
+#      STUDIO_LOCAL_NONEDITABLE=1 STUDIO_LOCAL_REPO=<repo> unsloth studio update --local
+#      (a direct pip reinstall when the venv CLI cannot start), then check the version
+#   3. verify the way the app's preflight runs it, from / : `unsloth -h`,
+#      `unsloth studio desktop-capabilities --json`, and the studio.backend imports
+#   4. back up /Applications/Unsloth.app to ~/Applications/Unsloth-upstream-0.1.815.app.bak
+#   5. ditto the built app into /Applications
+#   6. codesign --verify --deep --strict
+#
+# The build bakes UNSLOTH_FORK_REPO (this checkout) into the app: its managed repair runs the
+# same non-editable `update --local` from it and refuses, rather than installing from PyPI.
 #
 # Environment: SIGNING_IDENTITY (default "Developer ID Application: james beesley (D6VHKTRR33)"),
 #              DIST_DIR (default ~/Homelab/unsloth/dist)
@@ -106,6 +113,7 @@ phase_build() {
   # The frontend is already built above, so tauri's own beforeBuildCommand is blanked.
   ( cd "$STUDIO" && run env \
       UNSLOTH_DESKTOP_BACKEND_VERSION="$version" \
+      UNSLOTH_FORK_REPO="$REPO" \
       APPLE_SIGNING_IDENTITY="$identity" \
       "$STUDIO/node_modules/.bin/tauri" build \
         --features attached-engines \
@@ -120,21 +128,96 @@ phase_build() {
 }
 
 # ---------------------------------------------------------------------------------------------
+STUDIO_VENV="$HOME/.unsloth/studio/unsloth_studio"
+APP_BUNDLE_ID="ai.unsloth.studio"
+
+quit_unsloth() {
+  if pgrep -x unsloth-studio >/dev/null 2>&1 || [ "$DRY" = 1 ]; then
+    run osascript -e "tell application id \"$APP_BUNDLE_ID\" to quit"
+    if [ "$DRY" = 0 ]; then
+      local i
+      for i in $(seq 1 60); do pgrep -x unsloth-studio >/dev/null 2>&1 || break; sleep 1; done
+      pgrep -x unsloth-studio >/dev/null 2>&1 && die "Unsloth did not quit within 60 s; not forcing it"
+    fi
+  fi
+  # The app stops its own backend on quit; a backend it did not own stays up and would hold
+  # the files being replaced. Ask it to stop through the CLI, never with a signal.
+  if [ "$DRY" = 0 ] && curl -s -m 2 -o /dev/null 127.0.0.1:8888/api/health; then
+    log "a backend is still serving :8888, stopping it gracefully"
+    "$STUDIO_VENV/bin/unsloth" studio stop || true
+    local i
+    for i in $(seq 1 60); do curl -s -m 2 -o /dev/null 127.0.0.1:8888/api/health || break; sleep 1; done
+    curl -s -m 2 -o /dev/null 127.0.0.1:8888/api/health && die "backend on :8888 did not stop within 60 s; not forcing it"
+  fi
+}
+
+# Replaces the installed backend with this checkout as a regular (non-editable) package. An
+# editable install leaves the wheel's unrecorded runtime files (data_recipe/oxc-validator/
+# node_modules) behind; those bare directories become a namespace package for `studio` and
+# shadow the editable finder ("No module named 'studio.backend.utils'").
+install_backend() {
+  local py="$STUDIO_VENV/bin/python" cli="$STUDIO_VENV/bin/unsloth"
+  if [ "$DRY" = 1 ] || (cd / && "$cli" -h >/dev/null 2>&1); then
+    run env STUDIO_LOCAL_REPO="$REPO" STUDIO_LOCAL_NONEDITABLE=1 "$cli" studio update --local
+  else
+    log "the venv CLI cannot start; reinstalling the backend directly"
+    run "$py" -m pip uninstall -y unsloth
+    run "$py" -m pip install --no-deps --force-reinstall --no-cache-dir "$REPO"
+  fi
+}
+
+# What the app's preflight runs (preflight/managed.rs: `unsloth -h`, then
+# `unsloth studio desktop-capabilities --json`), from / like a Finder launch, plus imports of
+# the fork's own modules. studio.backend.routes cannot be imported from outside the backend
+# (routes/__init__.py uses bare `from routes...` imports that run.py makes resolvable), so the
+# fork's route module is checked by file in the installed package instead.
+verify_backend() {
+  local py="$STUDIO_VENV/bin/python" cli="$STUDIO_VENV/bin/unsloth"
+  [ "$DRY" = 0 ] || { log "[dry-run] verify from /: unsloth -h, desktop-capabilities, imports"; return 0; }
+  ( cd / && env -u PYTHONPATH -u PYTHONHOME "$cli" -h >/dev/null ) || die "preflight probe 'unsloth -h' failed"
+  ( cd / && env -u PYTHONPATH -u PYTHONHOME "$cli" studio desktop-capabilities --json >/dev/null ) \
+    || die "preflight probe 'unsloth studio desktop-capabilities --json' failed"
+  ( cd / && env -u PYTHONPATH -u PYTHONHOME "$py" - <<'PY'
+import importlib.metadata as md, importlib.util, json, os, sys
+import studio.backend.utils
+import studio.backend.utils.attached_engines_settings
+spec = importlib.util.find_spec("studio.backend.routes")
+route = os.path.join(list(spec.submodule_search_locations)[0], "attached_engines.py")
+if not os.path.isfile(route):
+    sys.exit(f"missing {route}")
+dist = md.distribution("unsloth")
+direct = json.loads(dist.read_text("direct_url.json") or "{}")
+if direct.get("dir_info", {}).get("editable"):
+    sys.exit("unsloth is an editable install; the fork backend must be a regular install")
+print("fork backend installed at", os.path.dirname(route), "version", dist.version)
+PY
+  ) || die "the installed backend is not the fork build"
+}
+
 phase_install() {
   [ -d "$DIST_APP" ] || [ "$DRY" = 1 ] || die "$DIST_APP not found; run the build phase first"
-  command -v unsloth >/dev/null || [ -x "$HOME/.local/bin/unsloth" ] || die "unsloth CLI not found"
-  local unsloth_bin; unsloth_bin="$(command -v unsloth || echo "$HOME/.local/bin/unsloth")"
+  [ -x "$STUDIO_VENV/bin/python" ] || [ "$DRY" = 1 ] || die "no managed backend venv at $STUDIO_VENV"
 
-  log "1/5 install the backend from this checkout"
-  run env STUDIO_LOCAL_REPO="$REPO" "$unsloth_bin" studio update --local
+  log "1/6 quit Unsloth"
+  quit_unsloth
+  # update.rs: a pending staged-update journal has the next idle launch restore the old trees.
+  if ls "$HOME/.unsloth/studio" 2>/dev/null | grep -qi -E 'stag|rollback'; then
+    die "a staged-update journal exists in ~/.unsloth/studio; resolve it before installing"
+  fi
+
+  log "2/6 install the backend from this checkout (non-editable)"
+  install_backend
   if [ "$DRY" = 0 ]; then
     local installed
-    installed="$("$HOME/.unsloth/studio/unsloth_studio/bin/python" -c 'from importlib.metadata import version; print(version("unsloth"))')"
+    installed="$("$STUDIO_VENV/bin/python" -c 'from importlib.metadata import version; print(version("unsloth"))')"
     check_backend_version "$installed" >/dev/null || die "installed backend version $installed is not acceptable"
     log "installed backend version: $installed"
   fi
 
-  log "2/5 back up $INSTALLED_APP"
+  log "3/6 verify the backend as the app's preflight sees it"
+  verify_backend
+
+  log "4/6 back up $INSTALLED_APP"
   if [ -e "$APP_BACKUP" ]; then
     log "backup already exists, keeping it: $APP_BACKUP"
   else
@@ -142,21 +225,11 @@ phase_install() {
     run ditto "$INSTALLED_APP" "$APP_BACKUP"
   fi
 
-  log "3/5 quit Unsloth"
-  if pgrep -x unsloth-studio >/dev/null 2>&1 || [ "$DRY" = 1 ]; then
-    run osascript -e 'tell application id "ai.unsloth.studio" to quit'
-    if [ "$DRY" = 0 ]; then
-      local i
-      for i in $(seq 1 60); do pgrep -x unsloth-studio >/dev/null 2>&1 || break; sleep 1; done
-      pgrep -x unsloth-studio >/dev/null 2>&1 && die "Unsloth did not quit within 60 s; not forcing it"
-    fi
-  fi
-
-  log "4/5 install the new app"
+  log "5/6 install the new app"
   run rm -rf "$INSTALLED_APP"
   run ditto "$DIST_APP" "$INSTALLED_APP"
 
-  log "5/5 verify"
+  log "6/6 verify"
   run codesign --verify --deep --strict --verbose=2 "$INSTALLED_APP"
   log "installed. Open Unsloth and enable Settings > Background engines."
 }
