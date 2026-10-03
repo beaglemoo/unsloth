@@ -143,20 +143,23 @@ engines_quiesce() {
 helper_loaded() { "$LAUNCHCTL" print "$HELPER_DOMAIN/$1" >/dev/null 2>&1; }
 
 # Boot out every loaded helper (SIGTERM, the engines unload gracefully) and remember which ones
-# (STOPPED_HELPERS, cleared by a successful helpers_start).
+# (STOPPED_HELPERS, cleared by a successful helpers_start). Under `set -e` a failing bootout ends
+# the caller; whatever was recorded so far is still owed a restart.
 # Never kickstart -k and never a signal of our own.
 helpers_stop() {
   local label seen owed
   for label in "${HELPER_LABELS[@]}"; do
     if [ "$DRY" = 1 ] || helper_loaded "$label"; then
-      log "bootout $label"
-      run "$LAUNCHCTL" bootout "$HELPER_DOMAIN/$label"
-      # the restart debt accumulates: a helper booted out earlier and not yet restarted stays owed
+      # Owed BEFORE the bootout: a bootout that fails part way may still have taken the helper
+      # down, and helpers_start leaves a helper that is still loaded alone. The restart debt
+      # accumulates: a helper booted out earlier and not yet restarted stays owed.
       seen=0
       for owed in ${STOPPED_HELPERS[@]+"${STOPPED_HELPERS[@]}"}; do
         [ "$owed" != "$label" ] || seen=1
       done
       [ "$seen" = 1 ] || STOPPED_HELPERS+=("$label")
+      log "bootout $label"
+      run "$LAUNCHCTL" bootout "$HELPER_DOMAIN/$label"
     else
       log "$label is not loaded, leaving it alone"
     fi
