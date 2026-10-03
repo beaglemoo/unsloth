@@ -1,8 +1,11 @@
 # Unsloth attached engines (oMLX and DwarfStar/ds4).
 #
 # Read by the omlx-launch and ds4-ondemand-launch wrappers, and by the Studio
-# desktop tray. Written once by studio/scripts/build-engines-mac.sh; it is
-# never overwritten, so edit freely. "~" is expanded in every path.
+# desktop tray. Written by studio/scripts/build-engines-mac.sh only when it is
+# missing, so edit freely. build-engines-mac.sh and update-engines-mac.sh do
+# migrate an old generated file (backup: engines.toml.bak-<timestamp>): ds4
+# host "0.0.0.0" becomes "127.0.0.1" and OMLX_PEER_EVICT_URLS is added. "~" is
+# expanded in every path.
 #
 # Per-run overrides (used for testing on alternate ports):
 #   UNSLOTH_ENGINES_CONFIG=<other toml>  UNSLOTH_ENGINES_HOME=<dir>
@@ -39,6 +42,8 @@ vision = "~/Homelab/dwarfstar/gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf"
 # Launcher (OpenAI-compatible, on demand) and the internal ds4-server port. Loopback only:
 # /admin/* is loopback-only anyway, and nothing on the LAN needs the launcher. Set
 # host = "0.0.0.0" to serve other machines (the admin API then still answers 127.0.0.1 only).
+# A deliberate LAN host is kept by the migration only with a "# keep-lan" comment (or
+# `lan = true`) in this section.
 host = "127.0.0.1"
 launcher_port = 8001
 server_port = 8000
