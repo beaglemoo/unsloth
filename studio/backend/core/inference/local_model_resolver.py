@@ -814,6 +814,7 @@ def _build_index() -> dict[str, _LocalGgufEntry]:
     )
     from hub.utils.gguf import dedupe_custom_gguf_rows, suppress_grouped_gguf_file_rows
     from hub.utils.inventory_scan import scan_folder_hf_caches
+    from utils.scan_denylist import filter_denied
     from utils.paths import legacy_hf_cache_dir, hf_default_cache_dir, lmstudio_model_dirs
     from utils.hf_cache_settings import known_hf_hub_caches
     from core.inference.model_ids import public_model_id
@@ -901,7 +902,7 @@ def _build_index() -> dict[str, _LocalGgufEntry]:
         found += suppress_grouped_gguf_file_rows(custom_found)
     except Exception as exc:
         logger.debug("auto-switch: scan folders enumerate failed: %s", exc)
-    for info in found:
+    for info in filter_denied(found):
         raw_id = getattr(info, "id", None)
         if not raw_id:
             continue
