@@ -26,11 +26,13 @@
 # unloaded and stopped first so no process holding weights is ever killed, then the helpers
 # are disabled, Unsloth quits, the port gate runs, /Applications/Unsloth.app is restored from
 # ~/Applications/Unsloth-upstream-0.1.815.app.bak, ~/.unsloth/studio is restored from
-# <state>/studio.bak (the current copy is moved aside, never deleted), and the old plists are
+# <state>/studio.bak (the current copy is moved aside, never deleted), oMLX.app and EngineBar.app
+# are moved back from ~/.unsloth/engines/migration/retired-apps/ (to /Applications and
+# ~/Applications; the old oMLX agent opens oMLX.app, so this comes first), and the old plists are
 # restored and bootstrapped.
 #
 # --dry-run prints every mutating command and still runs the read-only checks.
-# Environment: DIST_DIR (default ~/Homelab/unsloth/dist)
+# Environment: DIST_DIR (default ~/Homelab/unsloth/dist), APPS_DIR (default /Applications)
 set -euo pipefail
 
 MODE=cutover DRY=0 YES=0 STATE_ARG=""
@@ -50,10 +52,14 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="${DIST_DIR:-$HOME/Homelab/unsloth/dist}"
 DIST_APP="$DIST_DIR/Unsloth.app"
-INSTALLED_APP="/Applications/Unsloth.app"
+APPS_DIR="${APPS_DIR:-/Applications}"
+INSTALLED_APP="$APPS_DIR/Unsloth.app"
+OMLX_APP="$APPS_DIR/oMLX.app"
+ENGINEBAR_APP="$HOME/Applications/EngineBar.app"
 APP_BACKUP="$HOME/Applications/Unsloth-upstream-0.1.815.app.bak"
 ENGINES_HOME="$HOME/.unsloth/engines"
 MIG_ROOT="$ENGINES_HOME/migration"
+RETIRED_APPS="$MIG_ROOT/retired-apps"
 STUDIO_DIR="$HOME/.unsloth/studio"
 LA_DIR="$HOME/Library/LaunchAgents"
 RUNTIME_PY="$HOME/Homelab/omlx-stack/scripts/omlx_tuned_runtime.py"
@@ -349,7 +355,7 @@ cutover() {
 
   # 5/9 quit apps --------------------------------------------------------------------------
   log "5/9 quit oMLX.app and EngineBar.app"
-  quit_app oMLX "$(bundle_id /Applications/oMLX.app app.omlx)" "oMLX.app"
+  quit_app oMLX "$(bundle_id "$OMLX_APP" app.omlx)" "oMLX.app"
   quit_app EngineBar "$(bundle_id "$HOME/Applications/EngineBar.app" dev.sillymoo.enginebar)" "EngineBar.app"
 
   # 6/9 port gate --------------------------------------------------------------------------
@@ -408,6 +414,30 @@ cutover() {
   log "to roll back: $rollback_cmd $STATE"
 }
 
+# Cutover state dirs are named by timestamp; retired-apps/ and anything else beside them is not one.
+latest_state_dir() {
+  find "$MIG_ROOT" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' 2>/dev/null | sort | tail -n 1 || true
+}
+
+# oMLX.app and EngineBar.app were moved to retired-apps/ after the cutover; the old launchd agents
+# open them, so they go back before anything is bootstrapped. An app already in place is kept.
+restore_retired_apps() {
+  local name dest src
+  for name in oMLX EngineBar; do
+    if [ "$name" = oMLX ]; then dest="$OMLX_APP"; else dest="$ENGINEBAR_APP"; fi
+    src="$RETIRED_APPS/$name.app"
+    if [ -e "$dest" ]; then
+      log "$dest is already in place"
+    elif [ -d "$src" ]; then
+      run mkdir -p "$(dirname "$dest")"
+      run mv "$src" "$dest"
+      log "restored $dest from $src"
+    else
+      warn "$dest is missing and there is no $src to restore it from"
+    fi
+  done
+}
+
 # ---------------------------------------------------------------------------------------------
 rollback() {
   log "mode: rollback$([ "$DRY" = 1 ] && echo ' (dry-run)')"
@@ -415,7 +445,7 @@ rollback() {
     STATE="${STATE_ARG%/}"
     [ -d "$STATE" ] || die "state dir not found: $STATE"
   else
-    STATE="$(find "$MIG_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -n 1 || true)"
+    STATE="$(latest_state_dir)"
     STATE="${STATE%/}"
     if [ -z "$STATE" ]; then
       [ "$DRY" = 1 ] || die "no state dir under $MIG_ROOT; pass one explicitly"
@@ -494,8 +524,9 @@ rollback() {
     warn "skipped: no $STATE/studio.bak"
   fi
 
-  # 6 restore plists ----------------------------------------------------------------------
-  log "6/7 restore the old launchd agents"
+  # 6 restore apps and plists --------------------------------------------------------------
+  log "6/7 restore oMLX.app and EngineBar.app, then the old launchd agents"
+  restore_retired_apps
   local plist saved
   local -a restored=()
   for label in dev.sillymoo.ds4-ondemand dev.sillymoo.omlx-tuned dev.sillymoo.enginebar "$OPTIONAL_LABEL"; do
@@ -563,7 +594,9 @@ print(0 if s.get("api", {}).get("reachable") and s.get("metadata_state") == "act
   log "rollback complete. The fork's Studio copy is kept next to ~/.unsloth for inspection."
 }
 
-case "$MODE" in
-  cutover) cutover ;;
-  rollback) rollback ;;
-esac
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "$MODE" in
+    cutover) cutover ;;
+    rollback) rollback ;;
+  esac
+fi
