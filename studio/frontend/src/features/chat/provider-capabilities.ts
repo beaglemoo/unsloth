@@ -294,21 +294,6 @@ function _documentedMaxOutputTokens(
   return null;
 }
 
-/** Only lowers and is persisted; no provider means unknown, not the 32,768 fallback. */
-export function resolveExternalMaxTokensClamp(input: {
-  settingsHydrated: boolean;
-  hasActiveExternalProvider: boolean;
-  isExternalModel: boolean;
-  maxTokens: number;
-  maxTokensMax: number;
-}): number | null {
-  if (!input.settingsHydrated || !input.hasActiveExternalProvider) return null;
-  if (!input.isExternalModel || input.maxTokens <= input.maxTokensMax) {
-    return null;
-  }
-  return input.maxTokensMax;
-}
-
 function _inferProviderFromOpenrouterId(
   normalizedId: string,
 ): string | null {
