@@ -845,3 +845,35 @@ def test_a_busy_engine_blocks_the_app_swap_and_leaves_the_app_alone(tmp_path, ho
         assert not any(c.startswith("launchctl bootout") for c in rig.calls())
     finally:
         rig.close()
+
+
+def test_an_up_to_date_venv_discards_a_stale_staged_one(home):
+    make_venv(home / "ds4-ondemand", "live")
+    (home / ".provisioned").write_text("ds4_ondemand=pinned\n")
+    make_venv(home / "ds4-ondemand.new", "stale", ["ds4_ondemand", "reverted-bump"])
+    snippet = (
+        'HAVE_UV=0; DS4_COMMIT=pinned; FORCE=0; ENGINES_SRC=/nonexistent; '
+        'make_venv() { echo unexpected-build >&2; return 1; }; stage_ds4_ondemand; '
+        'swap_venv "$ENGINES_HOME/ds4-ondemand"'
+    )
+    result = build_fn(home, snippet)
+    assert result.returncode == 0, result.stderr
+    assert "discarding stale staged venv" in result.stdout
+    assert not (home / "ds4-ondemand.new").exists() and not (home / "ds4-ondemand.old").exists()
+    assert (home / "ds4-ondemand" / "VERSION").read_text() == "live"
+    assert marker(home) == {"ds4_ondemand": "pinned"}
+
+
+def test_an_up_to_date_omlx_venv_discards_a_stale_staged_one(home):
+    make_venv(home / "omlx", "live")
+    key = "abc:py3.13:kernels1:extras[]"
+    (home / ".provisioned").write_text(f"omlx={key}\n")
+    make_venv(home / "omlx.new", "stale", ["omlx", "other-key"])
+    snippet = (
+        'HAVE_UV=0; OMLX_COMMIT=abc; FORCE=0; OMLX_PYTHON=3.13; OMLX_WITH_CUSTOM_KERNEL=1; OMLX_EXTRAS=; '
+        'make_venv() { return 1; }; stage_omlx'
+    )
+    result = build_fn(home, snippet)
+    assert result.returncode == 0, result.stderr
+    assert not (home / "omlx.new").exists()
+    assert marker(home) == {"omlx": key}
