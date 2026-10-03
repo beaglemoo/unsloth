@@ -62,7 +62,9 @@ pub(crate) fn desktop_update_policy() -> DesktopUpdatePolicy {
 
 #[tauri::command]
 pub(crate) async fn check_desktop_manual_update() -> Result<Option<ManualUpdateInfo>, String> {
-    if !matches!(desktop_update_mode(), DesktopUpdateMode::ManualLinuxPackage) {
+    if crate::desktop_updater::updates_disabled_by_build()
+        || !matches!(desktop_update_mode(), DesktopUpdateMode::ManualLinuxPackage)
+    {
         return Ok(None);
     }
 
@@ -379,6 +381,16 @@ fn split_alpha_numeric(value: &str) -> Option<(&str, u64)> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "attached-engines")]
+    #[test]
+    fn the_fork_feature_disables_the_manual_update_check() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        assert!(matches!(
+            runtime.block_on(super::check_desktop_manual_update()),
+            Ok(None)
+        ));
+    }
+
     #[test]
     fn compare_versions_orders_supported_suffixes() {
         assert!(super::compare_versions("2026.5.3", "2026.5.3-rc1") > 0);
