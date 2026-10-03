@@ -322,11 +322,63 @@ def test_hooks_are_wired_at_each_entry_point():
     import routes.inference as inf_mod
     import routes.training as training_mod
 
-    gated = inspect.getsource(inf_mod.load_model_gated)
-    assert gated.index("free_for_local(") < gated.index("async with inference_lifecycle_gate()")
-    assert "free_for_local(" in inspect.getsource(inf_mod.load_model_for_preview)
-    assert "free_for_local(" in inspect.getsource(inf_mod._maybe_auto_switch_model)
+    # The local-load eviction lives only inside the real-load path, never at the entry points: those
+    # also see refused loads and no-op reloads.
+    for entry in (
+        inf_mod.load_model_gated,
+        inf_mod.load_model_for_preview,
+        inf_mod._maybe_auto_switch_model,
+    ):
+        assert "free_for_local(" not in inspect.getsource(entry), entry.__name__
     chat = inspect.getsource(inf_mod.produce_openai_chat_completions)
     assert chat.index("ATTACHED_OMLX_ID") < chat.index("before_omlx_use()")
     assert chat.index("before_omlx_use()") < chat.index("return await _proxy_to_external_provider(")
     assert "free_for_local_from_thread(" in inspect.getsource(training_mod.start_training)
+
+
+def test_local_load_eviction_sits_after_admission_and_the_noop_check_in_both_load_paths():
+    import inspect
+
+    import routes.inference as inf_mod
+
+    source = inspect.getsource(inf_mod._load_model_impl)
+    marker = 'await free_for_local("local_load")'
+    assert source.count(marker) == 2
+    gguf_hook = source.index(marker)
+    standard_hook = source.index(marker, gguf_hook + 1)
+    # GGUF: after the no-op reuse return and the confirmed-reload cancel, before any teardown.
+    assert source.index("return reused") < gguf_hook
+    assert source.rindex("on_reload_confirmed(cancel = True)", 0, gguf_hook) > source.index(
+        "return reused"
+    )
+    assert gguf_hook < source.index(
+        "unsloth_backend.unload_model, unsloth_backend.active_model_name"
+    )
+    assert gguf_hook < source.index("_run_gguf_load_attempt(")
+    # Standard path: after its own already_loaded return, before the llama teardown.
+    assert source.index('status = "already_loaded"') < standard_hook
+    assert source.rindex("on_reload_confirmed(cancel = True)", 0, standard_hook) > gguf_hook
+    assert standard_hook < source.index("await _unload_llama_before_standard_load(llama_backend)")
+
+
+@pytest.mark.parametrize("failure", [409, 503])
+def test_a_refused_load_does_not_free_the_engines(monkeypatch, failure):
+    """A load refused at the gate (e.g. active generations, 409) must leave ds4 and oMLX alone."""
+    from fastapi import HTTPException
+
+    import routes.inference as inf_mod
+    from models.inference import LoadRequest
+
+    state = Engines()
+    install(monkeypatch, state)
+
+    async def refuse(*args, **kwargs):
+        raise HTTPException(status_code = failure, detail = "refused")
+
+    monkeypatch.setattr(inf_mod, "_run_tracked_load_model_impl", refuse)
+    with pytest.raises(HTTPException) as err:
+        run(inf_mod.load_model_gated(LoadRequest(model_path = "org/A"), object(), "tester"))
+    assert err.value.status_code == failure
+    assert state.log == []
+    assert state.ds4_loaded is True
+    assert arbiter.recent_notices() == []
