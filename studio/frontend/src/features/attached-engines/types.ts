@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
+/** The launch failure marker the engine wrappers leave when a precondition stops a start (missing
+ *  venv, config or model, port in use): `reason`, epoch seconds, and consecutive failures. */
+export type AttachedEngineFailure = {
+  reason: string;
+  ts: number;
+  count: number;
+};
+
 export type AttachedOmlxModel = {
   id: string;
   modelPath: string;
@@ -28,6 +36,7 @@ export type AttachedOmlxStatus = {
   error: string | null;
   // Ids /v1/models lists minus embedding and helper models: what the picker offers.
   chatModelIds: string[];
+  failure: AttachedEngineFailure | null;
 };
 
 export type AttachedDs4Status = {
@@ -47,6 +56,7 @@ export type AttachedDs4Status = {
   ctxActive: number | null;
   pendingRestart: boolean;
   error: string | null;
+  failure: AttachedEngineFailure | null;
 };
 
 export type AttachedNotice = {
