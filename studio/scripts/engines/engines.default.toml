@@ -23,6 +23,11 @@ OMLX_SUPERVISED = "launchd"
 [ds4]
 # The symlink the existing launcher uses (points at the active GGUF).
 model = "~/Homelab/dwarfstar/ds4flash.gguf"
+# Model ids listed on :8001 are <alias>, <alias>-chat and <alias>-reasoner. The
+# alias is derived from the GGUF the symlink resolves to (realpath, minus .gguf
+# and the quant tag, lowercased), e.g. swift1.5-qwen3.8-flash-next. Override:
+# alias = "my-model"
+# The legacy qwen3.8-flash-next{,-chat,-reasoner} ids stay accepted, unlisted.
 # Used only if the file exists, as before.
 vision = "~/Homelab/dwarfstar/gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf"
 # Launcher (OpenAI-compatible, on demand) and the internal ds4-server port.

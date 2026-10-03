@@ -108,6 +108,8 @@ def ds4(cfg: dict) -> tuple[list[str], dict[str, str], str | None]:
             "OMLX_BASE_URL": str(section.get("omlx_url", "http://127.0.0.1:8843")),
         }
     )
+    if section.get("alias"):
+        env["DS4_MODEL_ALIAS"] = str(section["alias"])
     if section.get("vision"):
         env["DS4_VISION_FILE"] = expand(section["vision"])
     log_dir.mkdir(parents=True, exist_ok=True)
