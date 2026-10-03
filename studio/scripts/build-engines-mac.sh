@@ -128,7 +128,7 @@ pip_install() { # <venv dir> <pip args...>
 stage_wrappers() {
   mkdir -p "$STAGING"
   local f
-  for f in omlx-launch ds4-ondemand-launch engines_launch.py; do
+  for f in omlx-launch ds4-ondemand-launch engines_launch.py engines-common.sh; do
     cmp -s "$WRAPPERS/$f" "$STAGING/$f" || install -m 0755 "$WRAPPERS/$f" "$STAGING/$f"
   done
 }
