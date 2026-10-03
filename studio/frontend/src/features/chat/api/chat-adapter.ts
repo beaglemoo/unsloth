@@ -370,6 +370,7 @@ import {
   parseSourcesFromResult,
 } from "../utils/document-citation-source";
 import { mergeGoogleNativeParts } from "../utils/google-native-parts";
+import { approximateServerTimings } from "./approx-timings";
 import { cancelResearchRun, createResearchRun } from "./research-api";
 import {
   cancelChatGenerationRun,
@@ -8315,7 +8316,14 @@ export function createOpenAIStreamAdapter(
                 : undefined,
               // Persisted refusal flag driving the two-pass prune.
               anthropicRefusal: anthropicRefusalSeen || undefined,
-              serverTimings: meta?.timings ?? undefined,
+              // No engine timings: approximate from usage and the client's stream clock.
+              serverTimings:
+                meta?.timings ??
+                approximateServerTimings({
+                  usage: meta?.usage,
+                  firstTokenMs: firstTokenTime,
+                  totalMs: finishedAt - streamStartTime,
+                }),
               contextUsage: meta?.usage
                 ? {
                     promptTokens: meta.usage.prompt_tokens,
