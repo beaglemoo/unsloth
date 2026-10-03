@@ -136,7 +136,7 @@ export function AttachedContextControl({ active }: { active: ActiveAttached }) {
       />
       <div className="flex min-h-7 items-center justify-between gap-3">
         <span className="text-ui-11 text-muted-foreground">
-          {loaded.kind === "omlx" ? "Applies immediately" : "May restart the model"}
+          {loaded.kind === "omlx" ? "Applies immediately, no reload" : "May restart the model"}
         </span>
         <div className="flex items-center gap-2">
           {loaded.kind === "omlx" && range.hasOverride ? (
