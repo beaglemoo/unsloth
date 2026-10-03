@@ -11434,9 +11434,6 @@ async def _maybe_auto_switch_model(
                                 target_backend = slot.llama if target_is_gguf else slot.orchestrator
 
                             try:
-                                from core.inference.attached.arbiter import free_for_local
-
-                                await free_for_local("local_load")
                                 load_request = LoadRequest(**load_kwargs)
                                 load_request._gguf_companion_roots = gguf_companion_roots
                                 load_request._gguf_companion_roots_set = True
@@ -12051,9 +12048,6 @@ async def load_model_for_preview(
                 prior_marker = _get_preview_resident()
                 loaded_ok = False
                 try:
-                    from core.inference.attached.arbiter import free_for_local
-
-                    await free_for_local("local_load")
                     await _load_model_impl(
                         request,
                         fastapi_request,
@@ -17262,10 +17256,6 @@ async def load_model_gated(
         _cancel_for_shutdown(attempt)
     try:
         _raise_if_sidecar_swap_in_progress()
-        # Attached engines (oMLX, DwarfStar) share this machine's memory; a no-op unless enabled.
-        from core.inference.attached.arbiter import free_for_local
-
-        await free_for_local("local_load")
         # Hold the gate so idle auto-unload can't unload mid-load; auto-switch already holds it.
         async with model_load_gate():
             sink_token = eviction_sink.set(evicted_slots)
@@ -18880,6 +18870,12 @@ async def _load_model_impl(
                     timeout_s = _POST_CANCEL_DRAIN_TIMEOUT_S,
                 )
 
+            # Attached engines (oMLX, DwarfStar) share this machine's memory. Only here, once the load is
+            # admitted and is no no-op reload; a no-op unless enabled.
+            from core.inference.attached.arbiter import free_for_local
+
+            await free_for_local("local_load")
+
             # every rejection and drain has completed. the load now owns the slot for studio.
             _set_preview_resident(None)
 
@@ -19045,6 +19041,10 @@ async def _load_model_impl(
                 current_request_counted = current_request_counted,
                 timeout_s = _POST_CANCEL_DRAIN_TIMEOUT_S,
             )
+        # Attached engines (oMLX, DwarfStar) share this machine's memory; see the GGUF path above.
+        from core.inference.attached.arbiter import free_for_local
+
+        await free_for_local("local_load")
         # every rejection and drain has completed. the load now owns the slot for studio.
         _set_preview_resident(None)
         # Off-loop: a 600 GB teardown takes ~160s.
