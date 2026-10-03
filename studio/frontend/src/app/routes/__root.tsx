@@ -40,6 +40,7 @@ import { FIND_SCOPE_ATTRIBUTE, FindInPage } from "@/features/find-in-page";
 import { OnboardingMount } from "@/features/onboarding";
 import { HfTokenWarningDialog } from "@/features/hf-auth";
 import { InterfaceZoom, zoomInterfaceFromMenu } from "@/features/interface-zoom";
+import { AttachedEnginesMount } from "@/features/attached-engines";
 import {
   bootstrapPersistedCredentials,
   takeStartupCredentialBootstrap,
@@ -718,6 +719,7 @@ function RootLayout() {
       <WindowMaterialMount route={hideNavbar ? undefined : isChatRoute ? "chat" : "page"} />
       <ReloadSnapshotPrivacy />
       {!isAuthFlowRoute && <ChatSettingsHydrationMount />}
+      {!isAuthFlowRoute && <AttachedEnginesMount />}
       {!isAuthFlowRoute && <LowDiskNoticeMount />}
       {!isAuthFlowRoute && <OnboardingMount />}
       {!isAuthFlowRoute && <ApiMonitorOverlay />}
