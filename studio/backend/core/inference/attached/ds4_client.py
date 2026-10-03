@@ -116,19 +116,22 @@ class Ds4Client:
         """Stop ds4. The launcher takes its lock, so this waits out an in-progress start."""
         return await self._admin("/admin/stop")
 
-    async def model_ids(self) -> list[str]:
+    async def model_ids(self) -> Optional[list[str]]:
+        """Ids on ``/v1/models``, or None when the listing could not be fetched (timeout, HTTP error, malformed body), which is not the same as an empty catalog."""
         try:
             async with self._client() as client:
                 response = await client.get("/v1/models")
                 response.raise_for_status()
                 data = response.json().get("data")
+                if not isinstance(data, list):
+                    raise ValueError("unexpected /v1/models payload")
             return [
                 row["id"]
                 for row in data
                 if isinstance(row, dict) and isinstance(row.get("id"), str) and row["id"]
             ]
         except (httpx.HTTPError, ValueError, AttributeError, TypeError):
-            return []
+            return None
 
     async def _admin(self, path: str) -> Ds4Status:
         error: Optional[str] = None

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import httpx
+import pytest
 
 _BACKEND = Path(__file__).resolve().parents[1]
 if str(_BACKEND) not in sys.path:
@@ -116,7 +117,7 @@ def test_unreachable_never_raises():
     client = _client(boom)
     status = run(client.status())
     assert status.reachable is False and status.loaded is False and status.starting is False
-    assert run(client.model_ids()) == []
+    assert run(client.model_ids()) is None
     assert run(client.start()).reachable is False
     assert run(client.stop()).reachable is False
 
@@ -175,3 +176,25 @@ def test_stop_posts_and_returns_status():
     status = run(_client(handler).stop())
     assert posts == ["/admin/stop"]
     assert status.loaded is False and status.error is None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(503),
+        httpx.Response(200, content = b"not json"),
+        httpx.Response(200, json = {"object": "list"}),
+        httpx.Response(200, json = {"data": 3}),
+    ],
+)
+def test_model_ids_is_none_not_empty_when_the_listing_fails(response):
+    client = _client(lambda request: response)
+    assert run(client.model_ids()) is None
+
+
+def test_model_ids_is_none_on_timeout_and_empty_list_for_a_real_empty_catalog():
+    def slow(request):
+        raise httpx.ReadTimeout("slow", request = request)
+
+    assert run(_client(slow).model_ids()) is None
+    assert run(_client(lambda request: httpx.Response(200, json = {"data": []})).model_ids()) == []
