@@ -8,7 +8,7 @@ import {
 import { useChatRuntimeStore } from "@/features/chat/stores/chat-runtime-store";
 import { useExternalProvidersStore } from "@/features/chat/stores/external-providers-store";
 import { useEffect, useMemo, useState } from "react";
-import type { ActiveAttached } from "./attached-active";
+import { type ActiveAttached, activeContextWindow } from "./attached-active";
 import { useAttachedEnginesStore } from "./attached-engines-store";
 
 /** The attached engine and model the chat has selected, or null for any other model or while the flag is off. */
@@ -40,4 +40,11 @@ export function useNow(active: boolean, intervalMs = 1000): number {
     return () => clearInterval(id);
   }, [active, intervalMs]);
   return now;
+}
+
+/** The prompt cap in force for the selected oMLX or DwarfStar model, or null for any other model. */
+export function useActiveAttachedContext(): number | null {
+  const active = useActiveAttached();
+  const status = useAttachedEnginesStore((s) => s.status);
+  return activeContextWindow(status, active);
 }
