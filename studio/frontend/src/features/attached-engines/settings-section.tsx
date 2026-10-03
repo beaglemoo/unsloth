@@ -12,9 +12,19 @@ import {
   updateAttachedEnginesSettings,
 } from "./api";
 import { useAttachedEnginesStore } from "./attached-engines-store";
+import {
+  loadEngineHelpersStatus,
+  setEngineHelpersEnabled,
+} from "./engine-helpers-api";
+import {
+  type EngineHelpersStatus,
+  engineHelpersToggle,
+} from "./engine-helpers-state";
 import type { AttachedEnginesSettings } from "./types";
 import { removeAttachedProviderRows } from "./use-attached-engines";
 
+const INFO_CLASS =
+  "max-w-[calc(260px*var(--ui-space-scale,1))] text-right text-xs text-muted-foreground";
 const ERROR_CLASS =
   "max-w-[calc(260px*var(--ui-space-scale,1))] text-right text-xs text-destructive";
 
@@ -32,6 +42,35 @@ export function AttachedEnginesSettingsSection() {
   const ds4Url = ds4Draft ?? settings?.ds4Url ?? "";
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  // null: not the desktop shell, or a shell built without the engine helpers.
+  const [helpers, setHelpers] = useState<EngineHelpersStatus | null>(null);
+  const [isHelpersBusy, setIsHelpersBusy] = useState(false);
+  const helpersToggle = engineHelpersToggle(helpers);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadEngineHelpersStatus().then((status) => {
+      if (!cancelled) setHelpers(status);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleHelpers = async (enabled: boolean) => {
+    setIsHelpersBusy(true);
+    try {
+      setHelpers(await setEngineHelpersEnabled(enabled));
+    } catch (helpersError) {
+      setError(
+        helpersError instanceof Error
+          ? helpersError.message
+          : "Failed to change the background engines",
+      );
+    } finally {
+      setIsHelpersBusy(false);
+    }
+  };
 
   useEffect(() => {
     // The root mount normally has read these already; this covers a store that is still empty.
@@ -97,6 +136,27 @@ export function AttachedEnginesSettingsSection() {
           onCheckedChange={(enabled) => void persist({ enabled })}
         />
       </SettingsRow>
+      {helpersToggle ? (
+        <SettingsRow
+          label="Background engines"
+          description="Run oMLX and DwarfStar as macOS login items. They keep serving after Unsloth quits."
+          below={
+            helpersToggle.message ? (
+              <span
+                className={helpersToggle.isError ? ERROR_CLASS : INFO_CLASS}
+              >
+                {helpersToggle.message}
+              </span>
+            ) : null
+          }
+        >
+          <Switch
+            checked={helpersToggle.checked}
+            disabled={isHelpersBusy}
+            onCheckedChange={(enabled) => void toggleHelpers(enabled)}
+          />
+        </SettingsRow>
+      ) : null}
       {settings?.enabled ? (
         <>
           <SettingsRow
