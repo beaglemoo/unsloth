@@ -29,7 +29,6 @@ const {
   externalMaxOutputTokensNeedsConnectionCap,
   getGroundedExternalMaxOutputTokens,
   getPublishedExternalMaxOutputTokens,
-  resolveExternalMaxTokensClamp,
 } = await import("../src/features/chat/provider-capabilities.ts");
 
 // UI type and backend type disagree for an openai row with a custom name or base URL.
@@ -170,31 +169,9 @@ test("a provider's own output floor outranks a lower connection override", () =>
   );
 });
 
-// The settings panel persists this lowered value, so an unresolved provider must not clamp.
-test("a live Max Tokens is only lowered when the cap is actually known", () => {
-  const base = {
-    settingsHydrated: true,
-    hasActiveExternalProvider: true,
-    isExternalModel: true,
-    maxTokens: 384000,
-    maxTokensMax: 32768,
-  };
-  assert.equal(resolveExternalMaxTokensClamp(base), 32768);
-
-  // Unresolved provider reads as the 32,768 fallback, and clamping would be permanent.
-  assert.equal(
-    resolveExternalMaxTokensClamp({ ...base, hasActiveExternalProvider: false }),
-    null,
-  );
-  assert.equal(resolveExternalMaxTokensClamp({ ...base, settingsHydrated: false }), null);
-  assert.equal(resolveExternalMaxTokensClamp({ ...base, isExternalModel: false }), null);
-  assert.equal(resolveExternalMaxTokensClamp({ ...base, maxTokens: 8192 }), null);
-  assert.equal(resolveExternalMaxTokensClamp({ ...base, maxTokens: 32768 }), null);
-
-  const once = resolveExternalMaxTokensClamp(base);
-  assert.equal(resolveExternalMaxTokensClamp({ ...base, maxTokens: once as number }), null);
-});
-
+// The settings panel PERSISTS what this returns and it only ever lowers, so the
+// availability guards are what stop a blink in the provider list from destroying a
+// configured override.
 // deliberately not a Custom row: that one type round-trips the same with or without the gate
 test("an entry saved by an older install loads without gaining a cap", () => {
   const legacy = [
@@ -220,8 +197,10 @@ test("an entry saved by an older install loads without gaining a cap", () => {
   assert.equal(reloaded.maxOutputTokens, 384000);
 });
 
-// Every clamp site must wait for a resolved provider, or a preset lowers the cap for good.
-test("every clamp site waits for a resolved provider", () => {
+// The preset path still clamps the value it applies, so it must wait for a resolved provider.
+// The checkpoint switch and the settings effect no longer clamp at all (the request does).
+// Source-level assertions, since the call site is not reachable without a DOM.
+test("the preset clamp waits for a resolved provider and the store does not clamp", () => {
   const settings = readSrc("features/chat/chat-settings-sheet.tsx");
   assert.match(
     settings,
@@ -229,10 +208,7 @@ test("every clamp site waits for a resolved provider", () => {
   );
 
   const store = readSrc("features/chat/stores/chat-runtime-store.ts");
-  assert.match(
-    store,
-    /if \(provider\) \{\s*const cap = getExternalMaxOutputTokens\(\s*provider\.providerType/,
-  );
+  assert.doesNotMatch(store, /getExternalMaxOutputTokens/);
 });
 
 
