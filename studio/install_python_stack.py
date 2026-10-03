@@ -8365,6 +8365,16 @@ def _local_overlay_non_editable() -> bool:
     return os.environ.get("STUDIO_LOCAL_NONEDITABLE", "").strip().lower() in ("1", "true", "yes")
 
 
+def _core_index_install_allowed(local_repo: str) -> bool:
+    """False for the fork's non-editable --local install: the core packages then come from the
+    checkout (and unsloth-zoo from its git overlay), never from the release index.
+
+    The index copy of `unsloth` carries the upstream desktop code the fork replaces; installing it
+    first, even for a moment, would put it back under a running or preflight-checked backend.
+    """
+    return not (local_repo and _local_overlay_non_editable())
+
+
 def _overlay_local_core_package(
     name: str,
     local_repo: str,
@@ -12010,23 +12020,24 @@ def install_python_stack() -> int:
     elif NO_TORCH:
         # No-torch update path: --no-deps throughout (PyPI metadata makes torch a hard dep).
         _progress("base packages (no torch)")
-        desktop_min_ver = os.environ.get("UNSLOTH_DESKTOP_BACKEND_VERSION", "").strip()
-        unsloth_spec = (
-            f"{package_name}>={desktop_min_ver}"
-            if (desktop_min_ver and package_name == "unsloth")
-            else package_name
-        )
-        pip_install(
-            f"Updating {package_name} + unsloth-zoo (no-torch mode)",
-            "--no-cache-dir",
-            "--no-deps",
-            "--upgrade-package",
-            package_name,
-            "--upgrade-package",
-            "unsloth-zoo",
-            unsloth_spec,
-            "unsloth-zoo",
-        )
+        if _core_index_install_allowed(local_repo):
+            desktop_min_ver = os.environ.get("UNSLOTH_DESKTOP_BACKEND_VERSION", "").strip()
+            unsloth_spec = (
+                f"{package_name}>={desktop_min_ver}"
+                if (desktop_min_ver and package_name == "unsloth")
+                else package_name
+            )
+            pip_install(
+                f"Updating {package_name} + unsloth-zoo (no-torch mode)",
+                "--no-cache-dir",
+                "--no-deps",
+                "--upgrade-package",
+                package_name,
+                "--upgrade-package",
+                "unsloth-zoo",
+                unsloth_spec,
+                "unsloth-zoo",
+            )
         # pydantic WITH deps (all torch-free) so pip pins a matching pydantic-core.
         pip_install(
             "Installing pydantic (with deps for compatible core)",
@@ -12042,6 +12053,10 @@ def install_python_stack() -> int:
             )
         if local_repo:
             _overlay_local_core_packages(local_repo)
+    elif local_repo and not _core_index_install_allowed(local_repo):
+        # Fork install (STUDIO_LOCAL_NONEDITABLE): no released `unsloth` from the index first.
+        _progress("base packages (from the local checkout)")
+        _overlay_local_core_packages(local_repo)
     elif local_repo:
         # Local dev install: update the released core packages, then overlay the
         # checkout as an editable install (--no-deps so torch is not re-resolved).

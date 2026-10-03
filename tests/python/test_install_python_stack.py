@@ -2969,6 +2969,40 @@ class TestDuplicateCoreMetadataRepair:
         ]
 
 
+class TestForkInstallSkipsTheReleaseIndex:
+    """STUDIO_LOCAL_NONEDITABLE with a --local checkout must never install `unsloth` from the index."""
+
+    @pytest.mark.parametrize(
+        "env, repo, allowed",
+        [
+            ("1", "/src/unsloth", False),
+            ("true", "/src/unsloth", False),
+            ("YES", "/src/unsloth", False),
+            ("1", "", True),  # no checkout: nothing to install instead
+            ("", "/src/unsloth", True),
+            ("0", "/src/unsloth", True),
+            ("false", "/src/unsloth", True),
+        ],
+    )
+    def test_index_install_gate(self, monkeypatch, env, repo, allowed):
+        monkeypatch.setenv("STUDIO_LOCAL_NONEDITABLE", env)
+        assert ips._core_index_install_allowed(repo) is allowed
+
+    def test_both_core_branches_are_gated(self):
+        source = Path(ips.__file__).read_text(encoding = "utf-8")
+        body = source[source.index("def install_python_stack()"):]
+        # the no-torch branch guards its index install, the dev-install branch has a fork twin ahead of it
+        assert re.search(
+            r"elif NO_TORCH:.*?if _core_index_install_allowed\(local_repo\):\s+desktop_min_ver",
+            body,
+            re.S,
+        )
+        assert re.search(
+            r"elif local_repo and not _core_index_install_allowed\(local_repo\):\s+#[^\n]*\n\s+_progress\([^\n]*\)\s+_overlay_local_core_packages\(local_repo\)\s+elif local_repo:",
+            body,
+        )
+
+
 class TestDesktopBackendVersionConstraint:
     """Verify that UNSLOTH_DESKTOP_BACKEND_VERSION adds the floor pin when upgrading unsloth."""
 
