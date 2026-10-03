@@ -2397,7 +2397,13 @@ async def start_training(
         batch_members = _batch_members_for_start(training_kwargs)
 
         # before_spawn hook: runs only after start_training's guards pass.
+        attached_engines_loop = asyncio.get_running_loop()
+
         def _free_vram_for_training() -> None:
+            # Attached engines (oMLX, DwarfStar) share this machine's memory; a no-op unless enabled.
+            from core.inference.attached.arbiter import free_for_local_from_thread
+
+            free_for_local_from_thread("training", attached_engines_loop)
             try:
                 from core.export import get_export_backend
                 exp_backend = get_export_backend()
