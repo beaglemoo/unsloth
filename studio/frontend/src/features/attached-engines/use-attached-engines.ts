@@ -51,6 +51,12 @@ export function refreshAttachedStatus(): Promise<void> {
   return activePoller ? activePoller.tick() : Promise.resolve();
 }
 
+/** Rewrite the saved rows from the current config (base_url included), then reload them. */
+export async function resyncAttachedProviderRows(): Promise<void> {
+  await syncAttachedProviders();
+  await syncAttachedProviderRows();
+}
+
 /** What the owner turning the flag off must do: the saved rows come out of the picker. */
 export async function removeAttachedProviderRows(): Promise<void> {
   await syncAttachedProviders();
