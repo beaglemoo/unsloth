@@ -1,0 +1,33 @@
+#!/bin/bash
+# A launchctl that supervises fake_engine.py processes. State: $FAKE_LC (pid files, calls.log).
+# Needs FAKE_LC, FAKE_HOME, FAKE_OMLX_PORT, FAKE_DS4_PORT, FAKE_PY. FAKE_BOOTSTRAP_FAIL=1 makes
+# bootstrap fail (kickstart still works).
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "launchctl $*" >>"$FAKE_LC/calls.log"
+label_of() { basename "${1%.plist}"; }
+alive() { [ -f "$FAKE_LC/$1.pid" ] && kill -0 "$(cat "$FAKE_LC/$1.pid")" 2>/dev/null; }
+start() {
+  local label="$1" kind port
+  case "$label" in *.omlx) kind=omlx; port="$FAKE_OMLX_PORT" ;; *) kind=ds4; port="$FAKE_DS4_PORT" ;; esac
+  "$FAKE_PY" "$here/fake_engine.py" "$kind" "$FAKE_HOME" "$port" >/dev/null 2>&1 &
+  echo $! >"$FAKE_LC/$label.pid"
+  disown
+}
+case "$1" in
+  print) alive "$(label_of "$2")" ;;
+  bootout)
+    label="$(label_of "$2")"
+    alive "$label" || exit 3
+    kill "$(cat "$FAKE_LC/$label.pid")"
+    while kill -0 "$(cat "$FAKE_LC/$label.pid")" 2>/dev/null; do sleep 0.05; done
+    rm -f "$FAKE_LC/$label.pid" ;;
+  bootstrap)
+    [ "${FAKE_BOOTSTRAP_FAIL:-0}" != 1 ] || exit 5
+    label="$(label_of "$3")"
+    alive "$label" && exit 17
+    start "$label" ;;
+  kickstart)
+    # a real kickstart only works on a label launchd still has
+    alive "$(label_of "$2")" || exit 113 ;;
+  *) exit 64 ;;
+esac
