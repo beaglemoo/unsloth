@@ -122,7 +122,6 @@ def install(
         lambda url: Ds4Client(url, transport = httpx.MockTransport(state.ds4_handler)),
     )
     arbiter._notices.clear()
-    arbiter._invalidate_ds4_cache()
 
 
 def run(coro):
@@ -246,19 +245,16 @@ def test_before_omlx_use_stops_loaded_or_starting_ds4(monkeypatch):
     assert not any(entry.startswith("omlx") for entry in state.log)
 
 
-def test_before_omlx_use_caches_ds4_status_for_two_seconds(monkeypatch):
+def test_before_omlx_use_sees_a_ds4_that_started_right_after_an_idle_read(monkeypatch):
+    """ds4 starts itself on the first chat request, so an idle reading must not be reused."""
     state = Engines(ds4_loaded = False)
     install(monkeypatch, state)
-
-    async def three_calls():
-        for _ in range(3):
-            await arbiter.before_omlx_use()
-
-    run(three_calls())
-    assert state.log.count("ds4 GET /admin/status") == 1
-    arbiter._ds4_cache = (time.monotonic() - 5, arbiter._ds4_cache[1])
-    run(arbiter.before_omlx_use())
-    assert state.log.count("ds4 GET /admin/status") == 2
+    assert run(arbiter.before_omlx_use()).acted is False
+    state.ds4_loaded, state.ds4_pid = True, 4242
+    result = run(arbiter.before_omlx_use())
+    assert result.actions == ("Stopped DwarfStar",)
+    assert state.ds4_loaded is False
+    assert state.log.count("ds4 GET /admin/status") >= 2
 
 
 def test_concurrent_callers_are_serialised(monkeypatch):
