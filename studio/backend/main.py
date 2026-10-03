@@ -352,6 +352,7 @@ from routes import (
 import routes.browser as _browser_routes
 from routes.llama import router as llama_router
 from routes.engines import router as engines_router
+from routes.attached_engines import router as attached_engines_router
 from routes.llama_compat import is_engine_probe_path, router as llama_compat_router
 from routes.whisper import router as whisper_router
 from routes.npu import router as npu_router
@@ -1770,6 +1771,9 @@ app.include_router(profile_stats_router, prefix = "/api/profile", tags = ["profi
 app.include_router(datasets_router, prefix = "/api/datasets", tags = ["datasets"])
 app.include_router(data_recipe_router, prefix = "/api/data-recipe", tags = ["data-recipe"])
 app.include_router(llama_router, prefix = "/api/llama", tags = ["llama"])
+app.include_router(
+    attached_engines_router, prefix = "/api/engines/attached", tags = ["attached-engines"]
+)
 app.include_router(engines_router, prefix = "/api/engines", tags = ["engines"])
 app.include_router(whisper_router, prefix = "/api/whisper", tags = ["whisper"])
 app.include_router(npu_router, prefix = "/api/npu", tags = ["npu"])
