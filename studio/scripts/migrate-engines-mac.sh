@@ -110,7 +110,7 @@ confirm() { # <prompt>
 }
 
 label_loaded() { launchctl print "$DOMAIN/$1" >/dev/null 2>&1; }
-label_running() { launchctl print "$DOMAIN/$1" 2>/dev/null | grep -q 'state = running'; }
+label_running() { grep -q 'state = running' <<<"$(launchctl print "$DOMAIN/$1" 2>/dev/null || true)"; }
 app_running() { pgrep -x "$1" >/dev/null 2>&1; }
 
 # POST <url> <max seconds>; the HTTP status ends up in POST_CODE (000 when unreachable).
