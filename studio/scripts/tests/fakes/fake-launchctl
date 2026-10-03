@@ -1,7 +1,8 @@
 #!/bin/bash
 # A launchctl that supervises fake_engine.py processes. State: $FAKE_LC (pid files, calls.log).
 # Needs FAKE_LC, FAKE_HOME, FAKE_OMLX_PORT, FAKE_DS4_PORT, FAKE_PY. FAKE_BOOTSTRAP_FAIL=1 makes
-# bootstrap fail (kickstart still works).
+# bootstrap fail (kickstart still works). FAKE_BOOTOUT_FAIL=<label suffix, e.g. ds4> makes the
+# bootout of that helper fail without stopping it.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "launchctl $*" >>"$FAKE_LC/calls.log"
 label_of() { basename "${1%.plist}"; }
@@ -18,6 +19,7 @@ case "$1" in
   bootout)
     label="$(label_of "$2")"
     alive "$label" || exit 3
+    [ -z "${FAKE_BOOTOUT_FAIL:-}" ] || [ "${label##*.}" != "$FAKE_BOOTOUT_FAIL" ] || exit 5
     kill "$(cat "$FAKE_LC/$label.pid")"
     while kill -0 "$(cat "$FAKE_LC/$label.pid")" 2>/dev/null; do sleep 0.05; done
     rm -f "$FAKE_LC/$label.pid" ;;
