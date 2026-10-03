@@ -64,3 +64,15 @@ test("a half-registered pair stays on with guidance", () => {
   assert.equal(toggle?.checked, true);
   assert.match(toggle?.message ?? "", /some of the engine helpers/);
 });
+
+test("bundled but unregistered helpers offer the enable switch, not a missing-build notice", () => {
+  const toggle = engineHelpersToggle(
+    status("not_registered", {
+      helpers: [
+        { name: "omlx", plist: "ai.unsloth.studio.omlx.plist", state: "not_registered" },
+        { name: "ds4", plist: "ai.unsloth.studio.ds4.plist", state: "not_registered" },
+      ],
+    }),
+  );
+  assert.deepEqual(toggle, { checked: false, message: null, isError: false });
+});
