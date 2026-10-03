@@ -48,6 +48,8 @@ tauri-plugin-notification = "2.3.3"
 tempfile = "3"
 tauri-plugin-window-state = "2"
 time = { version = "0.3", features = ["formatting"] }
+# engines.toml parsing for the attached-engines tray. Already in the tree via tauri.
+toml = { version = "0.9", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -62,6 +64,8 @@ objc2 = { version = "0.6", features = ["exception"] }
 
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSAppearance", "NSButton", "NSControl", "NSResponder", "NSStatusBarButton", "NSStatusItem", "NSView", "NSBitmapImageRep", "NSImage", "NSImageRep", "NSPrintInfo", "NSPrintOperation", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSError", "NSDictionary", "NSKeyValueCoding", "NSKeyValueObserving", "NSObject", "NSProcessInfo", "NSString", "NSURL", "NSData", "NSGeometry"] }
+# Attached engines (oMLX, ds4) run as SMAppService login-item agents. Only built with `attached-engines`.
+objc2-service-management = { version = "0.3.2", optional = true, default-features = false, features = ["std", "objc2", "SMAppService", "objc2-foundation"] }
 # The browser panel's content rules (browser_webview.rs), snapshots and printing
 # (browser_capture.rs); wry already builds this crate.
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "WKContentRuleList", "WKContentRuleListStore", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore", "WKSnapshotConfiguration", "objc2-app-kit", "objc2-core-foundation"] }
@@ -92,3 +96,5 @@ tauri-build = { version = "~2.7.0", features = [] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Fork-only: bundled oMLX/ds4 helpers, their tray menu and the SMAppService commands.
+attached-engines = ["dep:objc2-service-management", "dep:toml"]

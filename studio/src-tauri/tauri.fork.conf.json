@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "resources": {
+      "engines-staging/": "engines/"
+    },
+    "macOS": {
+      "files": {
+        "Library/LaunchAgents/ai.unsloth.studio.omlx.plist": "launch-agents/ai.unsloth.studio.omlx.plist",
+        "Library/LaunchAgents/ai.unsloth.studio.ds4.plist": "launch-agents/ai.unsloth.studio.ds4.plist"
+      }
+    }
+  }
+}
