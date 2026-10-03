@@ -60,6 +60,7 @@ class Fake:
         ]
         self.loaded = {EMBED}
         self.post_status = 200
+        self.models_fail = False
 
     def omlx(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(f"omlx {request.method} {request.url.raw_path.decode()}")
@@ -95,6 +96,8 @@ class Fake:
                 json = {"models": rows, "current_model_memory": 5, "final_ceiling": 50},
             )
         if path == "/v1/models":
+            if self.models_fail:
+                return httpx.Response(503)
             ids = [EMBED, *self.chat_ids]
             return httpx.Response(200, json = {"data": [{"id": i} for i in ids]})
         return httpx.Response(404)
@@ -110,6 +113,8 @@ class Fake:
             self.ds4_loaded, self.ds4_pid = False, None
             return httpx.Response(200, json = {"status": "ok"})
         if request.url.path == "/v1/models":
+            if self.models_fail:
+                return httpx.Response(200, content = b"garbage")
             return httpx.Response(
                 200,
                 json = {"data": [{"id": "qwen3.8-flash-next"}, {"id": "qwen3.8-flash-next-chat"}]},
@@ -398,3 +403,32 @@ def test_router_is_mounted_before_the_generic_engines_router():
     attached = source.index("attached_engines_router, prefix")
     generic = source.index('app.include_router(engines_router, prefix = "/api/engines"')
     assert attached < generic
+
+
+def test_sync_preserves_saved_models_when_a_catalog_fetch_fails(client, fake):
+    client.post("/api/engines/attached/sync")
+    providers_db.update_provider(ATTACHED_OMLX_ID, models = ["swift-1.5-27b"])
+    before_omlx = providers_db.get_provider(ATTACHED_OMLX_ID)
+    before_ds4 = providers_db.get_provider(ATTACHED_DS4_ID)
+    fake.models_fail = True  # both engines answer status, but not their model listing
+    body = client.post("/api/engines/attached/sync").json()
+    assert body["rows"] == {"omlx": "kept_models", "dwarfstar": "kept_models"}
+    for row_id, before in ((ATTACHED_OMLX_ID, before_omlx), (ATTACHED_DS4_ID, before_ds4)):
+        after = providers_db.get_provider(row_id)
+        assert after["models"] == before["models"]
+        assert after["available_models"] == before["available_models"]
+    assert providers_db.get_provider(ATTACHED_OMLX_ID)["models"] == ["swift-1.5-27b"]
+
+
+def test_sync_clears_models_when_a_reachable_engine_really_lists_none(client, fake):
+    client.post("/api/engines/attached/sync")
+    fake.chat_ids.clear()
+    client.post("/api/engines/attached/sync")
+    assert providers_db.get_provider(ATTACHED_OMLX_ID)["available_models"] == []
+
+
+def test_status_reports_empty_lists_when_a_catalog_fetch_fails(client, fake):
+    fake.models_fail = True
+    body = client.get("/api/engines/attached/status").json()
+    assert body["omlx"]["reachable"] is True
+    assert body["omlx"]["chat_model_ids"] == []
