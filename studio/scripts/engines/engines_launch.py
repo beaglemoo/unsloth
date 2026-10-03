@@ -94,7 +94,7 @@ def ds4(cfg: dict) -> tuple[list[str], dict[str, str], str | None]:
     env = base_env()
     env.update(
         {
-            "DS4_ONDEMAND_HOST": str(section.get("host", "0.0.0.0")),
+            "DS4_ONDEMAND_HOST": str(section.get("host", "127.0.0.1")),
             "DS4_ONDEMAND_PORT": str(int(section.get("launcher_port", 8001))),
             "DS4_SERVER_PORT": str(int(section.get("server_port", 8000))),
             "DS4_BINARY": str(binary),

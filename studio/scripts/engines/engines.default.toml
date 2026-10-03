@@ -10,6 +10,9 @@
 [omlx]
 base_path = "~/.omlx-tuned"
 port = 8843
+# Memory ceiling: memory.memory_guard_tier in <base_path>/settings.json must be "safe"
+# (51.2 GiB on a 64 GB Mac, under the 56 GB Metal wired limit). Never "custom": it
+# disables peer eviction, so oMLX could no longer ask ds4 to unload.
 # host = "127.0.0.1"   # unset: oMLX uses the host from <base_path>/settings.json
 # extra_args = []
 
@@ -19,6 +22,9 @@ OMLX_NAX = "1"
 OMLX_QWEN35_QMM_NAX_VARIANT = "0"
 MallocSpaceEfficient = "1"
 OMLX_SUPERVISED = "launchd"
+# When oMLX needs memory it asks the ds4 launcher to unload (idle only; busy gets a 503).
+# Comma-separated base URLs; keep it equal to ds4 host:launcher_port below.
+OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"
 
 [ds4]
 # The symlink the existing launcher uses (points at the active GGUF).
@@ -30,8 +36,10 @@ model = "~/Homelab/dwarfstar/ds4flash.gguf"
 # The legacy qwen3.8-flash-next{,-chat,-reasoner} ids stay accepted, unlisted.
 # Used only if the file exists, as before.
 vision = "~/Homelab/dwarfstar/gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf"
-# Launcher (OpenAI-compatible, on demand) and the internal ds4-server port.
-host = "0.0.0.0"
+# Launcher (OpenAI-compatible, on demand) and the internal ds4-server port. Loopback only:
+# /admin/* is loopback-only anyway, and nothing on the LAN needs the launcher. Set
+# host = "0.0.0.0" to serve other machines (the admin API then still answers 127.0.0.1 only).
+host = "127.0.0.1"
 launcher_port = 8001
 server_port = 8000
 ctx = 131072
