@@ -753,6 +753,20 @@ const PROVIDER_CAPABILITIES: Record<string, ProviderCapabilities> = {
   // https://docs.ollama.com/api/openai-compatibility
   ollama: OPENAI_COMPAT_BASE,
   llama_cpp: ALL_SUPPORTED,
+  // oMLX's request schema takes every sampler. Max output is the model's own max_tokens, which
+  // defaults to the 32,768 fallback above.
+  omlx: ALL_SUPPORTED,
+  // The registry body_omit drops every sampling key, so the launcher's per-alias presets apply
+  // and a slider here would be a lie. Max output rides the 32,768 fallback: the launcher bounds
+  // it by the running context.
+  dwarfstar: {
+    temperature: false,
+    topP: false,
+    topK: false,
+    minP: false,
+    repetitionPenalty: false,
+    presencePenalty: false,
+  },
 };
 
 const DEFAULT_EXTERNAL_CAPABILITIES = OPENAI_COMPAT_BASE;
