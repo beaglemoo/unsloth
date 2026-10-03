@@ -284,6 +284,7 @@ test("oMLX aliases collapse onto their directory and embeddings are not loadable
     ceilingBytes: 1000,
     error: null,
     chatModelIds: ["swift-1.5-27b", "swift-1.5-27b:fast", "other"],
+    failure: null,
   });
   assert.equal(groups.length, 3);
   const resident = residentGroups(groups);

@@ -57,6 +57,7 @@ function ds4(patch: Partial<AttachedDs4Status>): AttachedDs4Status {
     ctxActive: null,
     pendingRestart: false,
     error: null,
+    failure: null,
     ...patch,
   };
 }
@@ -74,6 +75,7 @@ function status(
       ceilingBytes: 0,
       error: null,
       chatModelIds: [],
+      failure: null,
     },
     ds4: engine,
     modelsHash: "",
