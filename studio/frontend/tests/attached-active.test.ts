@@ -185,3 +185,20 @@ test("output ceiling: oMLX's max_tokens, DwarfStar's context", async () => {
   assert.equal(attachedMaxOutputTokens(status([], ds4({ reachable: false })), star), null);
   assert.equal(attachedMaxOutputTokens(null, star), null);
 });
+
+test("the output ceiling bounds the request, never the saved value", async () => {
+  const { capMaxTokensForAttached } = await import(
+    "../src/features/attached-engines/attached-active.ts"
+  );
+  const small = status([], ds4({ ctx: 100000, ctxActive: 16384 }));
+  const saved = 65536;
+  assert.equal(capMaxTokensForAttached(saved, small, star), 16384);
+  // the caller's value is a plain number: nothing was written back
+  assert.equal(saved, 65536);
+  // unknown ceiling, offline engine, no attached selection: pass through
+  assert.equal(capMaxTokensForAttached(saved, status([], ds4({ reachable: false })), star), saved);
+  assert.equal(capMaxTokensForAttached(saved, null, star), saved);
+  assert.equal(capMaxTokensForAttached(saved, small, null), saved);
+  // already within the ceiling
+  assert.equal(capMaxTokensForAttached(4096, small, star), 4096);
+});
