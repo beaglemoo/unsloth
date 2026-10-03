@@ -87,7 +87,7 @@ export_tree() { # <submodule dir> <dest>
 venv_in_use() { # <venv dir>
   local pid
   for pid in $(pgrep -x omlx-server; pgrep -f ds4_ondemand.py; pgrep -f "$1/bin/python"); do
-    lsof -p "$pid" -Fn 2>/dev/null | grep -q "^n$1/" && return 0
+    lsof -p "$pid" -Fn 2>/dev/null | grep "^n$1/" >/dev/null && return 0
   done
   return 1
 }
