@@ -198,3 +198,39 @@ def test_model_ids_is_none_on_timeout_and_empty_list_for_a_real_empty_catalog():
 
     assert run(_client(slow).model_ids()) is None
     assert run(_client(lambda request: httpx.Response(200, json = {"data": []})).model_ids()) == []
+
+
+CTX = {"ctx": 100000, "ctx_active": 90000, "ctx_min": 4096, "ctx_max": 393216, "pending_restart": True}
+
+
+def test_config_get_and_set_ctx():
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path, request.content))
+        if request.method == "POST":
+            return httpx.Response(200, json = {**CTX, "ctx": 120000, "applied": "restarted", "extra": 1})
+        return httpx.Response(200, json = CTX)
+
+    client = Ds4Client("http://x", transport = httpx.MockTransport(handler))
+    assert asyncio.run(client.config()) == CTX
+    done = asyncio.run(client.set_ctx(120000))
+    assert done["applied"] == "restarted" and done["ctx"] == 120000 and "extra" not in done
+    assert seen[1] == ("POST", "/admin/config", b'{"ctx":120000}')
+
+
+def test_config_errors_become_attached_engine_error():
+    from core.inference.attached import AttachedEngineError
+
+    def old_launcher(request):
+        return httpx.Response(404, json = {"detail": "not found"})
+
+    client = Ds4Client("http://x", transport = httpx.MockTransport(old_launcher))
+    with pytest.raises(AttachedEngineError, match = "404"):
+        asyncio.run(client.config())
+
+    def down(request):
+        raise httpx.ConnectError("refused", request = request)
+
+    with pytest.raises(AttachedEngineError):
+        asyncio.run(Ds4Client("http://x", transport = httpx.MockTransport(down)).set_ctx(8192))
