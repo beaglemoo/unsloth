@@ -14,21 +14,36 @@
 #   5. copy the app to ~/Homelab/unsloth/dist/Unsloth.app
 #
 # install phase (changes the machine; run it deliberately):
-#   1. quit Unsloth (never killed; aborts if it does not exit) and stop a surviving :8888 backend
-#   2. install the backend from this checkout, NON-editable, replacing the old wheel's files:
+#   1. quit Unsloth (never killed; aborts if it does not exit) and stop a surviving :8888 backend;
+#      the engines must be idle (nothing generating, loading or starting)
+#   2. build the fork wheel into a scratch dir first (uv build, else pip wheel) as a fail-fast
+#      gate: nothing is touched when the checkout does not build
+#   3. snapshot the backend venv (~/.unsloth/studio/unsloth_studio) with a clonefile copy into
+#      ~/.unsloth/backend-backups/<timestamp>/ (the newest two are kept)
+#   4. install the backend from this checkout, NON-editable, replacing the old wheel's files:
 #      STUDIO_LOCAL_NONEDITABLE=1 STUDIO_LOCAL_REPO=<repo> unsloth studio update --local
-#      (a direct pip reinstall when the venv CLI cannot start), then check the version
-#   3. verify the way the app's preflight runs it, from / : `unsloth -h`,
-#      `unsloth studio desktop-capabilities --json`, and the studio.backend imports
-#   4. back up /Applications/Unsloth.app to ~/Applications/Unsloth-upstream-0.1.815.app.bak
-#   5. ditto the built app into /Applications
-#   6. codesign --verify --deep --strict
+#      (a direct `pip install --force-reinstall <wheel>` when the venv CLI cannot start; nothing
+#      is ever uninstalled first), then check the version
+#   5. verify the way the app's preflight runs it, from / : `unsloth -h`,
+#      `unsloth studio desktop-capabilities --json`, and the studio.backend imports.
+#      A failure in 4 or 5 puts the snapshot back (the broken venv is kept beside it)
+#   6. back up /Applications/Unsloth.app to ~/Applications/Unsloth-upstream-0.1.815.app.bak (once)
+#   7. ditto the built app to /Applications/Unsloth.app.new and codesign-verify it, then unload
+#      oMLX models, stop ds4, boot the helpers out of launchd (the helpers exec from inside the
+#      bundle), move the old app to ~/Applications/Unsloth-prev.app.bak, move the new one into
+#      place and bootstrap the helpers again (kickstart as the fallback; if neither works, use
+#      Settings > Background engines, off and on)
+#   8. codesign --verify --deep --strict
+#
+# The helper stop/restart (launchctl bootout/bootstrap of the bundled plists) has only been run
+# with --dry-run and a fake launchctl, never against the live helpers.
 #
 # The build bakes UNSLOTH_FORK_REPO (this checkout) into the app: its managed repair runs the
 # same non-editable `update --local` from it and refuses, rather than installing from PyPI.
 #
 # Environment: SIGNING_IDENTITY (default "Developer ID Application: james beesley (D6VHKTRR33)"),
-#              DIST_DIR (default ~/Homelab/unsloth/dist)
+#              DIST_DIR (default ~/Homelab/unsloth/dist); for tests: UNSLOTH_STUDIO_VENV,
+#              BACKUP_ROOT, INSTALLED_APP, APP_PREV, and the engines-lib.sh variables
 set -euo pipefail
 
 PHASE=build DRY=0 ADHOC=0
@@ -52,9 +67,13 @@ BUILT_APP="$STUDIO/src-tauri/target/release/bundle/macos/Unsloth.app"
 SIGNING_IDENTITY="${SIGNING_IDENTITY:-Developer ID Application: james beesley (D6VHKTRR33)}"
 MIN_BACKEND_VERSION="2026.8.4"
 APP_BACKUP="$HOME/Applications/Unsloth-upstream-0.1.815.app.bak"
-INSTALLED_APP="/Applications/Unsloth.app"
+INSTALLED_APP="${INSTALLED_APP:-/Applications/Unsloth.app}"
+APP_PREV="${APP_PREV:-$HOME/Applications/Unsloth-prev.app.bak}"
+BACKUP_ROOT="${BACKUP_ROOT:-$HOME/.unsloth/backend-backups}"
+TS="$(date +%Y%m%d-%H%M%S)"
 
 log() { printf '[fork-build] %s\n' "$*"; }
+warn() { printf '[fork-build] warning: %s\n' "$*" >&2; }
 die() { printf '[fork-build] error: %s\n' "$*" >&2; exit 1; }
 run() {
   if [ "$DRY" = 1 ]; then
@@ -65,6 +84,8 @@ run() {
 }
 
 [ "$(uname -s)" = "Darwin" ] || die "macOS only"
+# shellcheck source=engines-lib.sh
+. "$SCRIPT_DIR/engines-lib.sh"
 
 # Prints the version when it is numeric (dot separated integers) and >= the minimum.
 check_backend_version() { # <version>
@@ -128,7 +149,9 @@ phase_build() {
 }
 
 # ---------------------------------------------------------------------------------------------
-STUDIO_VENV="$HOME/.unsloth/studio/unsloth_studio"
+STUDIO_VENV="${UNSLOTH_STUDIO_VENV:-$HOME/.unsloth/studio/unsloth_studio}"
+WHEEL=""
+BACKEND_BACKUP=""
 APP_BUNDLE_ID="ai.unsloth.studio"
 
 quit_unsloth() {
@@ -151,10 +174,70 @@ quit_unsloth() {
   fi
 }
 
+# Build the fork wheel in a scratch dir before anything is touched: proves the checkout builds
+# and carries the fork's modules. Sets WHEEL.
+build_fork_wheel() {
+  local out
+  out="$(mktemp -d "${TMPDIR:-/tmp}/unsloth-fork-wheel.XXXXXX")"
+  if [ "$DRY" = 1 ]; then
+    run uv build --wheel --out-dir "$out" "$REPO"
+    WHEEL="$out/unsloth-<version>-py3-none-any.whl"
+    rmdir "$out"
+    return 0
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    uv build --wheel --out-dir "$out" "$REPO" >"$out/build.log" 2>&1 \
+      || { tail -n 30 "$out/build.log" >&2; die "the fork wheel does not build (log: $out/build.log)"; }
+  else
+    python3 -m pip wheel --no-deps -w "$out" "$REPO" >"$out/build.log" 2>&1 \
+      || { tail -n 30 "$out/build.log" >&2; die "the fork wheel does not build (log: $out/build.log)"; }
+  fi
+  WHEEL="$(find "$out" -maxdepth 1 -name 'unsloth-*.whl' | head -n 1)"
+  [ -n "$WHEEL" ] || die "no wheel was produced in $out"
+  python3 -m zipfile -l "$WHEEL" | grep -q 'studio/backend/routes/attached_engines.py' \
+    || die "$WHEEL does not contain the fork's attached-engines backend"
+  log "fork wheel built: $WHEEL"
+}
+
+# A clonefile copy (APFS: instant, no extra space) of the whole backend venv, taken before it is
+# mutated. The newest two snapshots are kept.
+snapshot_backend() {
+  BACKEND_BACKUP="$BACKUP_ROOT/$TS/unsloth_studio"
+  run mkdir -p "$BACKUP_ROOT/$TS"
+  if ! run cp -cR "$STUDIO_VENV" "$BACKEND_BACKUP" 2>/dev/null; then
+    log "clonefile copy not possible here; using ditto"
+    run rm -rf "$BACKEND_BACKUP"
+    run ditto "$STUDIO_VENV" "$BACKEND_BACKUP"
+  fi
+  [ "$DRY" = 1 ] || [ -x "$BACKEND_BACKUP/bin/python" ] || die "the backend snapshot at $BACKEND_BACKUP is incomplete"
+  log "backend snapshot: $BACKEND_BACKUP"
+}
+
+# Put the snapshot back; the venv it replaces is kept next to it for inspection.
+restore_backend() {
+  [ -d "$BACKEND_BACKUP" ] || die "no backend snapshot to restore (BACKEND_BACKUP=$BACKEND_BACKUP)"
+  warn "restoring the backend from $BACKEND_BACKUP"
+  local failed="$BACKUP_ROOT/$TS/failed-unsloth_studio"
+  rm -rf "$failed"
+  [ ! -e "$STUDIO_VENV" ] || mv "$STUDIO_VENV" "$failed"
+  mv "$BACKEND_BACKUP" "$STUDIO_VENV"
+  warn "restored. The failed install is kept at $failed"
+}
+
+prune_backend_backups() {
+  local old
+  [ -d "$BACKUP_ROOT" ] || return 0
+  find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' | sort -r | tail -n +3 | while IFS= read -r old; do
+    rm -rf "$old"
+  done
+}
+
 # Replaces the installed backend with this checkout as a regular (non-editable) package. An
 # editable install leaves the wheel's unrecorded runtime files (data_recipe/oxc-validator/
 # node_modules) behind; those bare directories become a namespace package for `studio` and
-# shadow the editable finder ("No module named 'studio.backend.utils'").
+# shadow the editable finder ("No module named 'studio.backend.utils'"). Nothing is uninstalled
+# first: the replacement was built (build_fork_wheel) before this runs, and a failure here is
+# undone from the snapshot by the caller.
 install_backend() {
   local py="$STUDIO_VENV/bin/python" cli="$STUDIO_VENV/bin/unsloth"
   if [ "$DRY" = 1 ] || (cd / && "$cli" -h >/dev/null 2>&1); then
@@ -162,10 +245,17 @@ install_backend() {
     run env STUDIO_LOCAL_REPO="$REPO" STUDIO_LOCAL_NONEDITABLE=1 UNSLOTH_TAURI_UPDATE=1 \
       SKIP_STUDIO_FRONTEND=1 "$cli" studio update --local
   else
-    log "the venv CLI cannot start; reinstalling the backend directly"
-    run "$py" -m pip uninstall -y unsloth
-    run "$py" -m pip install --no-deps --force-reinstall --no-cache-dir "$REPO"
+    log "the venv CLI cannot start; reinstalling the backend directly from the wheel"
+    run "$py" -m pip install --no-deps --force-reinstall --no-cache-dir "$WHEEL"
   fi
+}
+
+check_installed_version() {
+  local installed
+  installed="$("$STUDIO_VENV/bin/python" -c 'from importlib.metadata import version; print(version("unsloth"))')" \
+    || die "could not read the installed backend version"
+  check_backend_version "$installed" >/dev/null || die "installed backend version $installed is not acceptable"
+  log "installed backend version: $installed"
 }
 
 # What the app's preflight runs (preflight/managed.rs: `unsloth -h`, then
@@ -201,30 +291,71 @@ PY
   ) || die "the installed backend is not the fork build"
 }
 
+# Swap the app bundle with the helpers out of launchd: they exec from inside it. The new app is
+# copied and verified beside the old one first, so the window with no app is two renames.
+install_app() {
+  local staged="$INSTALLED_APP.new"
+  run rm -rf "$staged"
+  run ditto "$DIST_APP" "$staged"
+  run codesign --verify --deep --strict --verbose=2 "$staged"
+
+  log "unload oMLX models and stop ds4, then boot the helpers out of launchd"
+  engines_quiesce
+  helpers_stop
+  wait_ports_free
+  # If anything below fails the helpers are still owed a restart.
+  trap 'helpers_start || true' EXIT
+
+  if [ -e "$INSTALLED_APP" ]; then
+    run mkdir -p "$(dirname "$APP_PREV")"
+    run rm -rf "$APP_PREV"
+    run mv "$INSTALLED_APP" "$APP_PREV"
+  fi
+  if ! run mv "$staged" "$INSTALLED_APP"; then
+    [ ! -e "$APP_PREV" ] || run mv "$APP_PREV" "$INSTALLED_APP"
+    die "could not move the new app into place; the previous app was put back"
+  fi
+
+  log "restart the helpers"
+  if helpers_start; then
+    trap - EXIT
+  else
+    trap - EXIT
+    warn "the helpers did not restart; use Settings > API Keys > Background engines, off and on"
+  fi
+}
+
 phase_install() {
   [ -d "$DIST_APP" ] || [ "$DRY" = 1 ] || die "$DIST_APP not found; run the build phase first"
   [ -x "$STUDIO_VENV/bin/python" ] || [ "$DRY" = 1 ] || die "no managed backend venv at $STUDIO_VENV"
 
-  log "1/6 quit Unsloth"
+  log "1/8 quit Unsloth and check the engines are idle"
   quit_unsloth
   # update.rs: a pending staged-update journal has the next idle launch restore the old trees.
   if ls "$HOME/.unsloth/studio" 2>/dev/null | grep -qi -E 'stag|rollback'; then
     die "a staged-update journal exists in ~/.unsloth/studio; resolve it before installing"
   fi
+  engines_require_idle
 
-  log "2/6 install the backend from this checkout (non-editable)"
-  install_backend
-  if [ "$DRY" = 0 ]; then
-    local installed
-    installed="$("$STUDIO_VENV/bin/python" -c 'from importlib.metadata import version; print(version("unsloth"))')"
-    check_backend_version "$installed" >/dev/null || die "installed backend version $installed is not acceptable"
-    log "installed backend version: $installed"
+  log "2/8 build the fork wheel (nothing is changed if this fails)"
+  build_fork_wheel
+
+  log "3/8 snapshot the backend venv"
+  snapshot_backend
+
+  log "4/8 install the backend from this checkout (non-editable)"
+  if ! ( install_backend && { [ "$DRY" = 1 ] || check_installed_version; } ); then
+    restore_backend
+    die "the backend install failed; the previous backend was restored"
   fi
 
-  log "3/6 verify the backend as the app's preflight sees it"
-  verify_backend
+  log "5/8 verify the backend as the app's preflight sees it"
+  if ! ( verify_backend ); then
+    restore_backend
+    die "the installed backend did not verify; the previous backend was restored"
+  fi
 
-  log "4/6 back up $INSTALLED_APP"
+  log "6/8 back up $INSTALLED_APP"
   if [ -e "$APP_BACKUP" ]; then
     log "backup already exists, keeping it: $APP_BACKUP"
   else
@@ -232,16 +363,19 @@ phase_install() {
     run ditto "$INSTALLED_APP" "$APP_BACKUP"
   fi
 
-  log "5/6 install the new app"
-  run rm -rf "$INSTALLED_APP"
-  run ditto "$DIST_APP" "$INSTALLED_APP"
+  log "7/8 install the new app"
+  install_app
 
-  log "6/6 verify"
+  log "8/8 verify"
   run codesign --verify --deep --strict --verbose=2 "$INSTALLED_APP"
-  log "installed. Open Unsloth and enable Settings > Background engines."
+  prune_backend_backups
+  log "installed. The previous app is kept at $APP_PREV, the backend snapshot under $BACKUP_ROOT."
+  log "Open Unsloth and enable Settings > Background engines if it is off."
 }
 
-case "$PHASE" in
-  build) phase_build ;;
-  install) phase_install ;;
-esac
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "$PHASE" in
+    build) phase_build ;;
+    install) phase_install ;;
+  esac
+fi
