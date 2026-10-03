@@ -5,3 +5,4 @@ export { AttachedEnginesPanel } from "./engines-panel";
 export { AttachedEnginesSettingsSection } from "./settings-section";
 export { AttachedEnginesMount } from "./use-attached-engines";
 export { DwarfStarWarmingIndicator } from "./dwarfstar-warming-indicator";
+export { AttachedUnloadIndicator } from "./attached-unload-indicator";
