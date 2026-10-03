@@ -226,9 +226,11 @@ restore_backend() {
   [ -d "$BACKEND_BACKUP" ] || die "no backend snapshot to restore (BACKEND_BACKUP=$BACKEND_BACKUP)"
   warn "restoring the backend from $BACKEND_BACKUP"
   local failed="$BACKUP_ROOT/$TS/failed-unsloth_studio"
-  rm -rf "$failed"
-  [ ! -e "$STUDIO_VENV" ] || mv "$STUDIO_VENV" "$failed"
-  mv "$BACKEND_BACKUP" "$STUDIO_VENV"
+  rm -rf "$failed" || return 1
+  # Explicit returns: this runs inside `if ( restore_backend )`, where set -e is off.
+  if [ -e "$STUDIO_VENV" ]; then mv "$STUDIO_VENV" "$failed" || return 1; fi
+  [ ! -e "$STUDIO_VENV" ] || return 1
+  mv "$BACKEND_BACKUP" "$STUDIO_VENV" || return 1
   warn "restored. The failed install is kept at $failed"
 }
 
