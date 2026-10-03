@@ -3,6 +3,7 @@
 
 import { isWebKitGTK } from "@/components/ui/theme-view-transition";
 import { useAppShellReadySignal } from "@/components/app-readiness";
+import { useActiveAttachedContext } from "@/features/attached-engines/use-active-attached";
 import {
   applyModelLoadConfigToRuntime,
   clearModelConfigHandoff,
@@ -3218,12 +3219,16 @@ export function ChatPage({
     () => isExternalModelId(inferenceCheckpoint),
     [inferenceCheckpoint],
   );
-  const contextWindowKnown = hasKnownContextWindow({
-    loadedContextLength,
-    modelLoading,
-    isExternalModel,
-    residentCheckpoint,
-  });
+  // oMLX / DwarfStar report their own cap; null for every other model.
+  const attachedContextWindow = useActiveAttachedContext();
+  const contextWindowKnown =
+    attachedContextWindow != null ||
+    hasKnownContextWindow({
+      loadedContextLength,
+      modelLoading,
+      isExternalModel,
+      residentCheckpoint,
+    });
   const {
     checkpoint: runtimeCheckpoint,
     isGguf: runtimeModelIsGguf,
@@ -5130,8 +5135,12 @@ export function ChatPage({
                 liveThreadKey={activeThreadId ?? "__default"}
                 compactUnknownAsIcon={view.mode === "single"}
                 used={contextUsage?.recountedTokens ?? contextUsage?.contextTokens ?? contextUsage?.totalTokens ?? null}
-                // A cloud model shows its catalogued window; null when the catalogue has none.
-                total={isExternalModel ? cloudContextWindow : loadedContextLength}
+                // oMLX reports its own cap; a cloud model shows its catalogued window (null when the catalogue has none).
+                total={
+                  isExternalModel
+                    ? (attachedContextWindow ?? cloudContextWindow)
+                    : loadedContextLength
+                }
                 cloud={isExternalModel}
                 compactAt={cloudCompactAt}
                 cached={usageRows.cached}
@@ -5140,12 +5149,15 @@ export function ChatPage({
                 // A tool turn's completionTokens sums every pass; the context holds only the last one.
                 completionTokens={usageRows.completionTokens}
                 compactionCount={compactionCount}
-                isMlx={isServedByMlx(
-                  Boolean(loadedIsGguf),
-                  platformDeviceType,
-                  platformChatOnlyReason,
-                  platformMlxInference,
-                )}
+                isMlx={
+                  !attachedContextWindow &&
+                  isServedByMlx(
+                    Boolean(loadedIsGguf),
+                    platformDeviceType,
+                    platformChatOnlyReason,
+                    platformMlxInference,
+                  )
+                }
                 contextEnforced={loadedContextEnforced}
                 contextUnboundedWhenBatched={loadedContextUnboundedWhenBatched}
                 parallelSlots={loadedParallelSlots}
