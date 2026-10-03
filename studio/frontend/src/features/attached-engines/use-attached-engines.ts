@@ -89,6 +89,12 @@ export function useAttachedEngines(): void {
       fetchStatus: fetchAttachedStatus,
       postSync: syncAttachedProviders,
       syncProviders: syncAttachedProviderRows,
+      onDisabled: async () => {
+        // The route answers 404 for everything but /sync while the flag is off, and /sync then
+        // deletes the seeded rows, so this is what takes them out of the picker.
+        await syncAttachedProviders();
+        await syncAttachedProviderRows();
+      },
       onStatus: (status) => {
         const store = useAttachedEnginesStore.getState();
         store.setStatus(status);
