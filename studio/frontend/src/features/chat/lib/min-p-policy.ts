@@ -31,7 +31,8 @@ export function minPSamplingPayload(
   providerType: string | null | undefined,
   params: { minP: number; minPMode?: MinPMode },
 ): { min_p?: number } {
-  return providerType === "vllm" &&
+  // oMLX: any min_p disables its sparse MTP draft path (measured 5-15% slower).
+  return (providerType === "vllm" || providerType === "omlx") &&
     effectiveMinPMode(params) === "server-default"
     ? {}
     : { min_p: params.minP };
