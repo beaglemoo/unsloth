@@ -1226,6 +1226,7 @@ export const ja = {
       chat: "チャット",
       connections: "接続",
       apiKeys: "API",
+      attachedEngines: "Attached engines",
       remoteLan: "リモートとLAN",
       about: "情報",
       voice: "音声",
