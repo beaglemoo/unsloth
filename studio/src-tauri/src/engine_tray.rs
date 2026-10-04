@@ -20,6 +20,7 @@ use tauri::menu::{
 use tauri::{AppHandle, Manager, Wry};
 
 use crate::engine_helpers::{self, HelperState};
+use crate::engine_lifetime::{self, EngineLifetime};
 use crate::loopback_http;
 
 const DEFAULT_OMLX_URL: &str = "http://127.0.0.1:8843";
@@ -433,7 +434,7 @@ pub(crate) struct View {
     ds4_toggle_text: &'static str,
     ds4_toggle_enabled: bool,
     stop_all_enabled: bool,
-    helpers_label: &'static str,
+    helpers_label: String,
 }
 
 fn gib(bytes: u64) -> String {
@@ -501,18 +502,30 @@ fn ds4_label(status: &Ds4Status) -> String {
     parts.join(", ")
 }
 
-fn helpers_label(state: HelperState) -> &'static str {
-    match state {
+/// The status line. While the helpers run in `with_app` mode it says they stop when Unsloth quits.
+fn helpers_label(state: HelperState, lifetime: EngineLifetime) -> String {
+    let text = match state {
         HelperState::Enabled => "Engines: running as background helpers",
         HelperState::RequiresApproval => "Engines: approve the helpers in Login Items",
         HelperState::NotRegistered => "Engines: not running as helpers (enable in Settings)",
         HelperState::Partial => "Engines: helpers partly enabled",
         HelperState::NotFound => "Engines: helper agents not bundled",
         HelperState::Unsupported => "Engines: background helpers need macOS",
+    };
+    match (state, lifetime) {
+        (HelperState::Enabled | HelperState::Partial, EngineLifetime::WithApp) => {
+            format!("{text} (stop on quit)")
+        }
+        _ => text.to_string(),
     }
 }
 
-pub(crate) fn build_view(omlx: &OmlxStatus, ds4: &Ds4Status, helpers: HelperState) -> View {
+pub(crate) fn build_view(
+    omlx: &OmlxStatus,
+    ds4: &Ds4Status,
+    helpers: HelperState,
+    lifetime: EngineLifetime,
+) -> View {
     let (unloads, loads) = if omlx.reachable {
         model_entries(omlx)
     } else {
@@ -532,7 +545,7 @@ pub(crate) fn build_view(omlx: &OmlxStatus, ds4: &Ds4Status, helpers: HelperStat
         },
         ds4_toggle_enabled: ds4.reachable,
         stop_all_enabled: omlx.reachable || ds4.reachable,
-        helpers_label: helpers_label(helpers),
+        helpers_label: helpers_label(helpers, lifetime),
     }
 }
 
@@ -753,7 +766,7 @@ impl EngineTray {
             .as_ref()
             .is_none_or(|p| p.helpers_label != view.helpers_label)
         {
-            let _ = self.helpers.set_text(view.helpers_label);
+            let _ = self.helpers.set_text(&view.helpers_label);
         }
         if dynamic.unload_keys != view.unloads || previous.is_none() {
             self.replace_unloads(app, &mut dynamic, &view.unloads);
@@ -835,7 +848,10 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
     let stop_all = MenuItemBuilder::with_id(ID_STOP_ALL, "Stop all engines")
         .enabled(false)
         .build(app)?;
-    let helpers = MenuItemBuilder::with_id(ID_HELPERS, helpers_label(HelperState::NotRegistered))
+    let helpers = MenuItemBuilder::with_id(
+        ID_HELPERS,
+        helpers_label(HelperState::NotRegistered, EngineLifetime::default()),
+    )
         .build(app)?;
     let sep_top = PredefinedMenuItem::separator(app)?;
     let sep_mid = PredefinedMenuItem::separator(app)?;
@@ -872,7 +888,12 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
         loop {
             let urls = load_urls();
             let (omlx, ds4) = tokio::join!(fetch_omlx(&urls), fetch_ds4(&urls));
-            let view = build_view(&omlx, &ds4, engine_helpers::current_state());
+            let view = build_view(
+                &omlx,
+                &ds4,
+                engine_helpers::current_state(),
+                engine_lifetime::load().lifetime,
+            );
             if let Some(tray) = handle.try_state::<EngineTray>() {
                 tray.apply(&handle, &view);
             }
@@ -1192,6 +1213,7 @@ mod tests {
             &OmlxStatus::default(),
             &Ds4Status::default(),
             HelperState::NotRegistered,
+            EngineLifetime::WithApp,
         );
         assert!(!down.load_enabled && !down.ds4_toggle_enabled && !down.stop_all_enabled);
         assert_eq!(down.ds4_toggle_text, "Start DwarfStar");
@@ -1204,11 +1226,30 @@ mod tests {
             &omlx(OMLX_BODY),
             &ds4(json!({"loaded": true, "pid": 9, "in_flight": 0})),
             HelperState::Enabled,
+            EngineLifetime::Always,
         );
         assert!(up.load_enabled && up.ds4_toggle_enabled && up.stop_all_enabled);
         assert_eq!(up.ds4_toggle_text, "Stop DwarfStar");
         assert_eq!(up.helpers_label, "Engines: running as background helpers");
         assert_eq!(up.loads.len(), 1);
+    }
+
+    #[test]
+    fn the_status_line_says_stop_on_quit_only_for_running_with_app_helpers() {
+        use EngineLifetime::*;
+        use HelperState::*;
+        assert_eq!(
+            helpers_label(Enabled, WithApp),
+            "Engines: running as background helpers (stop on quit)"
+        );
+        assert_eq!(
+            helpers_label(Partial, WithApp),
+            "Engines: helpers partly enabled (stop on quit)"
+        );
+        assert_eq!(helpers_label(Enabled, Always), "Engines: running as background helpers");
+        for state in [NotRegistered, RequiresApproval, NotFound, Unsupported] {
+            assert!(!helpers_label(state, WithApp).contains("stop on quit"), "{state:?}");
+        }
     }
 
     #[test]
