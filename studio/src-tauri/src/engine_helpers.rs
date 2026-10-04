@@ -172,6 +172,176 @@ pub(crate) async fn engine_helpers_disable() -> EngineHelpersStatus {
     disable()
 }
 
+// --- Headless CLI ------------------------------------------------------------------------------
+//
+// `unsloth-studio --engine-helpers <status|register|unregister|restart>` runs the same SMAppService
+// calls as the Settings toggle, with no window. macOS refuses `launchctl bootstrap` of a bundled
+// plist ("Bootstrap failed: 5"), so a restart outside the UI has to go through SMAppService, and
+// SMAppService only answers a process that is the app's own executable. main() calls `cli_main`
+// as its first statement, before logging, the PATH fix, the single-instance plugin, the backend
+// or the tray, so it runs beside a live GUI instance without touching it.
+
+pub(crate) const CLI_FLAG: &str = "--engine-helpers";
+
+/// How long `restart` waits for launchd to drop both labels: 60 polls, 500 ms apart.
+const RESTART_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const RESTART_MAX_POLLS: u32 = 60;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CliCommand {
+    Status,
+    Register,
+    Unregister,
+    Restart,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CliParse {
+    /// Not an `--engine-helpers` invocation: start the app normally.
+    NotCli,
+    Run(CliCommand),
+    /// The flag with a missing or unknown command.
+    Usage(String),
+}
+
+/// `args` excludes the program name. The flag must come first, so an ordinary launch is never
+/// mistaken for the CLI.
+pub(crate) fn parse_cli_args(args: &[String]) -> CliParse {
+    if args.first().map(String::as_str) != Some(CLI_FLAG) {
+        return CliParse::NotCli;
+    }
+    match args.get(1).map(String::as_str) {
+        Some("status") => CliParse::Run(CliCommand::Status),
+        Some("register") => CliParse::Run(CliCommand::Register),
+        Some("unregister") => CliParse::Run(CliCommand::Unregister),
+        Some("restart") => CliParse::Run(CliCommand::Restart),
+        Some(other) => CliParse::Usage(format!(
+            "unknown command {other:?}; use status, register, unregister or restart"
+        )),
+        None => CliParse::Usage("missing command; use status, register, unregister or restart".into()),
+    }
+}
+
+fn helper_labels() -> Vec<String> {
+    HELPERS
+        .iter()
+        .map(|(_, plist)| plist.trim_end_matches(".plist").to_string())
+        .collect()
+}
+
+/// Whether launchd still has `label` in this user's GUI domain.
+#[cfg(unix)]
+fn launchd_has_label(label: &str) -> bool {
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    std::process::Command::new("/bin/launchctl")
+        .arg("print")
+        .arg(format!("gui/{uid}/{label}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(unix))]
+fn launchd_has_label(_label: &str) -> bool {
+    false
+}
+
+/// Poll until none of `labels` is loaded. False when `max_polls` checks all still saw one; the
+/// clock is the caller's `sleep`, so a test passes a no-op.
+fn wait_labels_gone(
+    labels: &[String],
+    is_loaded: &dyn Fn(&str) -> bool,
+    sleep: &dyn Fn(),
+    max_polls: u32,
+) -> bool {
+    for poll in 0..max_polls {
+        if !labels.iter().any(|label| is_loaded(label)) {
+            return true;
+        }
+        if poll + 1 < max_polls {
+            sleep();
+        }
+    }
+    !labels.iter().any(|label| is_loaded(label))
+}
+
+/// Unregister, wait for launchd to drop the labels, register. A wait that times out still
+/// registers, so the helpers are never left unregistered, and reports the timeout as the error.
+fn restart(
+    is_loaded: &dyn Fn(&str) -> bool,
+    sleep: &dyn Fn(),
+    max_polls: u32,
+) -> EngineHelpersStatus {
+    let unregistered = disable();
+    let labels = helper_labels();
+    let gone = wait_labels_gone(&labels, is_loaded, sleep, max_polls);
+    let mut status = enable();
+    let mut errors = Vec::new();
+    if !gone {
+        errors.push(format!(
+            "launchd still had {} after {} s; registered anyway",
+            labels.join(" and "),
+            (RESTART_POLL_INTERVAL * max_polls).as_secs()
+        ));
+    }
+    if let Some(error) = status.error.take() {
+        errors.push(error);
+        // The unregister failure explains a register failure; alone it is moot, since the
+        // helpers ended up registered.
+        if let Some(earlier) = unregistered.error {
+            errors.push(format!("unregister: {earlier}"));
+        }
+    }
+    status.error = (!errors.is_empty()).then(|| errors.join("; "));
+    status
+}
+
+/// The exit code for a finished command: 0 only when it worked on a platform that has helpers.
+fn exit_code(status: &EngineHelpersStatus) -> i32 {
+    if status.supported && status.error.is_none() {
+        0
+    } else {
+        1
+    }
+}
+
+/// Run the CLI when the arguments ask for it. `None` means "not the CLI: start the app".
+/// Prints the status as one line of JSON on stdout and returns the exit code.
+pub(crate) fn cli_main(args: &[String]) -> Option<i32> {
+    let command = match parse_cli_args(args) {
+        CliParse::NotCli => return None,
+        CliParse::Usage(message) => {
+            eprintln!("unsloth-studio {CLI_FLAG}: {message}");
+            return Some(2);
+        }
+        CliParse::Run(command) => command,
+    };
+    let status = if !sm::SUPPORTED {
+        snapshot(Some("background engines need macOS".into()))
+    } else {
+        match command {
+            CliCommand::Status => snapshot(None),
+            CliCommand::Register => enable(),
+            CliCommand::Unregister => disable(),
+            CliCommand::Restart => restart(
+                &launchd_has_label,
+                &|| std::thread::sleep(RESTART_POLL_INTERVAL),
+                RESTART_MAX_POLLS,
+            ),
+        }
+    };
+    match serde_json::to_string(&status) {
+        Ok(json) => println!("{json}"),
+        Err(error) => {
+            eprintln!("unsloth-studio {CLI_FLAG}: could not encode the status: {error}");
+            return Some(1);
+        }
+    }
+    Some(exit_code(&status))
+}
+
 #[cfg(target_os = "macos")]
 mod sm {
     use super::HelperState;
@@ -370,6 +540,120 @@ mod tests {
             assert_eq!(files[key.as_str()], format!("launch-agents/{plist}"));
         }
         assert_eq!(conf["bundle"]["resources"]["engines-staging/"], "engines/");
+    }
+
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn cli_args_select_a_command() {
+        assert_eq!(parse_cli_args(&args(&[])), CliParse::NotCli);
+        assert_eq!(parse_cli_args(&args(&["--hidden"])), CliParse::NotCli);
+        // an ordinary launch that merely mentions the flag later is not the CLI
+        assert_eq!(parse_cli_args(&args(&["--hidden", CLI_FLAG, "status"])), CliParse::NotCli);
+        for (word, command) in [
+            ("status", CliCommand::Status),
+            ("register", CliCommand::Register),
+            ("unregister", CliCommand::Unregister),
+            ("restart", CliCommand::Restart),
+        ] {
+            assert_eq!(
+                parse_cli_args(&args(&[CLI_FLAG, word])),
+                CliParse::Run(command)
+            );
+        }
+    }
+
+    #[test]
+    fn cli_args_reject_a_missing_or_unknown_command() {
+        assert!(matches!(parse_cli_args(&args(&[CLI_FLAG])), CliParse::Usage(m) if m.contains("missing")));
+        assert!(matches!(
+            parse_cli_args(&args(&[CLI_FLAG, "bootstrap"])),
+            CliParse::Usage(m) if m.contains("bootstrap")
+        ));
+        // a usage error is not a start of the GUI
+        assert_eq!(cli_main(&args(&[CLI_FLAG, "bogus"])), Some(2));
+        assert_eq!(cli_main(&args(&["--hidden"])), None);
+    }
+
+    #[test]
+    fn helper_labels_follow_the_plist_names() {
+        assert_eq!(
+            helper_labels(),
+            vec!["ai.unsloth.studio.omlx".to_string(), "ai.unsloth.studio.ds4".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_wait_returns_as_soon_as_launchd_drops_both_labels() {
+        use std::cell::Cell;
+        let labels = helper_labels();
+        let checks = Cell::new(0u32);
+        let sleeps = Cell::new(0u32);
+        // a loaded label ends a round at once, so three loaded checks are three rounds, then gone
+        let is_loaded = |_: &str| {
+            checks.set(checks.get() + 1);
+            checks.get() <= 3
+        };
+        let sleep = || sleeps.set(sleeps.get() + 1);
+        assert!(wait_labels_gone(&labels, &is_loaded, &sleep, 60));
+        assert_eq!(sleeps.get(), 3);
+    }
+
+    #[test]
+    fn the_wait_is_immediate_when_nothing_is_loaded() {
+        use std::cell::Cell;
+        let sleeps = Cell::new(0u32);
+        assert!(wait_labels_gone(&helper_labels(), &|_| false, &|| sleeps.set(sleeps.get() + 1), 60));
+        assert_eq!(sleeps.get(), 0);
+    }
+
+    #[test]
+    fn the_wait_gives_up_after_the_poll_budget() {
+        use std::cell::Cell;
+        let sleeps = Cell::new(0u32);
+        // one label never leaves
+        let stuck = |label: &str| label.ends_with(".ds4");
+        assert!(!wait_labels_gone(&helper_labels(), &stuck, &|| sleeps.set(sleeps.get() + 1), 5));
+        assert_eq!(sleeps.get(), 4);
+    }
+
+    #[test]
+    fn the_restart_budget_is_thirty_seconds() {
+        assert_eq!((RESTART_POLL_INTERVAL * RESTART_MAX_POLLS).as_secs(), 30);
+    }
+
+    #[test]
+    fn exit_codes_follow_support_and_errors() {
+        let ok = EngineHelpersStatus {
+            supported: true,
+            state: HelperState::Enabled,
+            helpers: Vec::new(),
+            error: None,
+        };
+        assert_eq!(exit_code(&ok), 0);
+        let failed = EngineHelpersStatus { error: Some("boom".into()), ..ok.clone() };
+        assert_eq!(exit_code(&failed), 1);
+        let unsupported = EngineHelpersStatus { supported: false, ..ok };
+        assert_eq!(exit_code(&unsupported), 1);
+    }
+
+    #[test]
+    fn the_status_json_is_one_object_with_the_toggle_fields() {
+        let json = serde_json::to_value(snapshot(None)).unwrap();
+        assert!(json["supported"].is_boolean());
+        assert!(json["state"].is_string());
+        assert_eq!(json["helpers"].as_array().unwrap().len(), 2);
+        assert!(json["error"].is_null());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_cli_fails_where_there_are_no_helpers() {
+        assert_eq!(cli_main(&args(&[CLI_FLAG, "status"])), Some(1));
+        assert_eq!(cli_main(&args(&[CLI_FLAG, "restart"])), Some(1));
     }
 
     #[cfg(not(target_os = "macos"))]
