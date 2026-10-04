@@ -30,6 +30,17 @@ def _plain_cli_output(monkeypatch):
     monkeypatch.delenv("UNSLOTH_DEBUG", raising = False)
 
 
+@pytest.fixture(autouse = True)
+def _no_fork_marker(monkeypatch, request):
+    """Run the CLI tests as upstream Unsloth: the fork marker (studio/_fork.py) makes a plain
+    `unsloth studio update` refuse. A None entry in sys.modules makes `import studio._fork`
+    raise ImportError without importing anything. Tests of the fork behaviour use the
+    `fork` marker."""
+    if request.node.get_closest_marker("fork"):
+        return
+    monkeypatch.setitem(sys.modules, "studio._fork", None)
+
+
 @pytest.fixture
 def stub_tool_policy_state(monkeypatch):
     """Stub the backend's `state.tool_policy`, which run() imports in-venv.

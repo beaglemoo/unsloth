@@ -9,6 +9,7 @@ The PyPI check is lazy, cached, and only for PyPI-managed installs.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import threading
@@ -33,6 +34,20 @@ DISABLE_ENV_VAR = "UNSLOTH_DISABLE_UPDATE_CHECK"
 FAKE_UPDATE_ENV_VAR = "UNSLOTH_STUDIO_FAKE_UPDATE"
 
 LOCAL_INSTALL_SOURCES = {"editable", "local_path", "vcs", "local_repo"}
+
+
+def is_fork_build() -> bool:
+    """True when this package is the beaglemoo fork (the `studio/_fork.py` marker ships in it).
+
+    The fork is updated only from its own repo (studio/scripts/update-fork.sh), so no code here
+    may offer, or even check for, a PyPI release. The marker travels with the package, so this
+    holds whatever `direct_url.json` says about the install.
+    """
+    try:
+        importlib.import_module("studio._fork")
+    except Exception:
+        return False
+    return True
 
 
 @dataclass(frozen = True)
@@ -99,7 +114,9 @@ def get_studio_install_source_status(current_version: str) -> dict[str, Any]:
     """Return install-source metadata without remote update checks."""
     install_source = detect_install_source()
     reason = None
-    if install_source in LOCAL_INSTALL_SOURCES:
+    if is_fork_build():
+        reason = "fork_build"
+    elif install_source in LOCAL_INSTALL_SOURCES:
         reason = "local_source"
     elif install_source == "unknown":
         reason = "unknown_source"
@@ -143,6 +160,14 @@ def get_studio_update_status(current_version: str) -> dict[str, Any]:
             latest_version = None,
             install_source = install_source,
             reason = "disabled",
+        )
+
+    if is_fork_build():
+        return _status_response(
+            current_version = current_version,
+            latest_version = None,
+            install_source = install_source,
+            reason = "fork_build",
         )
 
     if install_source in LOCAL_INSTALL_SOURCES:
@@ -214,6 +239,14 @@ def get_studio_update_status(current_version: str) -> dict[str, Any]:
 def get_latest_pypi_version() -> LatestVersionResult:
     """Return the latest PyPI version using a small in-process TTL cache."""
     global _latest_version_cache, _latest_version_fetching
+
+    if is_fork_build():
+        # Defense in depth: the fork never contacts PyPI, whichever caller asks.
+        return LatestVersionResult(
+            latest_version = None,
+            checked_at = _utc_now_iso(),
+            reason = "fork_build",
+        )
 
     while True:
         now = time.monotonic()
