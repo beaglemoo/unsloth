@@ -7,15 +7,17 @@
 # Environment (all optional; the overrides exist for tests):
 #   OMLX_URL, DS4_URL   engine base URLs (default 127.0.0.1:8843 and :8001)
 #   ENGINE_PORTS        ports that must be free while the helpers are stopped (default 8843 8001 8000)
-#   LAUNCHCTL           launchctl binary
-#   HELPER_PLIST_DIR    where the bundled helper plists live
-#                       (default /Applications/Unsloth.app/Contents/Library/LaunchAgents)
+#   LAUNCHCTL           launchctl binary (only ever used to look at, or boot out, the helpers)
+#   HELPER_APP          the Unsloth.app whose Contents/MacOS/unsloth-studio starts and stops the
+#                       helpers (default: INSTALLED_APP when the caller sets it, else
+#                       /Applications/Unsloth.app). After build-fork-mac.sh --install that is the NEW app.
+#   HELPER_START_WAIT   seconds helpers_start waits for the labels to appear in launchd (default 20)
 
 OMLX_URL="${OMLX_URL:-http://127.0.0.1:8843}"
 DS4_URL="${DS4_URL:-http://127.0.0.1:8001}"
 ENGINE_PORTS="${ENGINE_PORTS:-8843 8001 8000}"
 LAUNCHCTL="${LAUNCHCTL:-launchctl}"
-HELPER_PLIST_DIR="${HELPER_PLIST_DIR:-/Applications/Unsloth.app/Contents/Library/LaunchAgents}"
+HELPER_START_WAIT="${HELPER_START_WAIT:-20}"
 HELPER_DOMAIN="gui/$(id -u)"
 HELPER_LABELS=(ai.unsloth.studio.omlx ai.unsloth.studio.ds4)
 PORT_GATE_TIMEOUT="${PORT_GATE_TIMEOUT:-150}"
@@ -142,53 +144,126 @@ engines_quiesce() {
 
 helper_loaded() { "$LAUNCHCTL" print "$HELPER_DOMAIN/$1" >/dev/null 2>&1; }
 
-# Boot out every loaded helper (SIGTERM, the engines unload gracefully) and remember which ones
-# (STOPPED_HELPERS, cleared by a successful helpers_start). Under `set -e` a failing bootout ends
-# the caller; whatever was recorded so far is still owed a restart.
+# The Unsloth.app that owns the helpers, resolved when used so a caller may set INSTALLED_APP
+# after sourcing this file.
+helper_app() { printf '%s' "${HELPER_APP:-${INSTALLED_APP:-/Applications/Unsloth.app}}"; }
+helper_cli() { printf '%s/Contents/MacOS/unsloth-studio' "$(helper_app)"; }
+
+# True when <binary> supports `--engine-helpers`: it must answer `--engine-helpers status` with
+# exit 0 and a JSON object. An app without the flag would start its whole GUI for an unknown
+# argument, so the binary is searched for the flag first and the probe is time-limited.
+helper_cli_supported() { # <binary>
+  [ -x "$1" ] || return 1
+  grep -aqF -- "--engine-helpers" "$1" || return 1
+  python3 - "$1" <<'PY'
+import json, subprocess, sys
+try:
+    run = subprocess.run([sys.argv[1], "--engine-helpers", "status"], capture_output=True, text=True, timeout=20)
+    data = json.loads(run.stdout)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if run.returncode == 0 and isinstance(data, dict) and "helpers" in data else 1)
+PY
+}
+
+# Record <label> as owed a restart unless it already is. The debt accumulates: a helper stopped
+# earlier and not yet restarted stays owed.
+helper_owe() {
+  local label="$1" owed
+  for owed in ${STOPPED_HELPERS[@]+"${STOPPED_HELPERS[@]}"}; do
+    [ "$owed" != "$label" ] || return 0
+  done
+  STOPPED_HELPERS+=("$label")
+}
+
+# Stop the helpers, and remember which ones (STOPPED_HELPERS, cleared by a successful
+# helpers_start). Nothing is done when no helper is loaded.
+#   - When the app supports it: `unsloth-studio --engine-helpers unregister`, the SMAppService
+#     call the Settings toggle makes. It acts on both helpers, so both are owed a restart.
+#   - Otherwise (an app from before the CLI): `launchctl bootout` of each loaded helper.
+# Everything is recorded as owed BEFORE the call that stops it: a call that fails part way may
+# still have taken a helper down, and helpers_start leaves a helper that is still loaded alone.
+# Under `set -e` a failing call ends the caller; what was recorded is still owed a restart.
 # Never kickstart -k and never a signal of our own.
 helpers_stop() {
-  local label seen owed
+  local label bin loaded=() any=0
   for label in "${HELPER_LABELS[@]}"; do
     if [ "$DRY" = 1 ] || helper_loaded "$label"; then
-      # Owed BEFORE the bootout: a bootout that fails part way may still have taken the helper
-      # down, and helpers_start leaves a helper that is still loaded alone. The restart debt
-      # accumulates: a helper booted out earlier and not yet restarted stays owed.
-      seen=0
-      for owed in ${STOPPED_HELPERS[@]+"${STOPPED_HELPERS[@]}"}; do
-        [ "$owed" != "$label" ] || seen=1
-      done
-      [ "$seen" = 1 ] || STOPPED_HELPERS+=("$label")
-      log "bootout $label"
-      run "$LAUNCHCTL" bootout "$HELPER_DOMAIN/$label"
+      loaded+=("$label")
+      any=1
     else
       log "$label is not loaded, leaving it alone"
     fi
   done
+  [ "$any" = 1 ] || return 0
+  bin="$(helper_cli)"
+  if helper_cli_supported "$bin"; then
+    for label in "${HELPER_LABELS[@]}"; do helper_owe "$label"; done
+    log "unregister the helpers: $bin --engine-helpers unregister"
+    run "$bin" --engine-helpers unregister
+  else
+    log "$bin has no --engine-helpers; using launchctl bootout"
+    for label in "${loaded[@]}"; do
+      helper_owe "$label"
+      log "bootout $label"
+      run "$LAUNCHCTL" bootout "$HELPER_DOMAIN/$label"
+    done
+  fi
 }
 
-# Bring back the helpers helpers_stop booted out: bootstrap from the bundled plist, else kickstart
-# the label if launchd still has it. Returns 1 when one could not be restarted (the manual
-# fallback is Settings > API Keys > Background engines, off and on).
-helpers_start() {
-  local label plist failed=0
-  for label in ${STOPPED_HELPERS[@]+"${STOPPED_HELPERS[@]}"}; do
-    plist="$HELPER_PLIST_DIR/$label.plist"
-    if [ "$DRY" = 0 ] && helper_loaded "$label"; then
-      log "$label is already loaded"
-      continue
-    fi
-    log "bootstrap $label"
-    if run "$LAUNCHCTL" bootstrap "$HELPER_DOMAIN" "$plist"; then
-      continue
-    fi
-    warn "bootstrap of $plist failed; trying kickstart"
-    if ! run "$LAUNCHCTL" kickstart "$HELPER_DOMAIN/$label"; then
-      warn "$label did not restart. Turn Unsloth > Settings > API Keys > Background engines off and on."
-      failed=1
-    fi
+# True once every label in STOPPED_HELPERS is loaded, waiting up to HELPER_START_WAIT seconds.
+owed_helpers_loaded() {
+  local start=$SECONDS label up
+  while :; do
+    up=1
+    for label in ${STOPPED_HELPERS[@]+"${STOPPED_HELPERS[@]}"}; do
+      helper_loaded "$label" || up=0
+    done
+    [ "$up" = 1 ] && return 0
+    [ $((SECONDS - start)) -lt "$HELPER_START_WAIT" ] || return 1
+    sleep "${HEALTH_POLL:-1}"
   done
-  [ "$failed" = 0 ] && STOPPED_HELPERS=()
-  return "$failed"
+}
+
+# Bring back the helpers helpers_stop took down with `unsloth-studio --engine-helpers register`
+# from the app at helper_app (after --install, the NEW app). macOS refuses `launchctl bootstrap`
+# and `kickstart` for a helper bundled for SMAppService, so those are never tried. A helper that
+# was only booted out (an app without the CLI) can leave its registration in place, which makes
+# `register` a no-op; one `restart` (unregister, wait, register) covers that. Returns 1 when a
+# helper could not be brought back, with the manual fallback in the warning (Settings > Attached
+# engines > Background engines, off and on).
+helpers_start() {
+  local label bin all_up=1
+  [ "${#STOPPED_HELPERS[@]}" -gt 0 ] || return 0
+  if [ "$DRY" = 0 ]; then
+    for label in "${STOPPED_HELPERS[@]}"; do helper_loaded "$label" || all_up=0; done
+    if [ "$all_up" = 1 ]; then
+      log "the helpers are already loaded"
+      STOPPED_HELPERS=()
+      return 0
+    fi
+  fi
+  bin="$(helper_cli)"
+  if ! helper_cli_supported "$bin"; then
+    warn "$bin has no --engine-helpers, so the helpers cannot be restarted from here. Turn Unsloth > Settings > Attached engines > Background engines off and on."
+    return 1
+  fi
+  log "register the helpers: $bin --engine-helpers register"
+  if run "$bin" --engine-helpers register; then
+    if [ "$DRY" = 1 ] || owed_helpers_loaded; then
+      STOPPED_HELPERS=()
+      return 0
+    fi
+    warn "register did not bring the helpers back; trying restart"
+  else
+    warn "register failed; trying restart"
+  fi
+  if run "$bin" --engine-helpers restart && owed_helpers_loaded; then
+    STOPPED_HELPERS=()
+    return 0
+  fi
+  warn "the helpers did not restart. Turn Unsloth > Settings > Attached engines > Background engines off and on."
+  return 1
 }
 
 port_owners() {
