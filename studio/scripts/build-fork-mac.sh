@@ -58,8 +58,11 @@
 #
 # The build bakes UNSLOTH_FORK_REPO (this checkout) into the app: its managed repair runs the
 # same non-editable `update --local` from it and refuses, rather than installing from PyPI.
+# It also bakes UNSLOTH_FORK_COMMIT (HEAD) and UNSLOTH_FORK_BRANCH (the checked-out branch, or the
+# FORK_BRANCH environment variable): Settings > About > Updates compares them with
+# github.com/beaglemoo/unsloth and opens studio/scripts/update-fork.sh in Terminal.
 #
-# Environment: SIGNING_IDENTITY (default "Developer ID Application: james beesley (D6VHKTRR33)"),
+# Environment: FORK_BRANCH (branch to bake, default the checked-out one), SIGNING_IDENTITY (default "Developer ID Application: james beesley (D6VHKTRR33)"),
 #              DIST_DIR (default ~/Homelab/unsloth/dist); for tests: UNSLOTH_STUDIO_VENV,
 #              BACKUP_ROOT, INSTALLED_APP, APP_PREV, QUIT_WAIT, and the engines-lib.sh variables
 set -euo pipefail
@@ -149,10 +152,19 @@ phase_build() {
   local identity="$SIGNING_IDENTITY"
   [ "$ADHOC" = 1 ] && identity="-"
   log "signing identity: $identity"
+  # Baked into the app for Settings > About > Updates: the commit this build was made from and
+  # the branch it is compared against on github.com/beaglemoo/unsloth.
+  local fork_commit fork_branch
+  fork_commit="$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" || die "cannot read the checkout's HEAD commit"
+  fork_branch="${FORK_BRANCH:-$(git -C "$REPO" symbolic-ref --quiet --short HEAD 2>/dev/null || true)}"
+  [ -n "$fork_branch" ] || fork_branch="feat/omlx-ds4-engines"
+  log "fork build: ${fork_commit:0:9} on $fork_branch"
   # The frontend is already built above, so tauri's own beforeBuildCommand is blanked.
   ( cd "$STUDIO" && run env \
       UNSLOTH_DESKTOP_BACKEND_VERSION="$version" \
       UNSLOTH_FORK_REPO="$REPO" \
+      UNSLOTH_FORK_COMMIT="$fork_commit" \
+      UNSLOTH_FORK_BRANCH="$fork_branch" \
       APPLE_SIGNING_IDENTITY="$identity" \
       "$STUDIO/node_modules/.bin/tauri" build \
         --features attached-engines \
