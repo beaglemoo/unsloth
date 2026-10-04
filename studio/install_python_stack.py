@@ -8328,6 +8328,68 @@ def _shared_base_requirements() -> Path | None:
 _UNSLOTH_ZOO_GIT_URL = "unsloth-zoo @ git+https://github.com/unslothai/unsloth-zoo"
 
 
+_FORK_PINS_NAME = "fork-pins.toml"
+
+
+def _fork_pins_path() -> Path:
+    """studio/fork-pins.toml: next to this file, else under the --local checkout."""
+    here = Path(__file__).resolve().parent / _FORK_PINS_NAME
+    if here.is_file():
+        return here
+    repo = os.environ.get("STUDIO_LOCAL_REPO", "").strip()
+    if repo:
+        candidate = Path(repo).expanduser() / "studio" / _FORK_PINS_NAME
+        if candidate.is_file():
+            return candidate
+    return here
+
+
+def _parse_fork_pins(text: str) -> dict:
+    """Parse the flat `[section]` / `key = "value"` subset fork-pins.toml uses.
+
+    Not tomllib: this file supports Python 3.9, which has none, and the pin file is deliberately
+    kept to plain string values so it parses the same everywhere.
+    """
+    pins: dict = {}
+    section = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        header = re.fullmatch(r"\[([A-Za-z0-9_.-]+)\]", line)
+        if header:
+            section = header.group(1)
+            pins.setdefault(section, {})
+            continue
+        pair = re.fullmatch(r'([A-Za-z0-9_-]+)\s*=\s*"([^"]*)"\s*(?:#.*)?', line)
+        if pair and section is not None:
+            pins[section][pair.group(1)] = pair.group(2)
+    return pins
+
+
+def _fork_zoo_pin() -> dict:
+    """The unsloth-zoo pin of the fork install: {"version", "url", "commit"}.
+
+    Fails closed: a fork install never falls back to zoo's moving `main`.
+    """
+    path = _fork_pins_path()
+    try:
+        zoo = _parse_fork_pins(path.read_text(encoding = "utf-8")).get("unsloth-zoo", {})
+    except OSError as exc:
+        raise SystemExit(
+            f"fork install: cannot read {path} ({exc}); refusing to install unsloth-zoo from upstream main"
+        )
+    url = zoo.get("url", "")
+    commit = zoo.get("commit", "")
+    version = zoo.get("version", "")
+    if not (url.startswith("https://") and re.fullmatch(r"[0-9a-f]{40}", commit) and version):
+        raise SystemExit(
+            f"fork install: {path} needs [unsloth-zoo] url (https), a 40 hex digit commit and a "
+            "version; refusing to install unsloth-zoo from upstream main"
+        )
+    return {"version": version, "url": url, "commit": commit}
+
+
 def _unsloth_zoo_ref() -> str:
     """The unsloth-zoo git ref the --local overlay installs.
 
@@ -8345,6 +8407,11 @@ def _unsloth_zoo_git_spec() -> str:
     bare git URL already clones the default branch, so the default install is
     byte for byte the one every caller and the staging path already expect.
     """
+    if _local_overlay_non_editable():
+        # Fork install: exactly the commit studio/fork-pins.toml names. UNSLOTH_ZOO_REF is ignored
+        # here on purpose; bump the pin deliberately instead (see CLAUDE.md).
+        pin = _fork_zoo_pin()
+        return f"unsloth-zoo @ git+{pin['url']}@{pin['commit']}"
     ref = os.environ.get("UNSLOTH_ZOO_REF", "").strip()
     return _UNSLOTH_ZOO_GIT_URL + ("@" + ref if ref else "")
 
@@ -8394,7 +8461,10 @@ def _overlay_local_core_package(
         install_label = "Overlaying local repo (editable)"
         args = ("-e", local_repo)
     elif canonical == "unsloth-zoo":
-        zoo_ref = _unsloth_zoo_ref()
+        if _local_overlay_non_editable():
+            zoo_ref = _fork_zoo_pin()["commit"][:12] + " (studio/fork-pins.toml)"
+        else:
+            zoo_ref = _unsloth_zoo_ref()
         step_label = f"overlaying unsloth-zoo from git {zoo_ref}"
         install_label = f"Overlaying unsloth-zoo from git {zoo_ref}"
         args = ("--force-reinstall", _unsloth_zoo_git_spec())
@@ -8402,9 +8472,32 @@ def _overlay_local_core_package(
         return False
     _step(_LABEL, step_label)
     if not strict:
-        return pip_install_try(install_label, "--no-cache-dir", "--no-deps", *args, constrain = False)
-    pip_install(install_label, "--no-cache-dir", "--no-deps", *args, constrain = False)
-    return True
+        installed = pip_install_try(install_label, "--no-cache-dir", "--no-deps", *args, constrain = False)
+    else:
+        pip_install(install_label, "--no-cache-dir", "--no-deps", *args, constrain = False)
+        installed = True
+    if installed and canonical == "unsloth-zoo" and _local_overlay_non_editable():
+        if not _fork_zoo_pin_installed(strict = strict):
+            return False
+    return installed
+
+
+def _fork_zoo_pin_installed(*, strict: bool) -> bool:
+    """After a fork install: the zoo on disk must be the pinned version. Exits when strict."""
+    from importlib.metadata import PackageNotFoundError, version as _dist_version
+
+    expected = _fork_zoo_pin()["version"]
+    try:
+        found = _dist_version("unsloth_zoo")
+    except PackageNotFoundError:
+        found = "(not installed)"
+    if found == expected:
+        return True
+    message = f"unsloth-zoo is {found} after the install but studio/fork-pins.toml pins {expected}"
+    if strict:
+        raise SystemExit(f"fork install: {message}")
+    _note(message)
+    return False
 
 
 def _overlay_local_core_packages(local_repo: str) -> None:
