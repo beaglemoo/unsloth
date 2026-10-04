@@ -128,7 +128,7 @@ pub(crate) struct Failure {
 
 /// Wrappers and the backend resolve the home the same way: `UNSLOTH_ENGINES_HOME`, else
 /// `~/.unsloth/engines`. (`UNSLOTH_ENGINES_CONFIG` only moves the toml.)
-fn engines_home() -> Option<PathBuf> {
+pub(crate) fn engines_home() -> Option<PathBuf> {
     match std::env::var_os("UNSLOTH_ENGINES_HOME") {
         Some(home) => Some(PathBuf::from(home)),
         None => Some(dirs::home_dir()?.join(".unsloth").join("engines")),
