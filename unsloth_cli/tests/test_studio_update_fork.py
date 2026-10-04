@@ -160,3 +160,13 @@ def test_fork_marker_reads_the_module(monkeypatch):
     assert studio._fork_marker() is not None
     monkeypatch.setitem(sys.modules, "studio._fork", None)
     assert studio._fork_marker() is None
+
+
+def test_the_hidden_setup_command_is_refused_without_local(monkeypatch):
+    studio, seen = _neutered(monkeypatch)
+    monkeypatch.setattr(studio, "_fork_marker", lambda: _marker())
+    monkeypatch.delenv("STUDIO_LOCAL_INSTALL", raising = False)
+    result = CliRunner().invoke(studio.studio_app, ["setup"])
+    assert result.exit_code == 2, result.output
+    assert "This is the beaglemoo fork." in result.output
+    assert seen["setup_calls"] == 0
