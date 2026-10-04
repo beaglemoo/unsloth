@@ -141,6 +141,12 @@ import {
 } from "./external-providers";
 import { useConnectionChecksStore } from "./stores/connection-checks-store";
 import {
+  ATTACHED_CONNECTIONS_LINK,
+  ATTACHED_CONNECTIONS_NOTICE,
+  connectionsListView,
+  isAttachedConnection,
+} from "./attached-connections";
+import {
   providerSavesInFlight,
   useExternalProvidersStore,
 } from "./stores/external-providers-store";
@@ -757,11 +763,10 @@ export function ChatProvidersSettings({
     setBaseUrlDraft("");
   }, [providerType, editingProviderId, registryByType]);
 
-  const totalModels = useMemo(
-    () =>
-      providers.reduce((count, provider) => count + provider.models.length, 0),
-    [providers],
-  );
+  // The attached engines (oMLX, DwarfStar) are managed on their own settings tab: they are not
+  // listed, editable or counted here, though the store still holds them for the model picker.
+  const listView = useMemo(() => connectionsListView(providers), [providers]);
+  const totalModels = listView.modelCount;
 
   useEffect(() => {
     let isMounted = true;
@@ -1872,6 +1877,12 @@ export function ChatProvidersSettings({
     );
     if (!provider) return;
     openedProviderRef.current = openProviderId;
+    if (isAttachedConnection(provider)) {
+      // Never offer the edit form for an attached engine; its page is the Attached engines tab.
+      useSettingsDialogStore.getState().openDialog("attached-engines");
+      onOpenProviderConsumed?.();
+      return;
+    }
     void editProvider(provider);
     onOpenProviderConsumed?.();
     // editProvider is redeclared each render; the latch above is what fires this once per id.
@@ -2977,10 +2988,13 @@ export function ChatProvidersSettings({
     );
   }
 
+  // The attached engines are managed on their own settings tab; the store still holds them for the model picker.
   const listedProviders = [
     ...providers.map((provider) => ({ provider, enabled: true })),
     ...disabledProviders.map((provider) => ({ provider, enabled: false })),
-  ].sort((a, b) => byListOrder(a.provider, b.provider));
+  ]
+    .filter(({ provider }) => !isAttachedConnection(provider))
+    .sort((a, b) => byListOrder(a.provider, b.provider));
   const connectedTypes = new Set(
     allProviders.map((provider) => connectionPickerValue(provider.providerType)),
   );
@@ -3118,6 +3132,20 @@ export function ChatProvidersSettings({
             })
           )}
         </SettingsSection>
+        {listView.hasAttached ? (
+          <p className="px-1 pt-2 text-ui-11 leading-snug text-muted-foreground/80">
+            {ATTACHED_CONNECTIONS_NOTICE}{" "}
+            <button
+              type="button"
+              onClick={() =>
+                useSettingsDialogStore.getState().openDialog("attached-engines")
+              }
+              className="font-medium text-foreground underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              {ATTACHED_CONNECTIONS_LINK}
+            </button>
+          </p>
+        ) : null}
       </div>
 
       <div className="flex max-w-[calc(760px*var(--ui-space-scale,1))] flex-col gap-3 pb-8">
