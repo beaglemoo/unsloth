@@ -29,10 +29,13 @@
 #   6. back up /Applications/Unsloth.app to ~/Applications/Unsloth-upstream-0.1.815.app.bak (once;
 #      copied to a .partial name and renamed, so an interrupted copy is never taken for a backup)
 #   7. ditto the built app to /Applications/Unsloth.app.new and codesign-verify it, then unload
-#      oMLX models, stop ds4, boot the helpers out of launchd (the helpers exec from inside the
-#      bundle), move the old app to ~/Applications/Unsloth-prev.app.bak, move the new one into
-#      place and bootstrap the helpers again (kickstart as the fallback; if neither works, use
-#      Settings > Background engines, off and on)
+#      oMLX models, stop ds4, take the helpers out of launchd (the helpers exec from inside the
+#      bundle: `unsloth-studio --engine-helpers unregister` of the installed app, or launchctl
+#      bootout for an app from before that CLI), move the old app to
+#      ~/Applications/Unsloth-prev.app.bak, move the new one into place and register the helpers
+#      again with `--engine-helpers register` of the NEW app (macOS refuses launchctl bootstrap
+#      of a bundled helper; if register does not bring them back, use
+#      Settings > Attached engines > Background engines, off and on)
 #   8. codesign --verify --deep --strict
 #
 # Steps 4-8 are ONE transaction. A rollback handler is armed once the snapshot exists and is
@@ -43,8 +46,9 @@
 # had already come up from the new bundle, and then restarts every helper this run owes. The
 # handler is armed before the first bootout, and a helper counts as owed before its bootout runs.
 #
-# The helper stop/restart (launchctl bootout/bootstrap of the bundled plists) has only been run
-# with --dry-run and a fake launchctl, never against the live helpers.
+# The helper stop/restart goes through helpers_stop and helpers_start in engines-lib.sh. The
+# `--engine-helpers` CLI has been run against the live helpers only by hand; the scripts have only
+# run it with --dry-run and a fake app.
 #
 # The build bakes UNSLOTH_FORK_REPO (this checkout) into the app: its managed repair runs the
 # same non-editable `update --local` from it and refuses, rather than installing from PyPI.
@@ -344,7 +348,7 @@ rollback_install() {
       warn "the backend could not be restored; the snapshot is at $BACKEND_BACKUP"
     fi
   fi
-  helpers_start || warn "the helpers did not restart; use Settings > API Keys > Background engines, off and on"
+  helpers_start || warn "the helpers did not restart; use Settings > Attached engines > Background engines, off and on"
 }
 
 install_on_exit() {
@@ -390,7 +394,7 @@ install_app() {
   APP_NEW_IN_PLACE=1
 
   log "restart the helpers"
-  helpers_start || warn "the helpers did not restart; use Settings > API Keys > Background engines, off and on"
+  helpers_start || warn "the helpers did not restart; use Settings > Attached engines > Background engines, off and on"
   [ "$own" = 0 ] || disarm_install_rollback
 }
 
