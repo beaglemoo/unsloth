@@ -10,11 +10,18 @@ export type EngineHelperState =
   | "unsupported"
   | "partial";
 
+/** Whether the engines stop when Unsloth quits (`with_app`, the default) or keep serving. */
+export type EngineLifetime = "with_app" | "always";
+
 export interface EngineHelpersStatus {
   supported: boolean;
   state: EngineHelperState;
   helpers: Array<{ name: string; plist: string; state: EngineHelperState }>;
   error: string | null;
+  /** The master "Engines enabled" choice. Absent from a shell older than the lifetime setting. */
+  engines_enabled?: boolean;
+  /** Absent from a shell older than the lifetime setting, which behaves as "always". */
+  engine_lifetime?: EngineLifetime;
 }
 
 export interface EngineHelpersToggle {
@@ -25,7 +32,7 @@ export interface EngineHelpersToggle {
 }
 
 /**
- * What the "Background engines" row shows, or null when the row must stay hidden: not inside
+ * What the "Engines enabled" row shows, or null when the row must stay hidden: not inside
  * the desktop shell, a shell built without the feature (the command is missing), or a
  * platform without SMAppService.
  */
