@@ -3,6 +3,13 @@
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { SettingsRow } from "@/features/settings/components/settings-row";
 import { SettingsSection } from "@/features/settings/components/settings-section";
@@ -15,11 +22,18 @@ import { useAttachedEnginesStore } from "./attached-engines-store";
 import {
   loadEngineHelpersStatus,
   setEngineHelpersEnabled,
+  setEngineLifetime,
 } from "./engine-helpers-api";
 import {
   type EngineHelpersStatus,
   engineHelpersToggle,
 } from "./engine-helpers-state";
+import {
+  engineLifetimeOf,
+  engineLifetimeRow,
+  enginesEnabledDescription,
+  isEngineLifetime,
+} from "./engine-lifetime-state";
 import type { AttachedEnginesSettings } from "./types";
 import { settingsSaveSyncAction } from "./settings-save-sync";
 import {
@@ -35,7 +49,7 @@ const ERROR_CLASS =
 /**
  * Owner-only settings for the attached engines (oMLX, DwarfStar), on the Attached engines tab. Always
  * rendered for the owner, since the enable toggle lives here: everything else, including the
- * Background engines switch, is hidden while the feature is off.
+ * Engines enabled switch and the Engine lifetime control, is hidden while the feature is off.
  */
 export function AttachedEnginesSettingsSection() {
   const settings = useAttachedEnginesStore((s) => s.settings);
@@ -51,6 +65,7 @@ export function AttachedEnginesSettingsSection() {
   const [helpers, setHelpers] = useState<EngineHelpersStatus | null>(null);
   const [isHelpersBusy, setIsHelpersBusy] = useState(false);
   const helpersToggle = engineHelpersToggle(helpers);
+  const lifetimeRow = engineLifetimeRow(helpers);
 
   useEffect(() => {
     let cancelled = false;
@@ -71,6 +86,22 @@ export function AttachedEnginesSettingsSection() {
         helpersError instanceof Error
           ? helpersError.message
           : "Failed to change the background engines",
+      );
+    } finally {
+      setIsHelpersBusy(false);
+    }
+  };
+
+  const changeLifetime = async (value: string) => {
+    if (!isEngineLifetime(value)) return;
+    setIsHelpersBusy(true);
+    try {
+      setHelpers(await setEngineLifetime(value));
+    } catch (lifetimeError) {
+      setError(
+        lifetimeError instanceof Error
+          ? lifetimeError.message
+          : "Failed to change the engine lifetime",
       );
     } finally {
       setIsHelpersBusy(false);
@@ -146,8 +177,8 @@ export function AttachedEnginesSettingsSection() {
         <>
           {helpersToggle ? (
             <SettingsRow
-              label="Background engines"
-              description="Run oMLX and DwarfStar as macOS login items. They keep serving after Unsloth quits."
+              label="Engines enabled"
+              description={enginesEnabledDescription(engineLifetimeOf(helpers))}
               below={
                 helpersToggle.message ? (
                   <span
@@ -163,6 +194,34 @@ export function AttachedEnginesSettingsSection() {
                 disabled={isHelpersBusy}
                 onCheckedChange={(enabled) => void toggleHelpers(enabled)}
               />
+            </SettingsRow>
+          ) : null}
+          {lifetimeRow ? (
+            <SettingsRow
+              label="Engine lifetime"
+              description="Whether the engines run only while Unsloth is open, or stay up after it quits."
+              below={<span className={INFO_CLASS}>{lifetimeRow.note}</span>}
+            >
+              <Select
+                value={lifetimeRow.value}
+                disabled={isHelpersBusy}
+                onValueChange={(value) => void changeLifetime(value)}
+              >
+                <SelectTrigger
+                  aria-label="Engine lifetime"
+                  className="w-80"
+                  size="sm"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {lifetimeRow.options.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </SettingsRow>
           ) : null}
           <SettingsRow
