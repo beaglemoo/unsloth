@@ -33,8 +33,9 @@ const ERROR_CLASS =
   "max-w-[calc(260px*var(--ui-space-scale,1))] text-right text-xs text-destructive";
 
 /**
- * Owner-only settings for the attached engines (oMLX, DwarfStar). Always rendered for the owner,
- * since the enable toggle lives here: everything else about the feature is hidden while it is off.
+ * Owner-only settings for the attached engines (oMLX, DwarfStar), on the Attached engines tab. Always
+ * rendered for the owner, since the enable toggle lives here: everything else, including the
+ * Background engines switch, is hidden while the feature is off.
  */
 export function AttachedEnginesSettingsSection() {
   const settings = useAttachedEnginesStore((s) => s.settings);
@@ -127,8 +128,8 @@ export function AttachedEnginesSettingsSection() {
 
   return (
     <SettingsSection
-      title="Attached engines"
-      description="Manage oMLX and DwarfStar from Studio: their models appear in the chat picker and share memory with local loads."
+      title="Configuration"
+      description="Turn the engines on, set where Studio reaches them and how they share memory with local loads."
     >
       <SettingsRow
         label="Enable attached engines"
@@ -141,29 +142,29 @@ export function AttachedEnginesSettingsSection() {
           onCheckedChange={(enabled) => void persist({ enabled })}
         />
       </SettingsRow>
-      {helpersToggle ? (
-        <SettingsRow
-          label="Background engines"
-          description="Run oMLX and DwarfStar as macOS login items. They keep serving after Unsloth quits."
-          below={
-            helpersToggle.message ? (
-              <span
-                className={helpersToggle.isError ? ERROR_CLASS : INFO_CLASS}
-              >
-                {helpersToggle.message}
-              </span>
-            ) : null
-          }
-        >
-          <Switch
-            checked={helpersToggle.checked}
-            disabled={isHelpersBusy}
-            onCheckedChange={(enabled) => void toggleHelpers(enabled)}
-          />
-        </SettingsRow>
-      ) : null}
       {settings?.enabled ? (
         <>
+          {helpersToggle ? (
+            <SettingsRow
+              label="Background engines"
+              description="Run oMLX and DwarfStar as macOS login items. They keep serving after Unsloth quits."
+              below={
+                helpersToggle.message ? (
+                  <span
+                    className={helpersToggle.isError ? ERROR_CLASS : INFO_CLASS}
+                  >
+                    {helpersToggle.message}
+                  </span>
+                ) : null
+              }
+            >
+              <Switch
+                checked={helpersToggle.checked}
+                disabled={isHelpersBusy}
+                onCheckedChange={(enabled) => void toggleHelpers(enabled)}
+              />
+            </SettingsRow>
+          ) : null}
           <SettingsRow
             label="oMLX URL"
             description="Loopback address of the oMLX server."

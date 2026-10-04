@@ -156,6 +156,7 @@ const SETTINGS_TAB_LABELS: Record<SettingsTab, TranslationKey> = {
   knowledge: "settings.tabs.knowledge",
   sandbox: "settings.tabs.sandbox",
   "api-keys": "settings.tabs.apiKeys",
+  "attached-engines": "settings.tabs.attachedEngines",
   "remote-lan": "settings.tabs.remoteLan",
   agents: "settings.tabs.agents",
   "keyboard-shortcuts": "settings.tabs.keyboardShortcuts",

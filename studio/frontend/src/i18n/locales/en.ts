@@ -1384,6 +1384,7 @@ export const en = {
       data: "Data",
       knowledge: "Knowledge",
       apiKeys: "API",
+      attachedEngines: "Attached engines",
       remoteLan: "Remote & LAN",
       agents: "Agents",
       keyboardShortcuts: "Shortcuts",

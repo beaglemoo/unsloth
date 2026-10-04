@@ -1376,6 +1376,7 @@ export const fr = {
       chat: "Discussion",
       connections: "Connexions",
       apiKeys: "API",
+      attachedEngines: "Attached engines",
       remoteLan: "Accès distant et LAN",
       about: "À propos",
       data: "Données",

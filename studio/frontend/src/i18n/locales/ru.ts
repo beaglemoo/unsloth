@@ -1374,6 +1374,7 @@ export const ru = {
       chat: "Чат",
       connections: "Подключения",
       apiKeys: "API",
+      attachedEngines: "Attached engines",
       remoteLan: "Удалённый доступ и LAN",
       about: "О программе",
       data: "Данные",
