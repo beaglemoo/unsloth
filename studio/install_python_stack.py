@@ -8493,6 +8493,7 @@ def _fork_zoo_pin_installed(*, strict: bool) -> bool:
     """After a fork install: the zoo on disk must be the pinned version. Exits when strict."""
     from importlib.metadata import PackageNotFoundError, version as _dist_version
 
+    importlib.invalidate_caches()  # pip just rewrote site-packages in another process
     expected = _fork_zoo_pin()["version"]
     try:
         found = _dist_version("unsloth_zoo")

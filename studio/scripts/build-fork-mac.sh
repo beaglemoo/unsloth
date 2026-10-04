@@ -230,6 +230,11 @@ build_fork_wheel() {
   listing="$(python3 -m zipfile -l "$WHEEL")" || die "cannot list $WHEEL"
   grep -q 'studio/backend/routes/attached_engines.py' <<<"$listing" \
     || die "$WHEEL does not contain the fork's attached-engines backend"
+  # Without these two a rebase that dropped them would reopen the PyPI and upstream-zoo paths.
+  grep -q 'studio/_fork.py' <<<"$listing" \
+    || die "$WHEEL does not contain the fork marker studio/_fork.py"
+  grep -q 'studio/fork-pins.toml' <<<"$listing" \
+    || die "$WHEEL does not contain studio/fork-pins.toml"
   log "fork wheel built: $WHEEL"
 }
 

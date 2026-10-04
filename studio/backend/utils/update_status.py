@@ -142,6 +142,15 @@ def get_studio_update_status(current_version: str) -> dict[str, Any]:
     install_source = detect_install_source()
     disabled = update_checks_disabled()
 
+    if is_fork_build():
+        # Before the dev-only override below: the fork never paints an upstream banner.
+        return _status_response(
+            current_version = current_version,
+            latest_version = None,
+            install_source = install_source,
+            reason = "fork_build",
+        )
+
     # Dev-only: the popup is PyPI-install-only, so fake a version to review it
     # from a checkout. The documented opt-out still wins.
     forced_version = os.environ.get(FAKE_UPDATE_ENV_VAR, "").strip()
@@ -160,14 +169,6 @@ def get_studio_update_status(current_version: str) -> dict[str, Any]:
             latest_version = None,
             install_source = install_source,
             reason = "disabled",
-        )
-
-    if is_fork_build():
-        return _status_response(
-            current_version = current_version,
-            latest_version = None,
-            install_source = install_source,
-            reason = "fork_build",
         )
 
     if install_source in LOCAL_INSTALL_SOURCES:
