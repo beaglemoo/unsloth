@@ -48,7 +48,6 @@ import {
   loadHuggingFaceCacheSettings,
   updateHuggingFaceCacheSettings,
 } from "../api/hugging-face-cache";
-import { AttachedEnginesPanel } from "@/features/attached-engines";
 import { InferenceEnginesSection } from "@/features/model-picker/components/inference-engines";
 import { useSettingsDialogStore } from "../stores/settings-dialog-store";
 import { useIsAccountOwner } from "@/features/auth";
