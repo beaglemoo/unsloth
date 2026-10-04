@@ -1707,6 +1707,7 @@ markers = [
     "slow: minutes rather than seconds, and covered again more cheaply elsewhere",
     "reads_real_pip_config: opts out of the hermetic pip config stub, for the few tests that drive that read themselves",
     "native_mxc: needs native Windows, the pinned Microsoft WXC executable, and a working MXC ProcessContainer backend",
+    "fork: runs with the beaglemoo fork marker (studio/_fork.py) active; every other CLI test runs as upstream",
 ]
 
 # CI runs these with `-m 'gpu or slow'`; live Studio tests need `-m server`.
