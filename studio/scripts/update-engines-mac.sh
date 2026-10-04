@@ -12,21 +12,23 @@
 #      keep serving, so they are down only for the swap, not for the multi-minute build
 #      (the submodule pin check runs here; the build fails on a mismatch or a dirty submodule)
 #   3. idle again, then unload oMLX models and stop ds4 gracefully (idle only; nothing is killed)
-#   4. launchctl bootout the helpers, wait until :8843, :8001 and :8000 are free
+#   4. stop the helpers (`unsloth-studio --engine-helpers unregister`, else launchctl bootout),
+#      wait until :8843, :8001 and :8000 are free
 #   5. swap: build-engines-mac.sh --swap-only (live -> <venv>.old, .new -> live, then .provisioned)
-#   6. launchctl bootstrap the helpers (kickstart as the fallback) and wait for health
-#   7. on any failure after the swap: bootout, build-engines-mac.sh --rollback-venvs, bootstrap
-#      again, wait for health, and exit 1. <venv>.failed keeps the broken venv for inspection.
+#   6. start the helpers again (`unsloth-studio --engine-helpers register`) and wait for health
+#   7. on any failure after the swap: stop the helpers, build-engines-mac.sh --rollback-venvs,
+#      start them again, wait for health, and exit 1. <venv>.failed keeps the broken venv for inspection.
 #
 # Only the venvs change. The ds4-server binary and the launcher script live inside Unsloth.app:
 # a ds4 submodule bump also needs build-fork-mac.sh and --install.
 #
-# The helper restart path (launchctl bootstrap of the bundled plist) has only been exercised with
-# --dry-run and a fake launchctl. If a helper does not come back, use Unsloth > Settings >
-# API Keys > Background engines, off and on.
+# The helper stop and start live in engines-lib.sh and use the app's `--engine-helpers` CLI
+# (macOS refuses `launchctl bootstrap` of a bundled helper). They have only been exercised with
+# --dry-run and a fake app. If a helper does not come back, use Unsloth > Settings >
+# Attached engines > Background engines, off and on.
 #
 # Environment: UNSLOTH_ENGINES_HOME (default ~/.unsloth/engines), OMLX_URL, DS4_URL, ENGINE_PORTS,
-#   HELPER_PLIST_DIR, LAUNCHCTL, BUILD_ENGINES (the build script), HEALTH_TIMEOUT (default 240 s)
+#   HELPER_APP, LAUNCHCTL, BUILD_ENGINES (the build script), HEALTH_TIMEOUT (default 240 s)
 set -euo pipefail
 
 DRY=0 YES=0 FORCE=0
