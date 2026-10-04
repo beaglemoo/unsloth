@@ -5,6 +5,12 @@ import { ShutdownDialog } from "@/components/shutdown-dialog";
 import { Button } from "@/components/ui/button";
 import { usePlatformStore } from "@/config/env";
 import { getAuthToken } from "@/features/auth";
+import {
+  type ForkUpdateInfo,
+  ForkUpdateInstructions,
+  ForkUpdateSection,
+  loadForkUpdateInfo,
+} from "@/features/fork-updates";
 import { removeTrainingUnloadGuard } from "@/features/training";
 import { type HardwareInfo, useHardwareInfo } from "@/hooks/use-hardware-info";
 import { type TranslationKey, useT } from "@/i18n";
@@ -48,7 +54,10 @@ function isUpdateInstallSource(value: unknown): value is UpdateInstallSource {
   );
 }
 
-async function fetchInstallSource(): Promise<UpdateInstallSource> {
+// The backend answers reason "fork_build" for the beaglemoo fork, whatever its install source.
+const FORK_REASON = "fork_build";
+
+async function fetchInstallSource(): Promise<UpdateInstallSource | "fork"> {
   if (isTauri) {
     return "unknown";
   }
@@ -66,6 +75,9 @@ async function fetchInstallSource(): Promise<UpdateInstallSource> {
       return "unknown";
     }
     const data = (await res.json()) as ApiObject;
+    if (data["reason"] === FORK_REASON) {
+      return "fork";
+    }
     const installSource = data[INSTALL_SOURCE_KEY];
     return isUpdateInstallSource(installSource) ? installSource : "unknown";
   } catch {
@@ -105,8 +117,12 @@ export function AboutTab() {
   );
   const [shutdownOpen, setShutdownOpen] = useState(false);
   const [installSource, setInstallSource] = useState<
-    UpdateInstallSource | "loading"
+    UpdateInstallSource | "fork" | "loading"
   >("loading");
+  // undefined while the desktop shell is asked, null when this is not a fork build.
+  const [forkInfo, setForkInfo] = useState<ForkUpdateInfo | null | undefined>(
+    isTauri ? undefined : null,
+  );
   const [desktopAppVersion, setDesktopAppVersion] = useState<string | null>();
 
   useEffect(() => {
@@ -122,6 +138,11 @@ export function AboutTab() {
       loadDesktopAppVersion().then((version) => {
         if (!canceled) {
           setDesktopAppVersion(version);
+        }
+      });
+      loadForkUpdateInfo().then((info) => {
+        if (!canceled) {
+          setForkInfo(info?.enabled ? info : null);
         }
       });
     }
@@ -165,13 +186,19 @@ export function AboutTab() {
 
       <div ref={updateSectionRef} className="scroll-mt-5">
         <SettingsSection title={t("settings.about.updates")}>
-          <div className="py-2">
-            <UpdateStudioInstructions
-              defaultShell={defaultShell}
-              installSource={isTauri ? null : installSource}
-              showTitle={false}
-            />
-          </div>
+          {forkInfo ? (
+            <ForkUpdateSection initial={forkInfo} />
+          ) : forkInfo === undefined ? null : installSource === "fork" ? (
+            <ForkUpdateInstructions />
+          ) : (
+            <div className="py-2">
+              <UpdateStudioInstructions
+                defaultShell={defaultShell}
+                installSource={isTauri ? null : installSource}
+                showTitle={false}
+              />
+            </div>
+          )}
         </SettingsSection>
       </div>
 
