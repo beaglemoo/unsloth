@@ -83,3 +83,14 @@ def test_upstream_behaviour_is_unchanged_without_the_marker(monkeypatch):
     status = update_status.get_studio_update_status("2026.9.14")
     assert status["update_available"] is True
     assert status["latest_version"] == "2099.1.1"
+
+
+def test_the_dev_fake_update_override_cannot_paint_a_banner_in_the_fork(monkeypatch):
+    _no_network(monkeypatch)
+    monkeypatch.setattr(update_status, "is_fork_build", lambda: True)
+    monkeypatch.setattr(update_status, "detect_install_source", lambda: "pypi")
+    monkeypatch.delenv(update_status.DISABLE_ENV_VAR, raising = False)
+    monkeypatch.setenv(update_status.FAKE_UPDATE_ENV_VAR, "2099.1.1")
+    status = update_status.get_studio_update_status("2026.9.14")
+    assert status["update_available"] is False
+    assert status["reason"] == "fork_build"
