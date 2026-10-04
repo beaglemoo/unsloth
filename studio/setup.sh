@@ -53,6 +53,17 @@ if [ "$#" -gt 0 ]; then
     done
 fi
 
+# ── beaglemoo fork guard ──
+# Without --local this script installs `unsloth` from PyPI and unsloth-zoo from upstream main, which
+# would replace the fork. The fork updates through `unsloth studio update --local` (run by
+# update-fork.sh and build-fork-mac.sh), which exports STUDIO_LOCAL_INSTALL=1.
+# UNSLOTH_FORK_ALLOW_INSTALL_SH=1 is for the repo's own installer tests; never set it on the live machine.
+if [ "${STUDIO_LOCAL_INSTALL:-0}" != "1" ] && [ "${UNSLOTH_FORK_ALLOW_INSTALL_SH:-}" != "1" ]; then
+    echo "setup.sh without --local is disabled in the beaglemoo fork (it would install upstream Unsloth)." >&2
+    echo "Update with: ~/Homelab/unsloth/unsloth/studio/scripts/update-fork.sh" >&2
+    exit 1
+fi
+
 # ── Maintainer-editable defaults ──────────────────────────────────────────
 # Maintainer-editable defaults; user env vars override.
 # Prefer _DEFAULT_LLAMA_TAG=latest: master bypasses the prebuilt resolver and forces a source build.
