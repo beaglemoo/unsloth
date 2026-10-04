@@ -85,6 +85,8 @@ def studio(monkeypatch, tmp_path):
     spec.loader.exec_module(module)
     # update() flocks STUDIO_HOME, which defaults to the real home and races xdist workers.
     monkeypatch.setattr(module, "STUDIO_HOME", tmp_path / "studio_home")
+    # These tests exercise upstream's plain `update`, which the beaglemoo fork marker refuses.
+    monkeypatch.setattr(module, "_fork_marker", lambda: None)
     return module
 
 
