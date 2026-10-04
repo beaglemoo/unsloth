@@ -31,6 +31,18 @@ fi
 step()    { printf "  ${C_DIM}%-15.15s${C_RST}${3:-$C_OK}%s${C_RST}\n" "$1" "$2"; }
 substep() { printf "  ${C_DIM}%-15s${2:-$C_DIM}%s${C_RST}\n" "" "$1"; }
 
+# ── beaglemoo fork guard ──
+# This is the fork's copy of install.sh (it is also bundled into the fork's Unsloth.app). It installs
+# `unsloth` from PyPI and `unsloth-zoo` from upstream main, which would replace the fork. The fork is
+# updated only with studio/scripts/update-fork.sh. UNSLOTH_FORK_ALLOW_INSTALL_SH=1 is for the repo's
+# own installer tests; never set it on the live machine.
+if [ "${UNSLOTH_FORK_ALLOW_INSTALL_SH:-}" != "1" ]; then
+    step "fork" "install.sh is disabled in the beaglemoo fork" "$C_ERR" >&2
+    substep "It would install upstream Unsloth over the fork. Update with:" "$C_WARN" >&2
+    substep "  ~/Homelab/unsloth/unsloth/studio/scripts/update-fork.sh" "$C_WARN" >&2
+    exit 1
+fi
+
 # ── Parse flags ──
 STUDIO_LOCAL_INSTALL=false
 PACKAGE_NAME="unsloth"
