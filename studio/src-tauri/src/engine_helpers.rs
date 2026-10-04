@@ -2,9 +2,12 @@
 //!
 //! The agents ship as `Contents/Library/LaunchAgents/ai.unsloth.studio.{omlx,ds4}.plist` and
 //! point (BundleProgram) at the wrappers in `Contents/Resources/engines`. They are
-//! registered when the user turns on "Background engines" and they KEEP RUNNING after Unsloth
-//! quits, because other clients (pi, Claude Code, OpenCode) use the engines. Nothing in the
-//! quit, update or repair paths may call `disable`; only the explicit user action does.
+//! registered when the user turns on "Engines enabled" (the old "Background engines" switch).
+//! What happens at quit follows the engine lifetime (`engine_lifetime`): `always` leaves them
+//! running because other clients (pi, Claude Code, OpenCode) use the engines, so nothing in the
+//! quit, update or repair paths may call `disable` then; `with_app` (the default) is the one
+//! exception, where the real quit path (`engine_quit`) unloads the models, stops ds4 and calls
+//! `disable` once the engines are idle.
 
 use serde::Serialize;
 
@@ -38,6 +41,10 @@ pub(crate) struct EngineHelpersStatus {
     state: HelperState,
     helpers: Vec<HelperStatus>,
     error: Option<String>,
+    /// The master "Engines enabled" choice as `engine_lifetime` resolves it.
+    engines_enabled: bool,
+    /// `with_app` or `always`.
+    engine_lifetime: crate::engine_lifetime::EngineLifetime,
 }
 
 /// Where a bundled launch agent plist lives, resolved from the running executable
@@ -118,17 +125,21 @@ fn snapshot(error: Option<String>) -> EngineHelpersStatus {
         })
         .collect();
     let states: Vec<HelperState> = helpers.iter().map(|h| h.state).collect();
+    let state = aggregate(&states);
+    let settings = crate::engine_lifetime::load();
     EngineHelpersStatus {
         supported: sm::SUPPORTED,
-        state: aggregate(&states),
+        state,
         helpers,
         error,
+        engines_enabled: crate::engine_lifetime::effective_enabled(&settings, state),
+        engine_lifetime: settings.lifetime,
     }
 }
 
 /// Register every helper. A failure on one is reported but does not stop the others, so the
 /// toggle never leaves the pair half-registered because of a single error.
-fn enable() -> EngineHelpersStatus {
+pub(crate) fn enable() -> EngineHelpersStatus {
     let mut errors = Vec::new();
     for (name, plist) in HELPERS {
         if let Err(error) = sm::register(plist) {
@@ -138,7 +149,7 @@ fn enable() -> EngineHelpersStatus {
     snapshot((!errors.is_empty()).then(|| errors.join("; ")))
 }
 
-fn disable() -> EngineHelpersStatus {
+pub(crate) fn disable() -> EngineHelpersStatus {
     let mut errors = Vec::new();
     for (name, plist) in HELPERS {
         if let Err(error) = sm::unregister(plist) {
@@ -162,14 +173,47 @@ pub(crate) async fn engine_helpers_status() -> EngineHelpersStatus {
     snapshot(None)
 }
 
+/// Register the helpers (the launch hook and the toggle share it). Does not touch the saved choice.
+pub(crate) fn enable_helpers() -> EngineHelpersStatus {
+    enable()
+}
+
+/// `restart` with the real launchd poll, for the launch hook.
+pub(crate) fn restart_helpers() -> EngineHelpersStatus {
+    restart(
+        &launchd_has_label,
+        &|| std::thread::sleep(RESTART_POLL_INTERVAL),
+        RESTART_MAX_POLLS,
+    )
+}
+
+fn remember_enabled(enabled: bool) {
+    if let Err(error) = crate::engine_lifetime::save_enabled(enabled) {
+        log::warn!("could not save engines_enabled={enabled}: {error}");
+    }
+}
+
+/// The toggle: remember the choice, then register. The CLI's `register` does not remember
+/// anything, so a script's transient stop and start never changes what the user chose.
 #[tauri::command]
 pub(crate) async fn engine_helpers_enable() -> EngineHelpersStatus {
+    remember_enabled(true);
     enable()
 }
 
 #[tauri::command]
 pub(crate) async fn engine_helpers_disable() -> EngineHelpersStatus {
+    remember_enabled(false);
     disable()
+}
+
+/// Save the engine lifetime (`with_app` or `always`) and report the status with it applied.
+#[tauri::command]
+pub(crate) async fn engine_lifetime_set(lifetime: String) -> Result<EngineHelpersStatus, String> {
+    let lifetime = crate::engine_lifetime::EngineLifetime::parse(&lifetime)
+        .ok_or_else(|| format!("unknown engine lifetime {lifetime:?}; use with_app or always"))?;
+    crate::engine_lifetime::save_lifetime(lifetime)?;
+    Ok(snapshot(None))
 }
 
 // --- Headless CLI ------------------------------------------------------------------------------
@@ -325,11 +369,7 @@ pub(crate) fn cli_main(args: &[String]) -> Option<i32> {
             CliCommand::Status => snapshot(None),
             CliCommand::Register => enable(),
             CliCommand::Unregister => disable(),
-            CliCommand::Restart => restart(
-                &launchd_has_label,
-                &|| std::thread::sleep(RESTART_POLL_INTERVAL),
-                RESTART_MAX_POLLS,
-            ),
+            CliCommand::Restart => restart_helpers(),
         }
     };
     match serde_json::to_string(&status) {
@@ -632,6 +672,8 @@ mod tests {
             state: HelperState::Enabled,
             helpers: Vec::new(),
             error: None,
+            engines_enabled: true,
+            engine_lifetime: crate::engine_lifetime::EngineLifetime::WithApp,
         };
         assert_eq!(exit_code(&ok), 0);
         let failed = EngineHelpersStatus { error: Some("boom".into()), ..ok.clone() };
@@ -647,6 +689,8 @@ mod tests {
         assert!(json["state"].is_string());
         assert_eq!(json["helpers"].as_array().unwrap().len(), 2);
         assert!(json["error"].is_null());
+        assert!(json["engines_enabled"].is_boolean());
+        assert!(matches!(json["engine_lifetime"].as_str(), Some("with_app" | "always")));
     }
 
     #[cfg(not(target_os = "macos"))]

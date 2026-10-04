@@ -27,6 +27,8 @@ mod gpu_rendering;
 #[cfg(feature = "attached-engines")]
 mod engine_helpers;
 #[cfg(feature = "attached-engines")]
+mod engine_lifetime;
+#[cfg(feature = "attached-engines")]
 mod engine_tray;
 mod install;
 mod install_watchdog;
@@ -2645,6 +2647,8 @@ fn main() {
             engine_helpers::engine_helpers_enable,
             #[cfg(feature = "attached-engines")]
             engine_helpers::engine_helpers_disable,
+            #[cfg(feature = "attached-engines")]
+            engine_helpers::engine_lifetime_set,
             ];
             handler(invoke)
         })
@@ -2713,6 +2717,9 @@ fn main() {
                 setup_terminate_interception(app);
             }
             setup_tray(app)?;
+            // Engines enabled: bring the helpers up for this run (thread, never inline).
+            #[cfg(feature = "attached-engines")]
+            engine_lifetime::reconcile_at_launch();
             #[cfg(unix)]
             setup_unix_termination_signals(app)?;
             Ok(())
