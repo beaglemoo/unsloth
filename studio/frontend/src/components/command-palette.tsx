@@ -151,6 +151,7 @@ const SETTINGS_TAB_LABELS: Record<SettingsTab, TranslationKey> = {
   library: "shell.navigation.library",
   data: "settings.tabs.data",
   "api-keys": "settings.tabs.apiKeys",
+  "attached-engines": "settings.tabs.attachedEngines",
   "remote-lan": "settings.tabs.remoteLan",
   agents: "settings.tabs.agents",
   "keyboard-shortcuts": "settings.tabs.keyboardShortcuts",

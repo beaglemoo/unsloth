@@ -491,6 +491,7 @@ export const zhCN = {
       chat: "聊天",
       connections: "连接",
       apiKeys: "API",
+      attachedEngines: "Attached engines",
       remoteLan: "远程与局域网",
       about: "关于",
       voice: "语音",

@@ -9,6 +9,7 @@ export const OWNER_ONLY_SETTINGS_TABS: ReadonlySet<SettingsTab> = new Set<Settin
   "accounts",
   "resources",
   "remote-lan",
+  "attached-engines",
   "agents",
   "debugging",
 ]);

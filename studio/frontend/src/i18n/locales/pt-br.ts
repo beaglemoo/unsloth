@@ -495,6 +495,7 @@ export const ptBR = {
       chat: "Chat",
       connections: "Conexões",
       apiKeys: "API",
+      attachedEngines: "Attached engines",
       remoteLan: "Remoto e LAN",
       about: "Sobre",
       voice: "Voz",
