@@ -2282,6 +2282,17 @@ fn extend_csp_with_hf_endpoints<R: tauri::Runtime>(context: &mut tauri::Context<
 }
 
 fn main() {
+    // Headless `--engine-helpers <command>`: must stay the first statement. It answers on stdout
+    // and exits, so no logger, PATH fix, single-instance plugin, backend, tray or window is
+    // ever set up, and it works beside a running GUI instance.
+    #[cfg(feature = "attached-engines")]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if let Some(code) = engine_helpers::cli_main(&args) {
+            std::process::exit(code);
+        }
+    }
+
     // AppRun's host-stack probe: answer and exit before anything else loads or logs.
     #[cfg(target_os = "linux")]
     if let Some(code) = appimage_webkit::run_probe() {
