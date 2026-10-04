@@ -2603,6 +2603,8 @@ def run_server(
             else:
                 installer_bin = home / "unsloth_studio" / "bin" / "unsloth"
             tried_lines = "\n".join(f"  - {p}" for p in attempted) or "  (none)"
+            from utils.update_status import is_fork_build as _is_fork_build
+
             raise SystemExit(
                 "[ERROR] Unsloth frontend build not found.\n"
                 f"Tried:\n{tried_lines}\n"
@@ -2622,7 +2624,11 @@ def run_server(
                 )
                 + "  - pass --frontend <path/to/studio/frontend/dist>\n"
                 "  - pass --api-only to skip serving the web UI\n"
-                "  - reinstall: curl -fsSL https://unsloth.ai/install.sh | sh"
+                + (
+                    "  - reinstall: studio/scripts/update-fork.sh (this is the beaglemoo fork)"
+                    if _is_fork_build()
+                    else "  - reinstall: curl -fsSL https://unsloth.ai/install.sh | sh"
+                )
             )
 
     # For the banner and the reachability probe; the startup log line resolves its own, LAN-only, answer.

@@ -4193,6 +4193,32 @@ def _fail_if_install_damaged(package_name: str = "unsloth") -> None:
     raise typer.Exit(code = 1)
 
 
+def _fork_marker() -> Optional[types.ModuleType]:
+    """The `studio._fork` marker module when this package is the beaglemoo fork, else None.
+
+    Tests monkeypatch this to None to exercise the upstream behaviour.
+    """
+    try:
+        return importlib.import_module("studio._fork")
+    except Exception:
+        return None
+
+
+def _fork_update_refusal(marker: types.ModuleType) -> str:
+    hint = getattr(marker, "UPDATE_SCRIPT_HINT", "~/Homelab/unsloth/unsloth/studio/scripts/update-fork.sh")
+    return f"This is the beaglemoo fork. Update with `{hint}`."
+
+
+def _fork_default_repo_root(marker: types.ModuleType) -> Optional[Path]:
+    """The fork checkout a fork-mode `update --local` installs from when STUDIO_LOCAL_REPO is unset
+    and this CLI runs from site-packages: the conventional location, never a download."""
+    hint = getattr(marker, "UPDATE_SCRIPT_HINT", "")
+    rel = getattr(marker, "UPDATE_SCRIPT_REL", "")
+    if not hint or not rel or not hint.endswith(rel):
+        return None
+    return Path(hint[: -len(rel)].rstrip("/")).expanduser()
+
+
 @studio_app.command()
 def update(
     local: bool = typer.Option(False, "--local", help = "Install from local repo instead of PyPI"),
@@ -4224,6 +4250,12 @@ def update(
     if stage is True:
         _refuse_staged_update()
         return
+    fork_marker = _fork_marker()
+    if fork_marker is not None and not local:
+        # The fork's package must never be replaced by PyPI's unsloth (it lacks the fork's
+        # routes, engines and desktop code). `--local` from the fork checkout is the only update.
+        typer.echo(_fork_update_refusal(fork_marker), err = True)
+        raise typer.Exit(2)
     staging = _studio_stage.is_staging()
     # Do not inherit SKIP_STUDIO_BASE from a parent install.ps1 session.
     os.environ.pop("SKIP_STUDIO_BASE", None)
@@ -4233,11 +4265,18 @@ def update(
         os.environ["STUDIO_LOCAL_INSTALL"] = "1"
         # Explicit repo root: __file__ holds only from a checkout, and once unsloth is installed non-editably parents[2] IS site-packages, which uv rejects.
         _explicit = (os.environ.get("STUDIO_LOCAL_REPO") or "").strip()
+        if not _explicit and fork_marker is not None:
+            _fork_root = _fork_default_repo_root(fork_marker)
+            if _fork_root is not None and (_fork_root / "pyproject.toml").is_file():
+                _explicit = str(_fork_root)
         repo_root = (
             Path(_explicit).expanduser().resolve()
             if _explicit
             else Path(__file__).resolve().parents[2]
         )
+        if fork_marker is not None:
+            # Fork installs are always regular (non-editable) and pin unsloth-zoo, never main.
+            os.environ["STUDIO_LOCAL_NONEDITABLE"] = "1"
         if not (repo_root / "pyproject.toml").is_file():
             typer.echo("Error: --local needs an Unsloth checkout to install from.", err = True)
             typer.echo(f"  no pyproject.toml under: {repo_root}", err = True)
@@ -4256,8 +4295,11 @@ def update(
                     "    STUDIO_LOCAL_REPO=/path/to/unsloth unsloth studio update --local",
                     err = True,
                 )
-            typer.echo("  Or update from PyPI:", err = True)
-            typer.echo("    unsloth studio update", err = True)
+            if fork_marker is None:
+                typer.echo("  Or update from PyPI:", err = True)
+                typer.echo("    unsloth studio update", err = True)
+            else:
+                typer.echo(f"  {_fork_update_refusal(fork_marker)}", err = True)
             raise typer.Exit(2)
         os.environ["STUDIO_LOCAL_REPO"] = str(repo_root)
     else:
