@@ -230,6 +230,9 @@ export const SETTINGS_SEARCH_INDEX: Record<SettingsTab, TranslationKey[]> = {
     "settings.apiKeys.decisionApi.title",
     "settings.apiKeys.mcp.title",
   ],
+  // The two cards label themselves in English in every locale, so keys naming them
+  // would never match their own anchor. The header carries both entries instead.
+  "attached-engines": [],
   // the English card labels cannot match localized keys, so the header carries both entries.
   "remote-lan": ["settings.remoteLan.title", "settings.remoteLan.description"],
   agents: [

@@ -22,7 +22,6 @@ import type {
 import { ApiKeyRow } from "../components/api-key-row";
 import { AudioApiExamples } from "../components/audio-api-examples";
 import { CreateKeyForm } from "../components/create-key-form";
-import { AttachedEnginesSettingsSection } from "@/features/attached-engines";
 import { DecisionApiSection } from "../components/decision-api-section";
 import { KeyRevealCard } from "../components/key-reveal-card";
 import { KeylessApiAccessSection } from "../components/keyless-api-access-section";
@@ -205,7 +204,6 @@ export function ApiKeysTab() {
           <ModelAutoSwitchSection />
 
           <ModelAliasesSection />
-          <AttachedEnginesSettingsSection />
         </>
       ) : null}
 

@@ -20,6 +20,7 @@ export const SETTINGS_TABS = [
   "library",
   "data",
   "api-keys",
+  "attached-engines",
   "remote-lan",
   "agents",
   "keyboard-shortcuts",

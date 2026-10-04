@@ -1050,6 +1050,7 @@ export const ko = {
       chat: "채팅",
       connections: "연결",
       apiKeys: "API",
+      attachedEngines: "Attached engines",
       remoteLan: "원격 및 LAN",
       about: "정보",
       data: "데이터",
