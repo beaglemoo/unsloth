@@ -243,9 +243,21 @@ def migrate(home_dir, snippet, **env):
     )
 
 
-def make_app(path: Path, marker="x"):
+def make_app(path: Path, marker="x", cli=None):
+    """A fake bundle. cli: None = no executable, "cli" = an unsloth-studio that supports
+    `--engine-helpers` (fakes/fake-unsloth-studio), "old" = one that does not and would start the
+    GUI for any argument (it logs gui-started)."""
     (path / "Contents").mkdir(parents=True)
     (path / "Contents" / "marker").write_text(marker)
+    if cli is None:
+        return
+    binary = path / "Contents" / "MacOS" / "unsloth-studio"
+    binary.parent.mkdir()
+    if cli == "cli":
+        binary.write_text((FAKES / "fake-unsloth-studio").read_text().replace("__FAKES__", str(FAKES)))
+    else:
+        binary.write_text('#!/bin/bash\necho gui-started >>"${FAKE_LC:-/dev/null}"\n')
+    binary.chmod(0o755)
 
 
 def test_rollback_moves_the_retired_apps_back(tmp_path):
@@ -481,8 +493,8 @@ class Rig:
         self.home = home
         self.lc = tmp_path / "lc"
         self.lc.mkdir()
-        self.plists = tmp_path / "plists"
-        self.plists.mkdir()
+        self.app = tmp_path / "helper-app" / "Unsloth.app"
+        make_app(self.app, "helper", cli="cli")
         self.omlx_port, self.ds4_port = free_port(), free_port()
         self.labels = ("ai.unsloth.studio.omlx", "ai.unsloth.studio.ds4")
         make_venv(home / "omlx", "old")
@@ -512,7 +524,8 @@ class Rig:
             "DS4_URL": f"http://127.0.0.1:{self.ds4_port}",
             "ENGINE_PORTS": f"{self.omlx_port} {self.ds4_port}",
             "LAUNCHCTL": str(FAKES / "fake-launchctl"),
-            "HELPER_PLIST_DIR": str(self.plists),
+            "HELPER_APP": str(self.app),
+            "HELPER_START_WAIT": "5",
             "BUILD_ENGINES": str(self.build),
             "HEALTH_TIMEOUT": "6",
             "HEALTH_POLL": "0.2",
@@ -524,12 +537,21 @@ class Rig:
             "FAKE_PY": sys.executable,
             "STAGE_VERSION": "none",
         }
-        for label in self.labels:
-            self.launchctl("bootstrap", "gui/501", str(self.plists / f"{label}.plist"))
+        # the helpers start registered, as after the Settings toggle
+        assert run([str(self.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "register"], self.env).returncode == 0
         self.wait_up()
+        (self.lc / "calls.log").unlink(missing_ok=True)
 
     def launchctl(self, *args):
         return run([str(FAKES / "fake-launchctl"), *args], self.env)
+
+    def fork_env(self, extra=None):
+        """The environment for sourcing build-fork-mac.sh: the helpers belong to INSTALLED_APP."""
+        env = {k: v for k, v in self.env.items() if k not in ("UNSLOTH_ENGINES_HOME", "HELPER_APP")}
+        return {**env, **(extra or {})}
+
+    def cli_calls(self):
+        return [c for c in self.calls() if c.startswith("engine-helpers ") and c != "engine-helpers status"]
 
     def wait_up(self):
         import time
@@ -578,33 +600,43 @@ def test_update_swaps_the_venv_with_the_helpers_stopped_for_the_swap_only(rig):
     assert (rig.home / "omlx.old" / "VERSION").read_text() == "old"
     assert marker(rig.home)["omlx"] == "new-key"
     calls = rig.calls()
-    # staged first, while the helpers still serve; then idle unload, stop, bootout, bootstrap
+    # staged first, while the helpers still serve; then idle unload, stop, restart through the app
     order = [
         "fake stage: new",
         "omlx-unload",
         "ds4-stop /admin/stop?if_idle=1",
-        "launchctl bootout gui/501/ai.unsloth.studio.omlx",
-        "launchctl bootout gui/501/ai.unsloth.studio.ds4",
+        "engine-helpers unregister",
+        "engine-helpers register",
     ]
     positions = [calls.index(item) for item in order]
     assert positions == sorted(positions)
-    after_stop = calls[calls.index("launchctl bootout gui/501/ai.unsloth.studio.ds4"):]
-    assert sum(c.startswith("launchctl bootstrap") for c in after_stop) == 2
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert_no_launchd_start(rig)
     assert all(rig.loaded(label) for label in rig.labels)
     assert not (rig.home / "omlx.new").exists()
+
+
+def assert_no_launchd_start(rig):
+    """macOS refuses launchctl bootstrap of an SMAppService helper: nothing may depend on it."""
+    assert not any(c.startswith(("launchctl bootstrap", "launchctl kickstart")) for c in rig.calls())
+    assert "gui-started" not in rig.calls()
+
+
+def helpers_touched(rig):
+    return [c for c in rig.calls() if c.startswith("launchctl bootout") or c in ("engine-helpers unregister", "engine-helpers register", "engine-helpers restart")]
 
 
 def test_update_with_nothing_staged_does_not_touch_the_helpers(rig):
     result = rig.update(STAGE_VERSION="none")
     assert result.returncode == 0 and "nothing to do" in result.stdout
-    assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+    assert helpers_touched(rig) == []
 
 
 def test_update_refuses_while_an_engine_is_busy_and_stages_nothing(rig):
     (rig.home / "ds4-busy").write_text("1")
     result = rig.update(STAGE_VERSION="new")
     assert result.returncode != 0 and "in flight" in result.stderr
-    assert not any(c.startswith("fake stage") or c.startswith("launchctl bootout") for c in rig.calls())
+    assert not any(c.startswith("fake stage") for c in rig.calls()) and helpers_touched(rig) == []
     assert (rig.home / "omlx" / "VERSION").read_text() == "old"
 
 
@@ -641,24 +673,143 @@ def test_update_restarts_the_helpers_when_the_swap_cannot_happen(rig):
 def test_update_fails_cleanly_when_the_stage_fails(rig):
     result = rig.update(STAGE_VERSION="fail")
     assert result.returncode != 0
-    assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+    assert helpers_touched(rig) == []
     assert (rig.home / "omlx" / "VERSION").read_text() == "old"
 
 
 def test_update_reports_when_a_helper_cannot_be_restarted(rig):
-    result = rig.update(STAGE_VERSION="new", FAKE_BOOTSTRAP_FAIL="1")
+    result = rig.update(STAGE_VERSION="new", FAKE_REGISTER_FAIL="1", FAKE_RESTART_FAIL="1")
     assert result.returncode != 0
-    assert "did not restart" in result.stderr + result.stdout
-    assert any(c.startswith("launchctl kickstart") for c in rig.calls())
+    out = result.stderr + result.stdout
+    assert "did not restart" in out and "Attached engines > Background engines" in out
+    # register, then one restart; never launchctl bootstrap or kickstart
+    assert [c for c in rig.cli_calls() if c != "engine-helpers unregister"][:2] == ["engine-helpers register", "engine-helpers restart"]
+    assert_no_launchd_start(rig)
+
+
+def lib_fn(rig, snippet, extra=None):
+    """Run a snippet with engines-lib.sh sourced against the rig's fake engines, launchctl and app."""
+    prelude = (
+        'log() { echo "[t] $*"; }; warn() { echo "[t] warning: $*" >&2; }; '
+        'die() { echo "[t] error: $*" >&2; exit 1; }; '
+        'run() { if [ "$DRY" = 1 ]; then echo "[dry-run] $*"; else "$@"; fi; }; DRY=0; '
+    )
+    return run(
+        ["bash", "-c", f'set -euo pipefail; {prelude} . "{SCRIPTS}/engines-lib.sh"; {snippet}'],
+        {**rig.env, **(extra or {})},
+    )
+
+
+def test_helpers_stop_and_start_go_through_the_app_cli(rig):
+    result = lib_fn(rig, 'helpers_stop; echo "owed=${STOPPED_HELPERS[*]}"; helpers_start; echo "owed=${STOPPED_HELPERS[*]-}"')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "owed=ai.unsloth.studio.omlx ai.unsloth.studio.ds4" in result.stdout
+    assert result.stdout.strip().splitlines()[-1] == "owed="
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+    assert_no_launchd_start(rig)
+    assert all(rig.loaded(label) for label in rig.labels)
+
+
+def test_the_cli_is_detected_by_a_status_that_exits_0_with_json(rig):
+    ok = lib_fn(rig, 'helper_cli_supported "$(helper_cli)"')
+    assert ok.returncode == 0
+    for env in ({"FAKE_STATUS_FAIL": "1"},):
+        bad = lib_fn(rig, 'helper_cli_supported "$(helper_cli)"', env)
+        assert bad.returncode != 0
+
+
+def test_an_app_without_the_cli_is_never_run_and_falls_back_to_bootout(rig, tmp_path):
+    old = tmp_path / "old-app" / "Unsloth.app"
+    make_app(old, "old", cli="old")
+    result = lib_fn(rig, "helpers_stop", {"HELPER_APP": str(old)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    # the old binary would have started its GUI for an unknown flag: it must not even be probed
+    assert "gui-started" not in rig.calls()
+    assert [c for c in rig.calls() if c.startswith("launchctl bootout")] == [
+        "launchctl bootout gui/501/ai.unsloth.studio.omlx",
+        "launchctl bootout gui/501/ai.unsloth.studio.ds4",
+    ]
+    assert rig.cli_calls() == []
+    assert not any(rig.loaded(label) for label in rig.labels)
+    # and the old app cannot bring them back: say so, with the manual fallback, and do not call
+    # launchctl bootstrap or kickstart
+    started = lib_fn(rig, 'STOPPED_HELPERS=(ai.unsloth.studio.omlx ai.unsloth.studio.ds4); helpers_start', {"HELPER_APP": str(old)})
+    assert started.returncode != 0
+    assert "no --engine-helpers" in started.stderr and "Attached engines > Background engines" in started.stderr
+    assert_no_launchd_start(rig)
+
+
+def test_an_app_with_no_executable_falls_back_to_bootout(rig, tmp_path):
+    bare = tmp_path / "bare" / "Unsloth.app"
+    make_app(bare, "bare")
+    result = lib_fn(rig, "helpers_stop", {"HELPER_APP": str(bare)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 2
+
+
+def test_a_failing_status_falls_back_to_bootout(rig):
+    result = lib_fn(rig, "helpers_stop", {"FAKE_STATUS_FAIL": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 2
+    assert rig.cli_calls() == []
+
+
+def test_a_booted_out_helper_keeps_its_registration_so_register_is_followed_by_restart(rig, tmp_path):
+    # the first install: the old app has no CLI (bootout), the new app starts them again
+    old = tmp_path / "old-app" / "Unsloth.app"
+    make_app(old, "old", cli="old")
+    started = lib_fn(rig, f'HELPER_APP="{old}" helpers_stop; test -e "$FAKE_LC/registered.ai.unsloth.studio.omlx"; helpers_start')
+    assert started.returncode == 0, started.stdout + started.stderr
+    assert rig.cli_calls() == ["engine-helpers register", "engine-helpers restart"]
+    assert "trying restart" in started.stderr
+    assert_no_launchd_start(rig)
+    assert all(rig.loaded(label) for label in rig.labels)
+
+
+def test_a_register_that_does_nothing_and_a_restart_that_fails_leave_a_clear_warning(rig):
+    started = lib_fn(rig, "helpers_stop; helpers_start", {"FAKE_REGISTER_NOOP": "1", "FAKE_RESTART_FAIL": "1", "HELPER_START_WAIT": "1"})
+    assert started.returncode != 0
+    assert "did not restart" in started.stderr and "Attached engines > Background engines" in started.stderr
+    assert not any(rig.loaded(label) for label in rig.labels)
+
+
+def test_helpers_start_with_nothing_owed_does_nothing(rig):
+    result = lib_fn(rig, "helpers_start")
+    assert result.returncode == 0
+    assert rig.cli_calls() == []
+
+
+def test_helpers_that_are_already_loaded_are_left_alone(rig):
+    result = lib_fn(rig, 'STOPPED_HELPERS=(ai.unsloth.studio.omlx); helpers_start')
+    assert result.returncode == 0 and "already loaded" in result.stdout
+    assert rig.cli_calls() == []
+
+
+def test_helpers_stop_with_no_loaded_helper_does_nothing(rig):
+    lib_fn(rig, "helpers_stop")
+    rig.calls_before = len(rig.calls())
+    again = lib_fn(rig, "helpers_stop")
+    assert again.returncode == 0 and "not loaded, leaving it alone" in again.stdout
+    assert rig.cli_calls() == ["engine-helpers unregister"]
+
+
+def test_helper_dry_run_prints_the_cli_calls_and_changes_nothing(rig):
+    result = lib_fn(rig, "DRY=1; helpers_stop; helpers_start")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--engine-helpers unregister" in result.stdout and "--engine-helpers register" in result.stdout
+    assert rig.cli_calls() == []
+    assert all(rig.loaded(label) for label in rig.labels)
 
 
 def test_update_dry_run_changes_nothing(rig):
     result = rig.update("--dry-run", STAGE_VERSION="new")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "[dry-run]" in result.stdout and "bootout" in result.stdout and "--swap-only" in result.stdout
+    assert "[dry-run]" in result.stdout and "--engine-helpers unregister" in result.stdout and "--swap-only" in result.stdout
+    assert "--engine-helpers register" in result.stdout
     assert (rig.home / "omlx" / "VERSION").read_text() == "old"
     assert not (rig.home / "omlx.new").exists() and not (rig.home / "omlx.old").exists()
-    assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+    assert helpers_touched(rig) == []
     assert all(rig.loaded(label) for label in rig.labels)
 
 
@@ -808,61 +959,86 @@ def test_a_good_install_keeps_the_new_backend_and_swaps_the_app(tmp_path):
 def test_the_app_swap_happens_with_the_helpers_out_of_launchd(tmp_path, home):
     rig = Rig(tmp_path, home)
     try:
-        make_app(tmp_path / "dist" / "Unsloth.app", "new")
-        make_app(tmp_path / "Apps" / "Unsloth.app", "old")
+        make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
+        make_app(tmp_path / "Apps" / "Unsloth.app", "old", cli="cli")
         log = rig.lc / "calls.log"
         snippet = (
             "codesign() { :; }; DRY=0; "
             f'mv() {{ echo "mv $1" >>"{log}"; command mv "$@"; }}; '
             "install_app"
         )
-        env = {k: v for k, v in rig.env.items() if k not in ("UNSLOTH_ENGINES_HOME",)}
-        result = fork_fn(tmp_path, snippet, {**env, "DIST_DIR": str(tmp_path / "dist")})
+        result = fork_fn(tmp_path, snippet, rig.fork_env({"DIST_DIR": str(tmp_path / "dist")}))
         assert result.returncode == 0, result.stdout + result.stderr
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
         assert (tmp_path / "prev" / "Unsloth-prev.app.bak" / "Contents" / "marker").read_text() == "old"
         assert not (tmp_path / "Apps" / "Unsloth.app.new").exists()
         calls = rig.calls()
-        stops = [i for i, c in enumerate(calls) if c.startswith("launchctl bootout")]
+        # stopped through the OLD app, started through the NEW one: the app moves in between
+        stop = calls.index("engine-helpers unregister")
         moves = [i for i, c in enumerate(calls) if c.startswith("mv ")]
-        starts = [i for i, c in enumerate(calls) if c.startswith("launchctl bootstrap")][-2:]
-        assert len(stops) == 2 and len(moves) == 2 and len(starts) == 2
-        assert max(stops) < min(moves) and max(moves) < min(starts)
+        start = calls.index("engine-helpers register")
+        assert len(moves) == 2 and stop < min(moves) and max(moves) < start
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+        assert not any(c.startswith("launchctl bootout") for c in calls)
+        assert_no_launchd_start(rig)
         assert all(rig.loaded(label) for label in rig.labels)
     finally:
         rig.close()
 
 
-def install_app_rig(tmp_path, rig, extra_env=None, snippet="install_app"):
-    """Run install_app against the fake engines and launchctl; returns the result."""
-    make_app(tmp_path / "dist" / "Unsloth.app", "new")
-    make_app(tmp_path / "Apps" / "Unsloth.app", "old")
-    env = {k: v for k, v in rig.env.items() if k not in ("UNSLOTH_ENGINES_HOME",)}
-    return fork_fn(tmp_path, f"codesign() {{ :; }}; DRY=0; {snippet}", {**env, **(extra_env or {})})
+def install_app_rig(tmp_path, rig, extra_env=None, snippet="install_app", old_cli="cli"):
+    """Run install_app against the fake engines and app; returns the result."""
+    make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
+    make_app(tmp_path / "Apps" / "Unsloth.app", "old", cli=old_cli)
+    return fork_fn(tmp_path, f"codesign() {{ :; }}; DRY=0; {snippet}", rig.fork_env(extra_env))
 
 
-def test_a_failed_second_bootout_still_restarts_the_helper_that_was_stopped(tmp_path, home):
+def test_the_first_install_over_an_app_without_the_cli_boots_out_then_registers_from_the_new_app(tmp_path, home):
     rig = Rig(tmp_path, home)
     try:
-        result = install_app_rig(tmp_path, rig, {"FAKE_BOOTOUT_FAIL": "ds4"})
+        result = install_app_rig(tmp_path, rig, old_cli="old")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
+        calls = rig.calls()
+        # the old binary is never run (it would start its GUI); launchctl takes the helpers down
+        assert "gui-started" not in calls
+        assert sum(c.startswith("launchctl bootout") for c in calls) == 2
+        # the booted-out helpers keep their registration, so register alone does nothing and the
+        # new app's restart is what brings them back
+        assert rig.cli_calls() == ["engine-helpers register", "engine-helpers restart"]
+        assert_no_launchd_start(rig)
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
+def test_a_failed_unregister_still_restarts_the_helper_that_was_stopped(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        # oMLX is unregistered and stopped, ds4 refuses: the install stops before the swap
+        result = install_app_rig(tmp_path, rig, {"FAKE_UNREGISTER_FAIL": "ds4"})
         assert result.returncode != 0, result.stdout + result.stderr
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
         assert not any(c.startswith("mv ") for c in rig.calls())
-        # oMLX was booted out first, then brought back; ds4 never went down
-        assert any(c.startswith("launchctl bootout") and c.endswith(".omlx") for c in rig.calls())
-        assert any(c.startswith("launchctl bootstrap") and c.endswith("ai.unsloth.studio.omlx.plist") for c in rig.calls()[-6:])
+        assert rig.cli_calls()[0] == "engine-helpers unregister"
+        assert "engine-helpers register" in rig.cli_calls()
+        assert_no_launchd_start(rig)
         assert all(rig.loaded(label) for label in rig.labels)
     finally:
         rig.close()
 
 
-def test_a_failed_first_bootout_leaves_both_helpers_running(tmp_path, home):
+def test_a_failed_second_bootout_with_an_app_without_the_cli_cannot_restart_and_says_so(tmp_path, home):
     rig = Rig(tmp_path, home)
     try:
-        result = install_app_rig(tmp_path, rig, {"FAKE_BOOTOUT_FAIL": "omlx"})
-        assert result.returncode != 0
-        assert all(rig.loaded(label) for label in rig.labels)
+        result = install_app_rig(tmp_path, rig, {"FAKE_BOOTOUT_FAIL": "ds4"}, old_cli="old")
+        assert result.returncode != 0, result.stdout + result.stderr
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert not any(c.startswith("mv ") for c in rig.calls())
+        # oMLX was booted out first; the old app cannot register it again, so the user is told how
+        assert "no --engine-helpers" in result.stderr and "Attached engines > Background engines" in result.stderr
+        assert "gui-started" not in rig.calls()
+        assert_no_launchd_start(rig)
     finally:
         rig.close()
 
@@ -879,7 +1055,7 @@ def test_a_port_gate_timeout_restarts_the_stopped_helpers(tmp_path, home):
             )
         assert result.returncode != 0 and "ports still held" in result.stderr, result.stdout + result.stderr
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
-        assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 2
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
         assert all(rig.loaded(label) for label in rig.labels)
     finally:
         rig.close()
@@ -888,14 +1064,13 @@ def test_a_port_gate_timeout_restarts_the_stopped_helpers(tmp_path, home):
 def test_a_busy_engine_blocks_the_app_swap_and_leaves_the_app_alone(tmp_path, home):
     rig = Rig(tmp_path, home)
     try:
-        make_app(tmp_path / "dist" / "Unsloth.app", "new")
-        make_app(tmp_path / "Apps" / "Unsloth.app", "old")
+        make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
+        make_app(tmp_path / "Apps" / "Unsloth.app", "old", cli="cli")
         (home / "ds4-busy").write_text("1")
-        env = {k: v for k, v in rig.env.items() if k not in ("UNSLOTH_ENGINES_HOME",)}
-        result = fork_fn(tmp_path, "codesign() { :; }; DRY=0; install_app", env)
+        result = fork_fn(tmp_path, "codesign() { :; }; DRY=0; install_app", rig.fork_env())
         assert result.returncode != 0 and "in flight" in result.stderr
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
-        assert not any(c.startswith("launchctl bootout") for c in rig.calls())
+        assert helpers_touched(rig) == []
     finally:
         rig.close()
 
@@ -912,10 +1087,9 @@ TXN_STUBS = (
 def txn(tmp_path, rig, overrides="true", extra_env=None):
     """phase_install against the fake engines and launchctl with every backend step stubbed."""
     make_backend(tmp_path)
-    make_app(tmp_path / "dist" / "Unsloth.app", "new")
-    make_app(tmp_path / "Apps" / "Unsloth.app", "old")
-    env = {k: v for k, v in rig.env.items() if k not in ("UNSLOTH_ENGINES_HOME",)}
-    return fork_fn(tmp_path, TXN_STUBS + overrides + "; phase_install", {**env, **(extra_env or {})})
+    make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
+    make_app(tmp_path / "Apps" / "Unsloth.app", "old", cli="cli")
+    return fork_fn(tmp_path, TXN_STUBS + overrides + "; phase_install", rig.fork_env(extra_env))
 
 
 def assert_rolled_back(tmp_path, rig, result):
@@ -937,7 +1111,7 @@ FAILURES = {
     "staging-the-new-app": ('ditto() { case "$2" in *.new) mkdir -p "$2"; return 1;; esac; command ditto "$@"; }', {}),
     "verifying-the-new-bundle": ('codesign() { case "$*" in *Unsloth.app.new*) return 1;; esac; }', {}),
     "quiesce": ('engines_quiesce() { die "ds4 became busy"; }', {}),
-    "second-bootout": ("true", {"FAKE_BOOTOUT_FAIL": "ds4"}),
+    "unregister": ("true", {"FAKE_UNREGISTER_FAIL": "ds4"}),
     "swap": ('mv() { [ "$1" = "$INSTALLED_APP.new" ] && return 1; command mv "$@"; }', {}),
     "final-verify": ('codesign() { [ "${!#}" = "$INSTALLED_APP" ] && return 1; return 0; }', {}),
 }
@@ -953,8 +1127,8 @@ def test_a_failure_after_the_backend_swap_restores_the_backend_and_the_app(tmp_p
         if phase_name == "app-backup-copy":
             assert not (tmp_path / "home" / "app.bak").exists()  # an interrupted copy is not a backup
         if phase_name == "final-verify":
-            # the helpers had come up from the new bundle: they were booted out again for the restore
-            assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 4
+            # the helpers had come up from the new bundle: unregistered again for the restore
+            assert rig.cli_calls().count("engine-helpers unregister") == 2
     finally:
         rig.close()
 
@@ -1201,3 +1375,20 @@ def test_update_migrates_the_config_and_dry_run_does_not(rig):
     assert result.returncode == 0, result.stdout + result.stderr
     assert parsed(cfg)["ds4"]["host"] == "127.0.0.1" and len(backups(rig.home)) == 1
     assert "migrated" in result.stdout
+
+
+def code_lines(path: Path) -> str:
+    return "\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_install_and_update_restart_the_helpers_only_through_the_shared_functions():
+    for script in (FORK, UPDATE):
+        code = code_lines(script)
+        assert "helpers_stop" in code and "helpers_start" in code, script.name
+        assert "launchctl" not in code.lower(), script.name
+        assert "bootstrap" not in code and "kickstart" not in code, script.name
+    lib = code_lines(SCRIPTS / "engines-lib.sh")
+    # macOS refuses launchctl bootstrap of an SMAppService helper; the lib may only bootout or print
+    assert "bootstrap" not in lib and "kickstart" not in lib
+    assert "--engine-helpers register" in lib and "--engine-helpers unregister" in lib
+    assert "HELPER_PLIST_DIR" not in lib
