@@ -15,6 +15,8 @@ mod engine_helpers;
 #[cfg(feature = "attached-engines")]
 mod engine_lifetime;
 #[cfg(feature = "attached-engines")]
+mod engine_quit;
+#[cfg(feature = "attached-engines")]
 mod engine_tray;
 mod install;
 mod install_watchdog;
@@ -1267,6 +1269,10 @@ fn cleanup_child_processes(app: &tauri::AppHandle) {
                 .expect("ShutdownFlag must be managed");
             let _ = process::stop_backend(&backend_state, &shutdown, diagnostics_state.as_ref());
         }
+        // After the backend is gone, so nothing it does can restart an engine. `with_app` only
+        // (a no-op for `always`); up to 45 s, see engine_quit.
+        #[cfg(feature = "attached-engines")]
+        engine_quit::stop_on_quit();
     }
     *done = true;
 }
