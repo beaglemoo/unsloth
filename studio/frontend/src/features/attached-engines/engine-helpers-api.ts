@@ -2,11 +2,17 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { isTauri } from "@/lib/api-base";
-import type { EngineHelpersStatus } from "./engine-helpers-state";
+import type {
+  EngineHelpersStatus,
+  EngineLifetime,
+} from "./engine-helpers-state";
 
-async function call(command: string): Promise<EngineHelpersStatus> {
+async function call(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<EngineHelpersStatus> {
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<EngineHelpersStatus>(command);
+  return invoke<EngineHelpersStatus>(command, args);
 }
 
 /**
@@ -27,4 +33,11 @@ export function setEngineHelpersEnabled(
   enabled: boolean,
 ): Promise<EngineHelpersStatus> {
   return call(enabled ? "engine_helpers_enable" : "engine_helpers_disable");
+}
+
+/** Saves the engine lifetime in the desktop shell and returns the status with it applied. */
+export function setEngineLifetime(
+  lifetime: EngineLifetime,
+): Promise<EngineHelpersStatus> {
+  return call("engine_lifetime_set", { lifetime });
 }
