@@ -121,8 +121,8 @@ test("with the flag off only the enable toggle is rendered", () => {
   const enable = section.indexOf('label="Enable attached engines"');
   const gate = section.indexOf("settings?.enabled ? (");
   assert.ok(enable > 0 && gate > enable);
-  // everything else sits behind the flag, the Background engines switch included
-  assert.ok(section.indexOf('label="Background engines"') > gate);
+  // everything else sits behind the flag, the Engines enabled switch included
+  assert.ok(section.indexOf('label="Engines enabled"') > gate);
   assert.ok(section.indexOf('label="oMLX URL"') > gate);
   assert.match(src("features/attached-engines/engines-panel.tsx"), /if \(!enabled\) return null;/);
   assert.match(
