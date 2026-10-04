@@ -15,7 +15,10 @@
 #   4. stop the helpers (`unsloth-studio --engine-helpers unregister`, else launchctl bootout),
 #      wait until :8843, :8001 and :8000 are free
 #   5. swap: build-engines-mac.sh --swap-only (live -> <venv>.old, .new -> live, then .provisioned)
-#   6. start the helpers again (`unsloth-studio --engine-helpers register`) and wait for health
+#   6. start the helpers again (`unsloth-studio --engine-helpers register`) and wait for health.
+#      In with_app mode (engine_lifetime in ~/.unsloth/engines/desktop.json, the default) they are
+#      only registered again while Unsloth is running (`pgrep -x unsloth-studio`); with the app
+#      closed they stay stopped, because the app registers them at its next launch
 #   7. on any failure after the swap: stop the helpers, build-engines-mac.sh --rollback-venvs,
 #      start them again, wait for health, and exit 1. <venv>.failed keeps the broken venv for inspection.
 #
@@ -25,10 +28,10 @@
 # The helper stop and start live in engines-lib.sh and use the app's `--engine-helpers` CLI
 # (macOS refuses `launchctl bootstrap` of a bundled helper). They have only been exercised with
 # --dry-run and a fake app. If a helper does not come back, use Unsloth > Settings >
-# Attached engines > Background engines, off and on.
+# Attached engines > Engines enabled, off and on.
 #
 # Environment: UNSLOTH_ENGINES_HOME (default ~/.unsloth/engines), OMLX_URL, DS4_URL, ENGINE_PORTS,
-#   HELPER_APP, LAUNCHCTL, BUILD_ENGINES (the build script), HEALTH_TIMEOUT (default 240 s)
+#   HELPER_APP, LAUNCHCTL, PGREP, BUILD_ENGINES (the build script), HEALTH_TIMEOUT (default 240 s)
 set -euo pipefail
 
 DRY=0 YES=0 FORCE=0
@@ -86,7 +89,11 @@ confirm() {
   case "$answer" in y|Y|yes|YES) return 0 ;; *) die "aborted by the user" ;; esac
 }
 
-healthy() { wait_engines_healthy "$HEALTH_TIMEOUT" "$WANT_OMLX" "$WANT_DS4"; }
+# Nothing to wait for when helpers_start left the helpers stopped (with_app, Unsloth closed).
+healthy() {
+  if [ "$HELPERS_LEFT_STOPPED" = 1 ]; then return 0; fi
+  wait_engines_healthy "$HEALTH_TIMEOUT" "$WANT_OMLX" "$WANT_DS4"
+}
 
 rollback_swap() {
   log "rolling back: restoring the previous venvs"
@@ -101,7 +108,9 @@ rollback_swap() {
     run "$BUILD_ENGINES" --rollback-venvs "${args[@]}" || warn "venv rollback failed; restore $ENGINES_HOME/*.old by hand"
   fi
   helpers_start || warn "helpers did not restart after the rollback"
-  if healthy; then
+  if [ "$HELPERS_LEFT_STOPPED" = 1 ]; then
+    log "rolled back; the helpers stay stopped until Unsloth registers them at its next launch"
+  elif healthy; then
     log "rolled back; the previous engines are serving again"
   else
     warn "engines are not healthy after the rollback"
@@ -180,6 +189,12 @@ if [ "$DRY" = 1 ]; then
   log "dry-run: would poll $OMLX_URL/v1/models and $DS4_URL/admin/status for up to ${HEALTH_TIMEOUT} s, then compare the roster"
   log "dry-run complete"
   STAGE=pre
+  exit 0
+fi
+if [ "$HELPERS_LEFT_STOPPED" = 1 ]; then
+  STAGE=pre
+  log "done. The helpers are stopped (with_app and Unsloth is closed); the app registers them at its next launch, so the new venvs are not health-checked until then."
+  log "The previous venvs are kept as *.old for build-engines-mac.sh --rollback-venvs."
   exit 0
 fi
 if ! healthy; then
