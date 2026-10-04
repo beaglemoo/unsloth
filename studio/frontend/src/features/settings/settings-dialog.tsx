@@ -31,6 +31,7 @@ import {
   HomeWifiIcon,
   LibrariesIcon,
   PaintBrush02Icon,
+  PlugSocketIcon,
   Search01Icon,
   Settings02Icon,
   UserCircleIcon,
@@ -97,6 +98,10 @@ const TAB_LOADERS = {
     })),
   "api-keys": () =>
     import("./tabs/api-keys-tab").then((m) => ({ default: m.ApiKeysTab })),
+  "attached-engines": () =>
+    import("./tabs/attached-engines-tab").then((m) => ({
+      default: m.AttachedEnginesTab,
+    })),
   "remote-lan": () =>
     import("./tabs/remote-lan-tab").then((m) => ({ default: m.RemoteLanTab })),
   agents: () =>
@@ -221,6 +226,11 @@ const TABS: TabDef[] = [
     id: "api-keys",
     labelKey: "settings.tabs.apiKeys",
     icon: ApiIcon,
+  },
+  {
+    id: "attached-engines",
+    labelKey: "settings.tabs.attachedEngines",
+    icon: PlugSocketIcon,
   },
   {
     id: "remote-lan",
@@ -447,6 +457,7 @@ export function SettingsDialog() {
     library: null,
     data: null,
     "api-keys": null,
+    "attached-engines": null,
     "remote-lan": null,
     agents: null,
     debugging: null,

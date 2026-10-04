@@ -895,6 +895,7 @@ export const ar = {
       chat: "المحادثة",
       connections: "الاتصالات",
       apiKeys: "API",
+      attachedEngines: "Attached engines",
       remoteLan: "الوصول عن بُعد والشبكة المحلية",
       about: "حول",
       data: "البيانات",
