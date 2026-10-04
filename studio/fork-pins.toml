@@ -1,0 +1,19 @@
+# Pinned third-party sources for the beaglemoo fork. Read by studio/install_python_stack.py when
+# the fork installs itself (`STUDIO_LOCAL_NONEDITABLE=1`, which build-fork-mac.sh and the app's
+# repair set). The fork never installs unsloth-zoo from upstream's moving `main`: it installs
+# exactly the commit below, and fails closed when this file is missing or malformed.
+#
+# Flat format on purpose ([section] and key = "string" only): install_python_stack.py parses it
+# without tomllib (it supports Python 3.9).
+#
+# Bump deliberately (see /Users/beaglemoo/Homelab/unsloth/CLAUDE.md, "unsloth-zoo pin"):
+#   1. pick the unsloth-zoo commit, read its version from unsloth_zoo/__init__.py at that commit
+#   2. edit `commit` and `version` here, in one commit
+#   3. run `studio/scripts/update-fork.sh` (or build-fork-mac.sh --install) and check
+#      `~/.unsloth/studio/unsloth_studio/bin/python -c "import importlib.metadata as m; print(m.version('unsloth_zoo'))"`
+# Recorded 2026-10-04 from the live ~/.unsloth/studio venv (direct_url.json commit_id).
+
+[unsloth-zoo]
+version = "2026.9.9"
+url = "https://github.com/unslothai/unsloth-zoo"
+commit = "867a86383371ebeb8ab1948d085540d134c07b4c"
