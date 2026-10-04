@@ -29,6 +29,7 @@ mod engine_lifetime;
 mod engine_quit;
 #[cfg(feature = "attached-engines")]
 mod engine_tray;
+mod fork_updates;
 mod install;
 mod install_watchdog;
 #[cfg(target_os = "linux")]
@@ -2420,6 +2421,9 @@ fn main() {
             engine_helpers::engine_helpers_disable,
             #[cfg(feature = "attached-engines")]
             engine_helpers::engine_lifetime_set,
+            fork_updates::fork_update_info,
+            fork_updates::fork_update_check,
+            fork_updates::fork_update_open_terminal,
             ];
             handler(invoke)
         })
@@ -2469,6 +2473,8 @@ fn main() {
             // Engines enabled: bring the helpers up for this run (thread, never inline).
             #[cfg(feature = "attached-engines")]
             engine_lifetime::reconcile_at_launch();
+            // Fork builds only (a no-op without the feature): at most one GitHub check a day.
+            fork_updates::check_at_launch();
             #[cfg(unix)]
             setup_unix_termination_signals(app)?;
             Ok(())

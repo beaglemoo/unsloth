@@ -4,6 +4,9 @@
 fn main() {
     // Baked into the fork build with option_env!; a stale value would repair from a wrong checkout.
     println!("cargo:rerun-if-env-changed=UNSLOTH_FORK_REPO");
+    // Baked with option_env! for Settings > About > Updates (fork_updates.rs).
+    println!("cargo:rerun-if-env-changed=UNSLOTH_FORK_COMMIT");
+    println!("cargo:rerun-if-env-changed=UNSLOTH_FORK_BRANCH");
     println!("cargo:rerun-if-changed=windows/app-manifest.xml");
     let windows = tauri_build::WindowsAttributes::new()
         .app_manifest(include_str!("windows/app-manifest.xml"));
