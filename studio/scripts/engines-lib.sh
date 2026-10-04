@@ -12,17 +12,25 @@
 #                       helpers (default: INSTALLED_APP when the caller sets it, else
 #                       /Applications/Unsloth.app). After build-fork-mac.sh --install that is the NEW app.
 #   HELPER_START_WAIT   seconds helpers_start waits for the labels to appear in launchd (default 20)
+#   UNSLOTH_ENGINES_HOME  where desktop.json lives (default ~/.unsloth/engines): the app's
+#                       engine_lifetime ("with_app" by default, or "always") and engines_enabled
+#   PGREP               pgrep binary, to ask whether Unsloth (`unsloth-studio`) is running
 
 OMLX_URL="${OMLX_URL:-http://127.0.0.1:8843}"
 DS4_URL="${DS4_URL:-http://127.0.0.1:8001}"
 ENGINE_PORTS="${ENGINE_PORTS:-8843 8001 8000}"
 LAUNCHCTL="${LAUNCHCTL:-launchctl}"
 HELPER_START_WAIT="${HELPER_START_WAIT:-20}"
+PGREP="${PGREP:-pgrep}"
 HELPER_DOMAIN="gui/$(id -u)"
 HELPER_LABELS=(ai.unsloth.studio.omlx ai.unsloth.studio.ds4)
 PORT_GATE_TIMEOUT="${PORT_GATE_TIMEOUT:-150}"
 # Helpers this run booted out and still owes a restart.
 STOPPED_HELPERS=()
+# 1 after helpers_start deliberately left the helpers stopped (with_app mode, Unsloth closed).
+# Read by the sourcing scripts.
+# shellcheck disable=SC2034
+HELPERS_LEFT_STOPPED=0
 POST_CODE=""
 
 urlencode() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
@@ -142,6 +150,59 @@ engines_quiesce() {
   fi
 }
 
+# desktop.json is written by the app (Settings > Attached engines): engine_lifetime and
+# engines_enabled. The scripts only read it, plus seed engines_enabled once (see below).
+engines_desktop_file() { printf '%s/desktop.json' "${UNSLOTH_ENGINES_HOME:-$HOME/.unsloth/engines}"; }
+
+# with_app (the default, also for a missing or unreadable file) or always.
+engine_lifetime() {
+  python3 - "$(engines_desktop_file)" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1])).get("engine_lifetime")
+except Exception:
+    value = None
+print("always" if value == "always" else "with_app")
+PY
+}
+
+# True while Unsloth itself runs. Asked of pgrep, never of the app binary.
+app_running() { "$PGREP" -x unsloth-studio >/dev/null 2>&1; }
+
+# The app remembers "engines enabled" in desktop.json because, in with_app mode, its quit
+# unregisters the helpers and the registration alone no longer says what the user wants. An app
+# from before that file leaves no record, so the first time these scripts take registered
+# helpers down they write engines_enabled=true (only when the key is absent), or the app would
+# not start the engines at its next launch.
+seed_engines_enabled() {
+  [ "$DRY" = 1 ] && return 0
+  local seeded
+  seeded="$(python3 - "$(engines_desktop_file)" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+try:
+    with open(path) as handle:
+        data = json.load(handle)
+except FileNotFoundError:
+    data = {}
+except Exception:
+    sys.exit(0)
+if not isinstance(data, dict) or "engines_enabled" in data:
+    sys.exit(0)
+data["engines_enabled"] = True
+os.makedirs(os.path.dirname(path), exist_ok=True)
+tmp = "%s.tmp.%d" % (path, os.getpid())
+with open(tmp, "w") as handle:
+    json.dump(data, handle)
+    handle.write("\n")
+os.replace(tmp, path)
+print("seeded")
+PY
+)" || return 0
+  [ -z "$seeded" ] || log "recorded engines_enabled=true in $(engines_desktop_file) (the helpers are registered)"
+  return 0
+}
+
 helper_loaded() { "$LAUNCHCTL" print "$HELPER_DOMAIN/$1" >/dev/null 2>&1; }
 
 # The Unsloth.app that owns the helpers, resolved when used so a caller may set INSTALLED_APP
@@ -196,6 +257,7 @@ helpers_stop() {
     fi
   done
   [ "$any" = 1 ] || return 0
+  seed_engines_enabled
   bin="$(helper_cli)"
   if helper_cli_supported "$bin"; then
     for label in "${HELPER_LABELS[@]}"; do helper_owe "$label"; done
@@ -231,9 +293,10 @@ owed_helpers_loaded() {
 # was only booted out (an app without the CLI) can leave its registration in place, which makes
 # `register` a no-op; one `restart` (unregister, wait, register) covers that. Returns 1 when a
 # helper could not be brought back, with the manual fallback in the warning (Settings > Attached
-# engines > Background engines, off and on).
+# engines > Engines enabled, off and on).
 helpers_start() {
   local label bin all_up=1
+  HELPERS_LEFT_STOPPED=0
   [ "${#STOPPED_HELPERS[@]}" -gt 0 ] || return 0
   if [ "$DRY" = 0 ]; then
     for label in "${STOPPED_HELPERS[@]}"; do helper_loaded "$label" || all_up=0; done
@@ -243,9 +306,19 @@ helpers_start() {
       return 0
     fi
   fi
+  # In with_app mode the helpers run only while Unsloth does: the app registers them at its
+  # next launch, so with the app closed they stay stopped. Asked before the CLI probe, which
+  # spawns the same binary name.
+  if [ "$(engine_lifetime)" = with_app ] && ! app_running; then
+    log "engine lifetime is with_app and Unsloth is not running: leaving the helpers stopped (the app registers them at its next launch)"
+    STOPPED_HELPERS=()
+    # shellcheck disable=SC2034
+    HELPERS_LEFT_STOPPED=1
+    return 0
+  fi
   bin="$(helper_cli)"
   if ! helper_cli_supported "$bin"; then
-    warn "$bin has no --engine-helpers, so the helpers cannot be restarted from here. Turn Unsloth > Settings > Attached engines > Background engines off and on."
+    warn "$bin has no --engine-helpers, so the helpers cannot be restarted from here. Turn Unsloth > Settings > Attached engines > Engines enabled off and on."
     return 1
   fi
   log "register the helpers: $bin --engine-helpers register"
@@ -262,7 +335,7 @@ helpers_start() {
     STOPPED_HELPERS=()
     return 0
   fi
-  warn "the helpers did not restart. Turn Unsloth > Settings > Attached engines > Background engines off and on."
+  warn "the helpers did not restart. Turn Unsloth > Settings > Attached engines > Engines enabled off and on."
   return 1
 }
 
