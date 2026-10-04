@@ -108,7 +108,7 @@ fn config_path() -> Option<PathBuf> {
     Some(home.join("engines.toml"))
 }
 
-fn load_urls() -> EngineUrls {
+pub(crate) fn load_urls() -> EngineUrls {
     config_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|text| parse_urls(&text))
@@ -409,7 +409,7 @@ fn model_entries(status: &OmlxStatus) -> (Vec<ModelEntry>, Vec<ModelEntry>) {
 }
 
 /// Every loaded directory including pinned and embedding models, for "Stop all engines".
-fn all_loaded_dirs(status: &OmlxStatus) -> Vec<String> {
+pub(crate) fn all_loaded_dirs(status: &OmlxStatus) -> Vec<String> {
     let mut dirs: Vec<String> = Vec::new();
     for row in status.models.iter().filter(|m| m.loaded) {
         let dir = resolve_dir(&status.models, row);
@@ -564,7 +564,7 @@ pub(crate) fn parse_action(id: &str) -> Option<Action> {
 }
 
 /// Percent-encode one path segment (model ids carry `:` and `/`).
-fn encode_segment(segment: &str) -> String {
+pub(crate) fn encode_segment(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for byte in segment.bytes() {
         match byte {
