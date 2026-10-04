@@ -111,6 +111,17 @@ test("vLLM server default omits Min P while retaining other sampling fields", ()
   assert.equal(bodyFor("vllm", { ...PARAMS, minP: 0 }).min_p, 0);
 });
 
+test("oMLX server default omits Min P (any min_p disables its sparse MTP draft path)", () => {
+  assert.equal(
+    minPSamplingPayload("omlx", { minP: 0.01, minPMode: "server-default" }).min_p,
+    undefined,
+  );
+  assert.equal(
+    minPSamplingPayload("omlx", { minP: 0.05, minPMode: "custom" }).min_p,
+    0.05,
+  );
+});
+
 for (const providerType of ["vllm", "openrouter", "llama_cpp"]) {
   test(`${providerType} carries the min_p and repetition_penalty the panel offers`, () => {
     const body = bodyFor(providerType);
