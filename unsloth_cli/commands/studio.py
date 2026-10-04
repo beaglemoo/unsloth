@@ -4097,6 +4097,12 @@ def setup(
     ),
 ):
     """Run Unsloth setup (called by install.ps1 / install.sh)."""
+    fork_marker = _fork_marker()
+    if fork_marker is not None and os.environ.get("STUDIO_LOCAL_INSTALL") != "1":
+        # Only `update --local` (STUDIO_LOCAL_INSTALL=1) may run setup in the fork: the other
+        # callers install upstream Unsloth from PyPI.
+        typer.echo(_fork_update_refusal(fork_marker), err = True)
+        raise typer.Exit(2)
     runtime_gate_handoff = _studio_runtime_gate.consume_runtime_gate_handoff()
     with _studio_runtime_launch_guard(inherited = runtime_gate_handoff):
         _studio_runtime_gate.ensure_managed_environment_is_idle(STUDIO_HOME)
