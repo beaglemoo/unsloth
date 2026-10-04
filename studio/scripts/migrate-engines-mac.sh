@@ -373,7 +373,7 @@ cutover() {
   # 8/9 open the app -----------------------------------------------------------------------
   log "8/9 open the new Unsloth.app"
   run open -a "$INSTALLED_APP"
-  log "ACTION NEEDED in Unsloth: Settings > Attached engines > Background engines: turn it on."
+  log "ACTION NEEDED in Unsloth: Settings > Attached engines > Engines enabled: turn it on."
   log "ACTION NEEDED in System Settings > General > Login Items: approve the Unsloth items"
   log "(the app is not notarized, so macOS asks for approval)."
   if [ "$DRY" = 1 ]; then
@@ -467,7 +467,7 @@ rollback() {
   # 1 disable helpers ---------------------------------------------------------------------
   log "1/7 disable the bundled helpers"
   if app_running unsloth-studio; then
-    log "ACTION NEEDED in Unsloth: Settings > Attached engines > Background engines: turn it off."
+    log "ACTION NEEDED in Unsloth: Settings > Attached engines > Engines enabled: turn it off."
     if [ "$DRY" = 1 ]; then
       log "dry-run: would wait up to 180 s for $NEW_OMLX and $NEW_DS4 to leave launchd, then fall back to bootout"
     else

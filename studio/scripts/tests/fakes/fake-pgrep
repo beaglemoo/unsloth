@@ -1,0 +1,6 @@
+#!/bin/bash
+# A pgrep for `pgrep -x unsloth-studio`: "Unsloth is running" exactly while $FAKE_LC/app-running
+# exists. The scripts must ask this (PGREP=...) and never the real process table, which holds the
+# user's live Unsloth.
+[ "$1" = "-x" ] && [ "${2:-}" = "unsloth-studio" ] || exit 2
+[ -f "$FAKE_LC/app-running" ]

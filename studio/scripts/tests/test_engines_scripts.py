@@ -525,6 +525,7 @@ class Rig:
             "ENGINE_PORTS": f"{self.omlx_port} {self.ds4_port}",
             "LAUNCHCTL": str(FAKES / "fake-launchctl"),
             "HELPER_APP": str(self.app),
+            "PGREP": str(FAKES / "fake-pgrep"),
             "HELPER_START_WAIT": "5",
             "BUILD_ENGINES": str(self.build),
             "HEALTH_TIMEOUT": "6",
@@ -537,6 +538,9 @@ class Rig:
             "FAKE_PY": sys.executable,
             "STAGE_VERSION": "none",
         }
+        # the pre-with_app behaviour by default: the helpers outlive the app. The with_app tests
+        # call set_desktop.
+        self.set_desktop("always")
         # the helpers start registered, as after the Settings toggle
         assert run([str(self.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "register"], self.env).returncode == 0
         self.wait_up()
@@ -545,9 +549,21 @@ class Rig:
     def launchctl(self, *args):
         return run([str(FAKES / "fake-launchctl"), *args], self.env)
 
+    def set_desktop(self, lifetime, enabled=True, path=None):
+        """desktop.json as the app writes it: engine_lifetime and engines_enabled (None omits it)."""
+        body = {"engine_lifetime": lifetime}
+        if enabled is not None:
+            body["engines_enabled"] = enabled
+        (path or self.home / "desktop.json").write_text(json.dumps(body))
+
+    def set_app_running(self, running):
+        flag = self.lc / "app-running"
+        flag.touch() if running else flag.unlink(missing_ok=True)
+
     def fork_env(self, extra=None):
-        """The environment for sourcing build-fork-mac.sh: the helpers belong to INSTALLED_APP."""
-        env = {k: v for k, v in self.env.items() if k not in ("UNSLOTH_ENGINES_HOME", "HELPER_APP")}
+        """The environment for sourcing build-fork-mac.sh: the helpers belong to INSTALLED_APP.
+        UNSLOTH_ENGINES_HOME stays, so desktop.json is the rig's and never the real one."""
+        env = {k: v for k, v in self.env.items() if k != "HELPER_APP"}
         return {**env, **(extra or {})}
 
     def cli_calls(self):
@@ -681,7 +697,7 @@ def test_update_reports_when_a_helper_cannot_be_restarted(rig):
     result = rig.update(STAGE_VERSION="new", FAKE_REGISTER_FAIL="1", FAKE_RESTART_FAIL="1")
     assert result.returncode != 0
     out = result.stderr + result.stdout
-    assert "did not restart" in out and "Attached engines > Background engines" in out
+    assert "did not restart" in out and "Attached engines > Engines enabled" in out
     # register, then one restart; never launchctl bootstrap or kickstart
     assert [c for c in rig.cli_calls() if c != "engine-helpers unregister"][:2] == ["engine-helpers register", "engine-helpers restart"]
     assert_no_launchd_start(rig)
@@ -736,7 +752,7 @@ def test_an_app_without_the_cli_is_never_run_and_falls_back_to_bootout(rig, tmp_
     # launchctl bootstrap or kickstart
     started = lib_fn(rig, 'STOPPED_HELPERS=(ai.unsloth.studio.omlx ai.unsloth.studio.ds4); helpers_start', {"HELPER_APP": str(old)})
     assert started.returncode != 0
-    assert "no --engine-helpers" in started.stderr and "Attached engines > Background engines" in started.stderr
+    assert "no --engine-helpers" in started.stderr and "Attached engines > Engines enabled" in started.stderr
     assert_no_launchd_start(rig)
 
 
@@ -770,7 +786,7 @@ def test_a_booted_out_helper_keeps_its_registration_so_register_is_followed_by_r
 def test_a_register_that_does_nothing_and_a_restart_that_fails_leave_a_clear_warning(rig):
     started = lib_fn(rig, "helpers_stop; helpers_start", {"FAKE_REGISTER_NOOP": "1", "FAKE_RESTART_FAIL": "1", "HELPER_START_WAIT": "1"})
     assert started.returncode != 0
-    assert "did not restart" in started.stderr and "Attached engines > Background engines" in started.stderr
+    assert "did not restart" in started.stderr and "Attached engines > Engines enabled" in started.stderr
     assert not any(rig.loaded(label) for label in rig.labels)
 
 
@@ -1036,7 +1052,7 @@ def test_a_failed_second_bootout_with_an_app_without_the_cli_cannot_restart_and_
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
         assert not any(c.startswith("mv ") for c in rig.calls())
         # oMLX was booted out first; the old app cannot register it again, so the user is told how
-        assert "no --engine-helpers" in result.stderr and "Attached engines > Background engines" in result.stderr
+        assert "no --engine-helpers" in result.stderr and "Attached engines > Engines enabled" in result.stderr
         assert "gui-started" not in rig.calls()
         assert_no_launchd_start(rig)
     finally:
@@ -1392,3 +1408,231 @@ def test_install_and_update_restart_the_helpers_only_through_the_shared_function
     assert "bootstrap" not in lib and "kickstart" not in lib
     assert "--engine-helpers register" in lib and "--engine-helpers unregister" in lib
     assert "HELPER_PLIST_DIR" not in lib
+
+
+# --- engine lifetime: with_app (the default) and always -------------------------------------------
+
+
+def desktop_json(rig):
+    return json.loads((rig.home / "desktop.json").read_text())
+
+
+def test_the_lifetime_is_read_from_desktop_json_and_defaults_to_with_app(rig):
+    desktop = rig.home / "desktop.json"
+    for text, expected in (
+        (None, "with_app"),
+        ('{"engine_lifetime": "always"}', "always"),
+        ('{"engine_lifetime": "with_app"}', "with_app"),
+        ('{"engines_enabled": true}', "with_app"),
+        ('{"engine_lifetime": "forever"}', "with_app"),
+        ("not json", "with_app"),
+        ("[]", "with_app"),
+    ):
+        desktop.unlink(missing_ok=True)
+        if text is not None:
+            desktop.write_text(text)
+        result = lib_fn(rig, "engine_lifetime")
+        assert result.returncode == 0 and result.stdout.strip() == expected, (text, result.stdout, result.stderr)
+
+
+def test_app_running_asks_pgrep_for_unsloth_studio(rig):
+    assert lib_fn(rig, "app_running").returncode != 0
+    rig.set_app_running(True)
+    assert lib_fn(rig, "app_running").returncode == 0
+
+
+def test_with_app_and_the_app_closed_leaves_the_helpers_stopped(rig):
+    rig.set_desktop("with_app")
+    result = lib_fn(rig, 'helpers_stop; helpers_start; echo "owed=${STOPPED_HELPERS[*]-} left=$HELPERS_LEFT_STOPPED"')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "leaving the helpers stopped" in result.stdout
+    assert result.stdout.strip().splitlines()[-1] == "owed= left=1"
+    # stopped through the CLI, never registered again, and the CLI was not probed a second time
+    assert rig.cli_calls() == ["engine-helpers unregister"]
+    assert not any(rig.loaded(label) for label in rig.labels)
+    assert_no_launchd_start(rig)
+
+
+def test_with_app_and_the_app_running_registers_the_helpers_again(rig):
+    rig.set_desktop("with_app")
+    rig.set_app_running(True)
+    result = lib_fn(rig, "helpers_stop; helpers_start")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert all(rig.loaded(label) for label in rig.labels)
+
+
+def test_a_missing_desktop_json_is_with_app_too(rig):
+    (rig.home / "desktop.json").unlink()
+    result = lib_fn(rig, 'helpers_stop; helpers_start; echo "left=$HELPERS_LEFT_STOPPED"')
+    assert result.returncode == 0 and result.stdout.strip().endswith("left=1"), result.stdout + result.stderr
+    assert rig.cli_calls() == ["engine-helpers unregister"]
+
+
+def test_always_registers_the_helpers_again_with_the_app_closed(rig):
+    rig.set_desktop("always")
+    result = lib_fn(rig, 'helpers_stop; helpers_start; echo "left=$HELPERS_LEFT_STOPPED"')
+    assert result.returncode == 0 and result.stdout.strip().endswith("left=0"), result.stdout + result.stderr
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert all(rig.loaded(label) for label in rig.labels)
+
+
+def test_a_with_app_start_with_the_app_closed_never_runs_the_cli(rig):
+    # the CLI probe spawns the app binary: with the app closed in with_app mode it must not run
+    rig.set_desktop("with_app")
+    result = lib_fn(rig, 'STOPPED_HELPERS=(ai.unsloth.studio.omlx); helpers_start')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not any(c.startswith("engine-helpers") or c == "gui-started" for c in rig.calls())
+
+
+def test_the_first_stop_records_engines_enabled_when_the_app_has_not(rig):
+    (rig.home / "desktop.json").unlink()
+    result = lib_fn(rig, "helpers_stop")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert desktop_json(rig) == {"engines_enabled": True}
+    assert "recorded engines_enabled=true" in result.stdout
+
+
+def test_a_recorded_choice_is_never_overwritten(rig):
+    for enabled in (False, True):
+        rig.set_desktop("with_app", enabled=enabled)
+        rig.launchctl("print", f"gui/501/{rig.labels[0]}")
+        assert lib_fn(rig, "seed_engines_enabled").returncode == 0
+        assert desktop_json(rig) == {"engine_lifetime": "with_app", "engines_enabled": enabled}
+
+
+def test_the_seed_keeps_the_lifetime_already_chosen(rig):
+    rig.set_desktop("always", enabled=None)
+    assert lib_fn(rig, "seed_engines_enabled").returncode == 0
+    assert desktop_json(rig) == {"engine_lifetime": "always", "engines_enabled": True}
+
+
+def test_an_unreadable_desktop_json_is_left_alone(rig):
+    (rig.home / "desktop.json").write_text("not json")
+    assert lib_fn(rig, "seed_engines_enabled").returncode == 0
+    assert (rig.home / "desktop.json").read_text() == "not json"
+
+
+def test_a_dry_run_records_nothing(rig):
+    (rig.home / "desktop.json").unlink()
+    result = lib_fn(rig, "DRY=1; helpers_stop")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (rig.home / "desktop.json").exists()
+
+
+def test_helpers_that_were_not_loaded_record_nothing(rig):
+    (rig.home / "desktop.json").unlink()
+    assert run([str(rig.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "unregister"], rig.env).returncode == 0
+    result = lib_fn(rig, "helpers_stop")
+    assert result.returncode == 0 and "not loaded" in result.stdout
+    assert not (rig.home / "desktop.json").exists()
+
+
+def test_update_in_with_app_mode_leaves_the_helpers_stopped_while_the_app_is_closed(rig):
+    rig.set_desktop("with_app")
+    result = rig.update(STAGE_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (rig.home / "omlx" / "VERSION").read_text() == "new"
+    assert rig.cli_calls() == ["engine-helpers unregister"]
+    assert not any(rig.loaded(label) for label in rig.labels)
+    assert "leaving the helpers stopped" in result.stdout and "next launch" in result.stdout
+    assert_no_launchd_start(rig)
+
+
+def test_update_in_with_app_mode_registers_the_helpers_while_the_app_runs(rig):
+    rig.set_desktop("with_app")
+    rig.set_app_running(True)
+    result = rig.update(STAGE_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert all(rig.loaded(label) for label in rig.labels)
+
+
+def test_update_rollback_in_with_app_mode_also_leaves_the_helpers_stopped(rig):
+    rig.set_desktop("with_app")
+    # a venv that is bad would only show once the helpers ran; make the swap itself fail instead
+    stray = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", f"{rig.home}/omlx/bin/python"],
+        cwd=rig.home / "omlx" / "bin",
+    )
+    try:
+        result = rig.update(STAGE_VERSION="new")
+        assert result.returncode != 0 and "not swapped" in result.stderr, result.stdout + result.stderr
+        assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+        assert not any(rig.loaded(label) for label in rig.labels)
+    finally:
+        stray.kill()
+        stray.wait()
+
+
+def test_install_app_in_with_app_mode_swaps_the_app_and_leaves_the_helpers_stopped(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.set_desktop("with_app")
+        result = install_app_rig(tmp_path, rig)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
+        assert rig.cli_calls() == ["engine-helpers unregister"]
+        assert not any(rig.loaded(label) for label in rig.labels)
+        assert_no_launchd_start(rig)
+    finally:
+        rig.close()
+
+
+def test_install_in_with_app_mode_finds_the_helpers_already_down_after_the_app_quit(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.set_desktop("with_app")
+        # the with_app quit has unregistered the helpers by the time the install gets to them
+        assert run([str(rig.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "unregister"], rig.env).returncode == 0
+        (rig.lc / "calls.log").unlink(missing_ok=True)
+        result = txn(tmp_path, rig)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
+        # nothing to stop, nothing owed, nothing registered: the app does that at its next launch
+        assert helpers_touched(rig) == []
+        assert not any(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
+def test_install_in_always_mode_still_brings_the_helpers_back(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.set_desktop("always")
+        result = txn(tmp_path, rig)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
+def test_the_install_waits_up_to_the_quit_wait_for_the_app_and_never_forces_it(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.set_app_running(True)
+        result = fork_fn(
+            tmp_path,
+            "osascript() { echo \"osascript $*\"; }; DRY=0; quit_unsloth",
+            rig.fork_env({"QUIT_WAIT": "2"}),
+        )
+        assert result.returncode != 0 and "did not quit within 2 s" in result.stderr, result.stdout + result.stderr
+        assert "osascript -e" in result.stdout
+        # the default is long enough for a with_app quit (45 s of engines, then the backend)
+        assert 'QUIT_WAIT:-120' in FORK.read_text()
+    finally:
+        rig.close()
+
+
+def test_the_install_does_not_quit_an_app_that_is_not_running(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        result = fork_fn(
+            tmp_path,
+            "osascript() { echo \"osascript $*\"; }; curl() { return 7; }; DRY=0; quit_unsloth; echo done",
+            rig.fork_env(),
+        )
+        assert result.returncode == 0 and "osascript" not in result.stdout and "done" in result.stdout, result.stdout + result.stderr
+    finally:
+        rig.close()
