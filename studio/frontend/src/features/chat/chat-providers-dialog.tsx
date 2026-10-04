@@ -90,6 +90,12 @@ import {
   toExternalBackendProviderType,
 } from "./external-providers";
 import {
+  ATTACHED_CONNECTIONS_LINK,
+  ATTACHED_CONNECTIONS_NOTICE,
+  connectionsListView,
+  isAttachedConnection,
+} from "./attached-connections";
+import {
   providerSavesInFlight,
   useExternalProvidersStore,
 } from "./stores/external-providers-store";
@@ -457,11 +463,10 @@ export function ChatProvidersSettings({
     setBaseUrlDraft("");
   }, [providerType, editingProviderId, registryByType]);
 
-  const totalModels = useMemo(
-    () =>
-      providers.reduce((count, provider) => count + provider.models.length, 0),
-    [providers],
-  );
+  // The attached engines (oMLX, DwarfStar) are managed on their own settings tab: they are not
+  // listed, editable or counted here, though the store still holds them for the model picker.
+  const listView = useMemo(() => connectionsListView(providers), [providers]);
+  const totalModels = listView.modelCount;
 
   useEffect(() => {
     let isMounted = true;
@@ -1353,6 +1358,12 @@ export function ChatProvidersSettings({
     );
     if (!provider) return;
     openedProviderRef.current = openProviderId;
+    if (isAttachedConnection(provider)) {
+      // Never offer the edit form for an attached engine; its page is the Attached engines tab.
+      useSettingsDialogStore.getState().openDialog("attached-engines");
+      onOpenProviderConsumed?.();
+      return;
+    }
     void editProvider(provider);
     onOpenProviderConsumed?.();
     // editProvider is redeclared each render; the latch above is what fires this once per id.
@@ -2294,10 +2305,10 @@ export function ChatProvidersSettings({
               <span>Add connection</span>
             </span>
             <span className="shrink-0 text-xs tabular-nums text-muted-foreground/90">
-              {providers.length} connections · {totalModels} models
+              {listView.connectionCount} connections · {totalModels} models
             </span>
           </button>
-          {providers.length === 0 ? (
+          {listView.visible.length === 0 ? (
             <div className="px-3 py-4">
               <div className="flex min-w-0 flex-col gap-0.5">
                 <span className="text-sm font-medium text-foreground">
@@ -2310,7 +2321,7 @@ export function ChatProvidersSettings({
             </div>
           ) : (
             <>
-              {providers.map((provider) => {
+              {listView.visible.map((provider) => {
                 const registryEntry = registryByType.get(provider.providerType);
                 const detail =
                   provider.baseUrl || registryEntry?.base_url || "";
@@ -2407,6 +2418,20 @@ export function ChatProvidersSettings({
             </>
           )}
         </div>
+        {listView.hasAttached ? (
+          <p className="px-1 text-ui-11 leading-snug text-muted-foreground/80">
+            {ATTACHED_CONNECTIONS_NOTICE}{" "}
+            <button
+              type="button"
+              onClick={() =>
+                useSettingsDialogStore.getState().openDialog("attached-engines")
+              }
+              className="font-medium text-foreground underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              {ATTACHED_CONNECTIONS_LINK}
+            </button>
+          </p>
+        ) : null}
       </section>
     </div>
   );
