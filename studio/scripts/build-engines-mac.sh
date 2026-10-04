@@ -143,7 +143,7 @@ venv_in_use() { # <venv dir>
 }
 guard_running() { # <venv dir>
   if venv_in_use "$1" && [ "${FORCE_REPLACE_RUNNING:-0}" != "1" ]; then
-    die "$1 is in use by a running engine; stop the helper first (Settings, Background engines) or set FORCE_REPLACE_RUNNING=1"
+    die "$1 is in use by a running engine; stop the helper first (Settings, Engines enabled) or set FORCE_REPLACE_RUNNING=1"
   fi
 }
 

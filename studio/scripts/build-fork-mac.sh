@@ -14,8 +14,11 @@
 #   5. copy the app to ~/Homelab/unsloth/dist/Unsloth.app
 #
 # install phase (changes the machine; run it deliberately):
-#   1. quit Unsloth (never killed; aborts if it does not exit) and stop a surviving :8888 backend;
-#      the engines must be idle (nothing generating, loading or starting)
+#   1. quit Unsloth (never killed; aborts if it does not exit within 120 s, QUIT_WAIT) and stop a
+#      surviving :8888 backend; the engines must be idle (nothing generating, loading or starting).
+#      With the engine lifetime on with_app (the default) the app's own quit first unloads the
+#      oMLX models, stops ds4 (waiting up to 30 s for a reply in flight) and unregisters the
+#      helpers, so the quit can take up to about a minute
 #   2. build the fork wheel into a scratch dir first (uv build, else pip wheel) as a fail-fast
 #      gate: nothing is touched when the checkout does not build
 #   3. snapshot the backend venv (~/.unsloth/studio/unsloth_studio) with a clonefile copy into
@@ -35,7 +38,10 @@
 #      ~/Applications/Unsloth-prev.app.bak, move the new one into place and register the helpers
 #      again with `--engine-helpers register` of the NEW app (macOS refuses launchctl bootstrap
 #      of a bundled helper; if register does not bring them back, use
-#      Settings > Attached engines > Background engines, off and on)
+#      Settings > Attached engines > Engines enabled, off and on). In with_app mode the helpers
+#      are only registered again when Unsloth is running (`pgrep -x unsloth-studio`); otherwise
+#      they stay stopped and the app registers them at its next launch. The mode is
+#      engine_lifetime in ~/.unsloth/engines/desktop.json (with_app when missing)
 #   8. codesign --verify --deep --strict
 #
 # Steps 4-8 are ONE transaction. A rollback handler is armed once the snapshot exists and is
@@ -55,7 +61,7 @@
 #
 # Environment: SIGNING_IDENTITY (default "Developer ID Application: james beesley (D6VHKTRR33)"),
 #              DIST_DIR (default ~/Homelab/unsloth/dist); for tests: UNSLOTH_STUDIO_VENV,
-#              BACKUP_ROOT, INSTALLED_APP, APP_PREV, and the engines-lib.sh variables
+#              BACKUP_ROOT, INSTALLED_APP, APP_PREV, QUIT_WAIT, and the engines-lib.sh variables
 set -euo pipefail
 
 PHASE=build DRY=0 ADHOC=0
@@ -167,12 +173,13 @@ BACKEND_BACKUP=""
 APP_BUNDLE_ID="ai.unsloth.studio"
 
 quit_unsloth() {
-  if pgrep -x unsloth-studio >/dev/null 2>&1 || [ "$DRY" = 1 ]; then
+  if app_running || [ "$DRY" = 1 ]; then
     run osascript -e "tell application id \"$APP_BUNDLE_ID\" to quit"
     if [ "$DRY" = 0 ]; then
       local i
-      for i in $(seq 1 60); do pgrep -x unsloth-studio >/dev/null 2>&1 || break; sleep 1; done
-      pgrep -x unsloth-studio >/dev/null 2>&1 && die "Unsloth did not quit within 60 s; not forcing it"
+      # A with_app quit first unloads the oMLX models and stops ds4 (up to 45 s), then reaps the backend.
+      for i in $(seq 1 "${QUIT_WAIT:-120}"); do app_running || break; sleep 1; done
+      app_running && die "Unsloth did not quit within ${QUIT_WAIT:-120} s; not forcing it"
     fi
   fi
   # The app stops its own backend on quit; a backend it did not own stays up and would hold
@@ -348,7 +355,7 @@ rollback_install() {
       warn "the backend could not be restored; the snapshot is at $BACKEND_BACKUP"
     fi
   fi
-  helpers_start || warn "the helpers did not restart; use Settings > Attached engines > Background engines, off and on"
+  helpers_start || warn "the helpers did not restart; use Settings > Attached engines > Engines enabled, off and on"
 }
 
 install_on_exit() {
@@ -394,7 +401,7 @@ install_app() {
   APP_NEW_IN_PLACE=1
 
   log "restart the helpers"
-  helpers_start || warn "the helpers did not restart; use Settings > Attached engines > Background engines, off and on"
+  helpers_start || warn "the helpers did not restart; use Settings > Attached engines > Engines enabled, off and on"
   [ "$own" = 0 ] || disarm_install_rollback
 }
 
@@ -450,7 +457,7 @@ phase_install() {
   disarm_install_rollback
   prune_backend_backups
   log "installed. The previous app is kept at $APP_PREV, the backend snapshot under $BACKUP_ROOT."
-  log "Open Unsloth and enable Settings > Background engines if it is off."
+  log "Open Unsloth: with the engine lifetime on with_app (the default) it registers and starts the engines at launch; with always, Settings > Attached engines > Engines enabled must be on."
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
