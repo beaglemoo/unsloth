@@ -366,22 +366,24 @@ fn production_plan(cache: Option<&Path>) -> CheckPlan<'_> {
 // ---------------------------------------------------------------------------------------------
 // Terminal
 
-/// POSIX single-quote quoting.
-pub(crate) fn sh_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+/// `open -a Terminal <script>`: LaunchServices hands the script to Terminal, which runs it in a new
+/// window. Unlike an AppleScript `do script` it needs no Automation permission, which a hardened
+/// runtime app without the apple-events entitlement could not get.
+pub(crate) fn terminal_open_args(script: &str) -> Vec<String> {
+    vec!["-a".to_string(), "Terminal".to_string(), script.to_string()]
 }
 
-fn applescript_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
-/// The AppleScript that opens a Terminal window running `bash <script>`.
-pub(crate) fn terminal_applescript(script: &str) -> String {
-    let command = format!("/bin/bash {}", sh_quote(script));
-    format!(
-        "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
-        applescript_escape(&command)
-    )
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -420,22 +422,26 @@ pub(crate) fn fork_update_open_terminal() -> Result<(), String> {
         "update-fork.sh was not found in this build's source checkout; run it from a terminal."
             .to_string()
     })?;
+    if !is_executable(&script) {
+        return Err(format!(
+            "{} is not executable (chmod +x it); run it from a terminal.",
+            script.display()
+        ));
+    }
     open_terminal(&script.to_string_lossy())
 }
 
 #[cfg(target_os = "macos")]
 fn open_terminal(script: &str) -> Result<(), String> {
-    let status = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(terminal_applescript(script))
+    let status = std::process::Command::new("/usr/bin/open")
+        .args(terminal_open_args(script))
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
         .status()
-        .map_err(|error| format!("could not run osascript: {error}"))?;
+        .map_err(|error| format!("could not run open: {error}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err("Terminal did not open the update script (is automation for Terminal allowed?)".to_string())
+        Err("macOS could not open Terminal on the update script.".to_string())
     }
 }
 
@@ -769,21 +775,25 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_command_quotes_hostile_paths() {
-        assert_eq!(sh_quote("/a b/update-fork.sh"), "'/a b/update-fork.sh'");
-        assert_eq!(sh_quote("/it's/x"), "'/it'\\''s/x'");
-        let script = terminal_applescript("/Users/a \"b\"/it's/update-fork.sh");
-        assert!(script.starts_with("tell application \"Terminal\"\nactivate\ndo script \""));
-        assert!(script.ends_with("\nend tell"));
-        // one AppleScript string literal: every inner quote and backslash is escaped
-        let literal = script
-            .lines()
-            .find(|l| l.starts_with("do script "))
-            .unwrap()
-            .trim_start_matches("do script \"")
-            .trim_end_matches('"');
-        assert!(literal.starts_with("/bin/bash '/Users/a \\\"b\\\"/it'\\\\''s/update-fork.sh'"), "{literal}");
-        assert!(!literal.replace("\\\\", "").replace("\\\"", "").contains('"'));
+    fn terminal_is_opened_on_the_script_without_a_shell_or_automation() {
+        // One argv, no shell and no AppleScript: a hostile path stays one argument.
+        assert_eq!(
+            terminal_open_args("/Users/a \"b\"/it's/update-fork.sh"),
+            vec!["-a", "Terminal", "/Users/a \"b\"/it's/update-fork.sh"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_script_without_the_executable_bit_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("update-fork.sh");
+        std::fs::write(&script, "#!/bin/bash\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable(&script));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable(&script));
     }
 
     #[test]
