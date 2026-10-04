@@ -87,6 +87,8 @@ def studio(monkeypatch, tmp_path):
     # ~/.unsloth/studio. Another xdist worker holding it made update() exit 1 before
     # the call order these tests check, and the tests wrote into the user's home.
     monkeypatch.setattr(module, "STUDIO_HOME", tmp_path / "studio_home")
+    # These tests exercise upstream's plain `update`, which the beaglemoo fork marker refuses.
+    monkeypatch.setattr(module, "_fork_marker", lambda: None)
     return module
 
 
