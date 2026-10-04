@@ -1216,6 +1216,7 @@ export const en = {
       connections: "Connections",
       data: "Data",
       apiKeys: "API",
+      attachedEngines: "Attached engines",
       remoteLan: "Remote & LAN",
       agents: "Agents",
       keyboardShortcuts: "Shortcuts",
