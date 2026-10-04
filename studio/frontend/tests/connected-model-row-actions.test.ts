@@ -180,7 +180,7 @@ test("nothing on a connected row opens local run settings", () => {
   );
   assert.match(
     selector,
-    /function handleConfigureConnection\(providerId: string\) \{\s*setOpen\(false\);\s*useSettingsDialogStore\.getState\(\)\.openConnectionSettings\(providerId\);/,
+    /function handleConfigureConnection\(providerId: string\) \{\s*setOpen\(false\);(?:[^}]*\{[^}]*\}[^}]*)?\s*useSettingsDialogStore\.getState\(\)\.openConnectionSettings\(providerId\);/,
   );
 });
 
@@ -216,8 +216,10 @@ test("the deep link waits for the provider and fires once", () => {
   assert.match(providersDialog, /if \(!provider\) return;/);
   assert.match(
     providersDialog,
-    /openedProviderRef\.current = openProviderId;\s*void editProvider\(provider\);\s*onOpenProviderConsumed\?\.\(\);/,
+    /openedProviderRef\.current = openProviderId;\s*(?:if \(isAttachedConnection\(provider\)\) \{[^}]*\}\s*)?void editProvider\(provider\);\s*onOpenProviderConsumed\?\.\(\);/,
   );
+  // The attached engines are the one exception: their page is the Attached engines tab.
+  assert.match(providersDialog, /if \(isAttachedConnection\(provider\)\) \{[^}]*openDialog\("attached-engines"\)/);
   // The empty-list auto-open latch stays set, as tests/connections-empty-opens-form.test.ts asks.
   assert.doesNotMatch(
     providersDialog,

@@ -15,6 +15,8 @@ import type { CapabilityKey } from "@/features/hub";
 import type { HfTaskFilter } from "@/features/hub/hooks/use-hub-model-search";
 // eslint-disable-next-line no-restricted-imports -- The settings barrel imports this feature back.
 import { useSettingsDialogStore } from "@/features/settings/stores/settings-dialog-store";
+import { settingsTabForConnection } from "@/features/chat/attached-connections";
+import { useExternalProvidersStore } from "@/features/chat/stores/external-providers-store";
 import { useNpuStatus } from "@/features/npu";
 import { useT } from "@/i18n";
 import { ChevronDownStandardIcon } from "@/lib/chevron-icons";
@@ -862,6 +864,16 @@ export function ModelSelector({
   // so open that form rather than ModelConfigPage's local load settings.
   function handleConfigureConnection(providerId: string) {
     setOpen(false);
+    // oMLX and DwarfStar are not listed in Connections; their page is Attached engines.
+    if (
+      settingsTabForConnection(
+        useExternalProvidersStore.getState().providers,
+        providerId,
+      ) === "attached-engines"
+    ) {
+      useSettingsDialogStore.getState().openDialog("attached-engines");
+      return;
+    }
     useSettingsDialogStore.getState().openConnectionSettings(providerId);
   }
 
