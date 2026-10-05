@@ -47,7 +47,6 @@ import {
 } from "@/components/assistant-ui/message-response-details-sheet";
 import { ComposerDraftPreview } from "@/components/assistant-ui/composer-draft-preview";
 import { AttachedUnloadIndicator } from "@/features/attached-engines/attached-unload-indicator";
-import { DwarfStarWarmingIndicator } from "@/features/attached-engines/dwarfstar-warming-indicator";
 import { PromptQueueList } from "@/components/assistant-ui/lazy-prompt-queue-list";
 import { QueueResumeIcon } from "@/components/assistant-ui/queue-resume-icon";
 import { ProgressiveMessages } from "@/components/assistant-ui/progressive-messages";
@@ -5756,7 +5755,6 @@ const Composer: FC<{
       ) : null}
       {!isDictating ? <ComposerDraftPreview text={composerText} /> : null}
       {!isDictating ? <ToolStatusDisplay /> : null}
-      {!isDictating ? <DwarfStarWarmingIndicator /> : null}
       {!isDictating ? <AttachedUnloadIndicator /> : null}
       <div
         className="unsloth-composer-line"

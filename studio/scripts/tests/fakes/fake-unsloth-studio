@@ -10,16 +10,17 @@
 #   unregister  drops the registration and stops the job.
 #   restart     unregister, then register.
 #
-# Needs FAKE_LC, FAKE_HOME, FAKE_OMLX_PORT, FAKE_DS4_PORT, FAKE_PY. make_app copies this file into
+# Needs FAKE_LC, FAKE_HOME, FAKE_OMLX_PORT, FAKE_PY. make_app copies this file into
 # a fake bundle and replaces __FAKES__ with the fakes directory. Failure switches:
 #   FAKE_REGISTER_FAIL=1       register exits 1 and starts nothing
 #   FAKE_REGISTER_NOOP=1       register exits 0 and starts nothing (an approval pending, say)
 #   FAKE_UNREGISTER_FAIL=<s>   unregister fails for the label ending in .<s> (it stays registered
 #                              and running); the other label is unregistered, and the exit is 1
+#   FAKE_UNREGISTER_FAIL_AFTER=<suffix> unregister stops that helper, then reports failure
 #   FAKE_RESTART_FAIL=1        restart exits 1 and changes nothing
 #   FAKE_STATUS_FAIL=1         status exits 1
 fakes="__FAKES__"
-LABELS=(ai.unsloth.studio.omlx ai.unsloth.studio.ds4)
+LABELS=(ai.unsloth.studio.omlx)
 [ "${1:-}" = "--engine-helpers" ] || { echo "gui-started" >>"$FAKE_LC/calls.log"; exit 0; }
 echo "engine-helpers ${2:-}" >>"$FAKE_LC/calls.log"
 
@@ -27,7 +28,7 @@ alive() { [ -f "$FAKE_LC/$1.pid" ] && kill -0 "$(cat "$FAKE_LC/$1.pid")" 2>/dev/
 registered() { [ -f "$FAKE_LC/registered.$1" ]; }
 start() {
   local label="$1" kind port
-  case "$label" in *.omlx) kind=omlx; port="$FAKE_OMLX_PORT" ;; *) kind=ds4; port="$FAKE_DS4_PORT" ;; esac
+  kind=omlx; port="$FAKE_OMLX_PORT"
   "$FAKE_PY" "$fakes/fake_engine.py" "$kind" "$FAKE_HOME" "$port" >/dev/null 2>&1 &
   echo $! >"$FAKE_LC/$label.pid"
   disown
@@ -44,9 +45,8 @@ report() {
   [ -z "$1" ] || error="\"$1\""
   for label in "${LABELS[@]}"; do registered "$label" && enabled=$((enabled + 1)); done
   local state=not_registered
-  [ "$enabled" = 2 ] && state=enabled
-  [ "$enabled" = 1 ] && state=partial
-  printf '{"supported":true,"state":"%s","helpers":[{"name":"omlx"},{"name":"ds4"}],"error":%s}\n' "$state" "$error"
+  [ "$enabled" = 1 ] && state=enabled
+  printf '{"supported":true,"state":"%s","helpers":[{"name":"omlx"}],"error":%s}\n' "$state" "$error"
 }
 do_register() {
   local label
@@ -68,6 +68,9 @@ do_unregister() {
     fi
     rm -f "$FAKE_LC/registered.$label"
     stop "$label"
+    if [ "${label##*.}" = "${FAKE_UNREGISTER_FAIL_AFTER:-}" ]; then
+      failed="$failed ${label##*.}"
+    fi
   done
   [ -z "$failed" ] || { report "unregister failed:$failed"; return 1; }
   report ""

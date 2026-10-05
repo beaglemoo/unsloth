@@ -49,10 +49,6 @@ test("the message names the engine and the repeat count", () => {
     failureMessage("oMLX", { reason: "venv missing", ts: 1, count: 1 }),
     "oMLX failing: venv missing",
   );
-  assert.equal(
-    failureMessage("DwarfStar", { reason: "model file missing", ts: 1, count: 4 }),
-    "DwarfStar failing: model file missing (failed 4 times)",
-  );
 });
 
 test("the panel shows the failure instead of the generic not-reachable text", () => {
@@ -61,10 +57,9 @@ test("the panel shows the failure instead of the generic not-reachable text", ()
     "utf8",
   );
   assert.match(panel, /failureMessage\("oMLX", status\.failure\)/);
-  assert.match(panel, /failureMessage\("DwarfStar", status\.failure\)/);
   const api = readFileSync(
     new URL("../src/features/attached-engines/api.ts", import.meta.url),
     "utf8",
   );
-  assert.equal(api.match(/failure: failureFromApi\(raw\.failure\)/g)?.length, 2);
+  assert.equal(api.match(/failure: failureFromApi\(raw\.failure\)/g)?.length, 1);
 });
