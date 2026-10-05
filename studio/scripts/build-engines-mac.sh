@@ -376,7 +376,10 @@ env = span("omlx.env")
 if env:
     peer_lines = [i for i in range(env[0] + 1, env[1]) if lines[i].strip() == PEER]
     if peer_lines:
-        for i in reversed(peer_lines):
+        # The comment the old migration wrote right above the line goes with it.
+        drop = set(peer_lines)
+        drop.update(i - 1 for i in peer_lines if i - 1 > env[0] and lines[i - 1].startswith("# oMLX asks the ds4 launcher"))
+        for i in sorted(drop, reverse=True):
             del lines[i]
         changes.append(f"[omlx.env] removed {PEER}")
 
