@@ -33,7 +33,7 @@ import {
   HelpCircleIcon,
   HomeWifiIcon,
   LibrariesIcon,
-  PlugSocketIcon,
+  AiChipIcon,
   Search01Icon,
   UserCircleIcon,
 } from "@hugeicons/core-free-icons";
@@ -227,7 +227,7 @@ const TABS: TabDef[] = [
   {
     id: "attached-engines",
     labelKey: "settings.tabs.attachedEngines",
-    icon: PlugSocketIcon,
+    icon: AiChipIcon,
   },
   {
     id: "remote-lan",
