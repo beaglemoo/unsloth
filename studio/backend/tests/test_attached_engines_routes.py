@@ -480,6 +480,26 @@ def test_sync_deletes_legacy_row_idempotently_and_keeps_user_rows(client, fake, 
     assert (providers_db.get_provider(ATTACHED_OMLX_ID) is not None) == enabled
 
 
+def test_legacy_row_delete_waits_for_the_provider_config_guard(fake):
+    legacy_id = "attachedds400001"
+    providers_db.create_provider(
+        id = legacy_id, provider_type = "dwarfstar", display_name = "Legacy", base_url = "http://localhost/v1"
+    )
+    fake.config["value"] = _config(enabled = True)
+
+    async def run():
+        async with provider_config_guard(legacy_id):
+            sync = asyncio.create_task(routes.attached_sync())
+            await asyncio.sleep(0.2)
+            assert not sync.done()
+            assert providers_db.get_provider(legacy_id) is not None
+        await sync
+        return sync.result()
+
+    assert asyncio.run(run())["enabled"] is True
+    assert providers_db.get_provider(legacy_id) is None
+
+
 def test_legacy_provider_type_can_be_listed_before_sync(fake, monkeypatch):
     from routes import providers
     legacy_id = "attachedds400001"
