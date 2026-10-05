@@ -411,6 +411,8 @@ install_app() {
   # The old bundle still contains the legacy SMAppService plist. Its CLI must unregister it
   # before this swap: a new bundle cannot address a plist it no longer contains.
   HELPER_APP="$INSTALLED_APP" helpers_stop
+  # One-time migration over a pre-removal app: no legacy ds4 job may survive into the new bundle.
+  HELPER_APP="$INSTALLED_APP" helpers_clear_legacy_ds4
   wait_ports_free
 
   if [ -e "$INSTALLED_APP" ]; then
