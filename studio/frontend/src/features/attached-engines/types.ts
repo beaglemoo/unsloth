@@ -39,25 +39,6 @@ export type AttachedOmlxStatus = {
   failure: AttachedEngineFailure | null;
 };
 
-export type AttachedDs4Status = {
-  reachable: boolean;
-  loaded: boolean;
-  starting: boolean;
-  pid: number | null;
-  uptimeS: number | null;
-  inFlight: number;
-  idleRemainingS: number | null;
-  liveTps: number | null;
-  lastGenTps: number | null;
-  lastTtftMs: number | null;
-  startTimeoutS: number;
-  /** Configured context length, the one the running server started with, and a queued restart. */
-  ctx: number | null;
-  ctxActive: number | null;
-  pendingRestart: boolean;
-  error: string | null;
-  failure: AttachedEngineFailure | null;
-};
 
 export type AttachedNotice = {
   // Epoch seconds, as the backend stamps it.
@@ -69,7 +50,6 @@ export type AttachedNotice = {
 
 export type AttachedStatus = {
   omlx: AttachedOmlxStatus | null;
-  ds4: AttachedDs4Status | null;
   modelsHash: string;
   notices: AttachedNotice[];
   /** Epoch ms when this status was read: the base idle countdowns run down from. */
@@ -86,29 +66,11 @@ export type OmlxContextInfo = {
   effective: number | null;
 };
 
-export type Ds4ApplyResult =
-  | "next_start"
-  | "restarted"
-  | "after_current_requests"
-  | "unchanged";
-
-/** The DwarfStar launcher's context config (GET/POST /ds4/context). */
-export type Ds4ContextInfo = {
-  ctx: number;
-  ctxActive: number | null;
-  ctxMin: number;
-  ctxMax: number;
-  pendingRestart: boolean;
-  applied: Ds4ApplyResult | null;
-};
-
 export type AttachedEnginesSettings = {
   enabled: boolean;
   omlxUrl: string;
-  ds4Url: string;
   scanDenylist: string[];
   arbitrateLocalLoads: boolean;
-  prewarmDs4OnSelect: boolean;
 };
 
 /** What POST /sync reports. `incomplete`: an engine's model catalog could not be read, so its
@@ -118,4 +80,4 @@ export type AttachedSyncResult = {
   incomplete: boolean;
 };
 
-export type AttachedProvider = "omlx" | "dwarfstar";
+export type AttachedProvider = "omlx";

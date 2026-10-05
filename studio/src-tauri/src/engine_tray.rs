@@ -1,11 +1,8 @@
-//! Tray items for the attached engines (oMLX and DwarfStar/ds4), behind the
+//! Tray items for the attached oMLX engine, behind the
 //! `attached-engines` feature.
 //!
 //! The tray talks to the engines directly (it must work with Studio's backend stopped): every
-//! 5 s it polls oMLX `/v1/models/status` and the ds4 launcher `/admin/status`, with the URLs
-//! taken from `~/.unsloth/engines/engines.toml` (defaults :8843 and :8001). Menu actions
-//! duplicate the backend arbiter's rule: ds4 is stopped before an oMLX model is loaded, so the
-//! two never hold weights at the same time on a 64 GB machine.
+//! 5 s it polls oMLX status and idle timers, using engines.toml for the URL.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,15 +21,11 @@ use crate::engine_lifetime::{self, EngineLifetime};
 use crate::loopback_http;
 
 const DEFAULT_OMLX_URL: &str = "http://127.0.0.1:8843";
-const DEFAULT_DS4_URL: &str = "http://127.0.0.1:8001";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
-/// The launcher's start timeout (120 s) plus its slack, as the backend client uses.
-const DS4_ADMIN_TIMEOUT: Duration = Duration::from_secs(135);
 
-const ID_DS4_TOGGLE: &str = "engine:ds4-toggle";
 const ID_STOP_ALL: &str = "engine:stop-all";
 const ID_HELPERS: &str = "engine:helpers";
 const ID_UNLOAD_PREFIX: &str = "engine:unload:";
@@ -44,14 +37,12 @@ const ID_LOAD_PREFIX: &str = "engine:load:";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EngineUrls {
     pub(crate) omlx: String,
-    pub(crate) ds4: String,
 }
 
 impl Default for EngineUrls {
     fn default() -> Self {
         Self {
             omlx: DEFAULT_OMLX_URL.to_string(),
-            ds4: DEFAULT_DS4_URL.to_string(),
         }
     }
 }
@@ -89,11 +80,6 @@ pub(crate) fn parse_urls(text: &str) -> EngineUrls {
             "http://{}:{}",
             connect_host(host_of(&table, "omlx")),
             port_of(&table, "omlx", "port", 8843)
-        ),
-        ds4: format!(
-            "http://{}:{}",
-            connect_host(host_of(&table, "ds4")),
-            port_of(&table, "ds4", "launcher_port", 8001)
         ),
     }
 }
@@ -294,48 +280,6 @@ pub(crate) fn apply_idle_ttl(status: &mut OmlxStatus, ttl: &OmlxTtl, now_epoch_s
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
-pub(crate) struct Ds4Status {
-    reachable: bool,
-    loaded: bool,
-    starting: bool,
-    in_flight: u64,
-    idle_remaining_s: Option<f64>,
-    live_tps: Option<f64>,
-    last_tps: Option<f64>,
-    failure: Option<Failure>,
-}
-
-pub(crate) fn parse_ds4_status(body: &Value) -> Option<Ds4Status> {
-    body.as_object()?;
-    let loaded = body.get("loaded").and_then(Value::as_bool).unwrap_or(false);
-    let pid_set = body.get("pid").is_some_and(|p| !p.is_null());
-    let stats = body.get("stats");
-    let tps = |which: &str| {
-        stats
-            .and_then(|s| s.get(which))
-            .and_then(|s| s.get("gen_tps"))
-            .and_then(Value::as_f64)
-    };
-    Some(Ds4Status {
-        reachable: true,
-        loaded,
-        // The launcher has no "starting" flag: a spawned process that is not serving yet is.
-        starting: pid_set && !loaded,
-        in_flight: body.get("in_flight").and_then(Value::as_u64).unwrap_or(0),
-        idle_remaining_s: body.get("idle_seconds_remaining").and_then(Value::as_f64),
-        live_tps: tps("live"),
-        last_tps: tps("last"),
-        failure: None,
-    })
-}
-
-/// The rule the backend arbiter applies, duplicated here for tray-initiated loads: stop ds4
-/// first whenever it is serving or still starting.
-pub(crate) fn must_stop_ds4_before_load(ds4: &Ds4Status) -> bool {
-    ds4.reachable && (ds4.loaded || ds4.starting)
-}
-
 // ---------------------------------------------------------------------------------------------
 // Model grouping (mirrors OmlxClient.resolve_dir in the backend)
 
@@ -430,9 +374,6 @@ pub(crate) struct View {
     unloads: Vec<ModelEntry>,
     loads: Vec<ModelEntry>,
     load_enabled: bool,
-    ds4_label: String,
-    ds4_toggle_text: &'static str,
-    ds4_toggle_enabled: bool,
     stop_all_enabled: bool,
     helpers_label: String,
 }
@@ -477,31 +418,6 @@ fn omlx_label(status: &OmlxStatus) -> String {
     label
 }
 
-fn ds4_label(status: &Ds4Status) -> String {
-    if !status.reachable {
-        return match &status.failure {
-            Some(failure) => failing_label("DwarfStar", failure),
-            None => "DwarfStar: not running".to_string(),
-        };
-    }
-    if status.starting {
-        return "DwarfStar: starting".to_string();
-    }
-    if !status.loaded {
-        return "DwarfStar: stopped".to_string();
-    }
-    let mut parts = vec!["DwarfStar: loaded".to_string()];
-    if status.in_flight > 0 {
-        parts.push("generating".to_string());
-    } else if let Some(idle) = status.idle_remaining_s {
-        parts.push(format!("idle, unloads in {}", fmt_duration(idle)));
-    }
-    if let Some(tps) = status.live_tps.or(status.last_tps) {
-        parts.push(format!("{tps:.1} tok/s"));
-    }
-    parts.join(", ")
-}
-
 /// The status line. While the helpers run in `with_app` mode it says they stop when Unsloth quits.
 fn helpers_label(state: HelperState, lifetime: EngineLifetime) -> String {
     let text = match state {
@@ -522,7 +438,6 @@ fn helpers_label(state: HelperState, lifetime: EngineLifetime) -> String {
 
 pub(crate) fn build_view(
     omlx: &OmlxStatus,
-    ds4: &Ds4Status,
     helpers: HelperState,
     lifetime: EngineLifetime,
 ) -> View {
@@ -531,20 +446,12 @@ pub(crate) fn build_view(
     } else {
         (Vec::new(), Vec::new())
     };
-    let ds4_running = ds4.reachable && (ds4.loaded || ds4.starting);
     View {
         omlx_label: omlx_label(omlx),
         unloads,
+        stop_all_enabled: omlx.reachable,
         load_enabled: omlx.reachable,
         loads,
-        ds4_label: ds4_label(ds4),
-        ds4_toggle_text: if ds4_running {
-            "Stop DwarfStar"
-        } else {
-            "Start DwarfStar"
-        },
-        ds4_toggle_enabled: ds4.reachable,
-        stop_all_enabled: omlx.reachable || ds4.reachable,
         helpers_label: helpers_label(helpers, lifetime),
     }
 }
@@ -554,7 +461,6 @@ pub(crate) fn build_view(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
-    Ds4Toggle,
     StopAll,
     OpenLoginItems,
     Unload(String),
@@ -563,7 +469,6 @@ pub(crate) enum Action {
 
 pub(crate) fn parse_action(id: &str) -> Option<Action> {
     match id {
-        ID_DS4_TOGGLE => Some(Action::Ds4Toggle),
         ID_STOP_ALL => Some(Action::StopAll),
         ID_HELPERS => Some(Action::OpenLoginItems),
         _ => id
@@ -643,30 +548,7 @@ async fn fetch_omlx(urls: &EngineUrls) -> OmlxStatus {
     status
 }
 
-async fn fetch_ds4(urls: &EngineUrls) -> Ds4Status {
-    match get_json(&urls.ds4, "/admin/status")
-        .await
-        .and_then(|body| parse_ds4_status(&body))
-    {
-        Some(status) => status,
-        None => Ds4Status {
-            failure: read_failure("ds4"),
-            ..Ds4Status::default()
-        },
-    }
-}
-
-async fn stop_ds4(urls: &EngineUrls) -> Result<(), String> {
-    post(&urls.ds4, "/admin/stop", DS4_ADMIN_TIMEOUT).await
-}
-
 async fn load_model(urls: &EngineUrls, dir: &str) -> Result<(), String> {
-    // Stop ds4 first, always from a fresh read: the poll may be 5 s old.
-    if must_stop_ds4_before_load(&fetch_ds4(urls).await) {
-        stop_ds4(urls)
-            .await
-            .map_err(|e| format!("could not stop DwarfStar: {e}"))?;
-    }
     let path = format!("/admin/api/models/{}/load", encode_segment(dir));
     post(&urls.omlx, &path, LOAD_TIMEOUT).await
 }
@@ -678,11 +560,6 @@ async fn unload_model(urls: &EngineUrls, dir: &str) -> Result<(), String> {
 
 async fn stop_all(urls: &EngineUrls) -> Result<(), String> {
     let mut errors = Vec::new();
-    if fetch_ds4(urls).await.reachable {
-        if let Err(error) = stop_ds4(urls).await {
-            errors.push(format!("DwarfStar: {error}"));
-        }
-    }
     for dir in all_loaded_dirs(&fetch_omlx(urls).await) {
         if let Err(error) = unload_model(urls, &dir).await {
             errors.push(format!("{dir}: {error}"));
@@ -692,15 +569,6 @@ async fn stop_all(urls: &EngineUrls) -> Result<(), String> {
         Ok(())
     } else {
         Err(errors.join("; "))
-    }
-}
-
-async fn ds4_toggle(urls: &EngineUrls) -> Result<(), String> {
-    if must_stop_ds4_before_load(&fetch_ds4(urls).await) {
-        stop_ds4(urls).await
-    } else {
-        // The launcher unloads oMLX models itself before it starts ds4-server.
-        post(&urls.ds4, "/admin/start", DS4_ADMIN_TIMEOUT).await
     }
 }
 
@@ -720,8 +588,6 @@ struct EngineTray {
     menu: Menu<Wry>,
     omlx_label: MenuItem<Wry>,
     load_menu: Submenu<Wry>,
-    ds4_label: MenuItem<Wry>,
-    ds4_toggle: MenuItem<Wry>,
     stop_all: MenuItem<Wry>,
     helpers: MenuItem<Wry>,
     dynamic: Mutex<Dynamic>,
@@ -740,21 +606,6 @@ impl EngineTray {
             .is_none_or(|p| p.omlx_label != view.omlx_label)
         {
             let _ = self.omlx_label.set_text(&view.omlx_label);
-        }
-        if previous
-            .as_ref()
-            .is_none_or(|p| p.ds4_label != view.ds4_label)
-        {
-            let _ = self.ds4_label.set_text(&view.ds4_label);
-        }
-        if previous
-            .as_ref()
-            .is_none_or(|p| p.ds4_toggle_text != view.ds4_toggle_text)
-        {
-            let _ = self.ds4_toggle.set_text(view.ds4_toggle_text);
-        }
-        if changed(|v| v.ds4_toggle_enabled) {
-            let _ = self.ds4_toggle.set_enabled(view.ds4_toggle_enabled);
         }
         if changed(|v| v.stop_all_enabled) {
             let _ = self.stop_all.set_enabled(view.stop_all_enabled);
@@ -839,12 +690,6 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
     let load_menu = SubmenuBuilder::with_id(app, "engine:load-menu", "Load model")
         .enabled(false)
         .build()?;
-    let ds4_label = MenuItemBuilder::with_id("engine:ds4-label", "DwarfStar: checking")
-        .enabled(false)
-        .build(app)?;
-    let ds4_toggle = MenuItemBuilder::with_id(ID_DS4_TOGGLE, "Start DwarfStar")
-        .enabled(false)
-        .build(app)?;
     let stop_all = MenuItemBuilder::with_id(ID_STOP_ALL, "Stop all engines")
         .enabled(false)
         .build(app)?;
@@ -852,19 +697,13 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
         ID_HELPERS,
         helpers_label(HelperState::NotRegistered, EngineLifetime::default()),
     )
-        .build(app)?;
+    .build(app)?;
     let sep_top = PredefinedMenuItem::separator(app)?;
-    let sep_mid = PredefinedMenuItem::separator(app)?;
-    let sep_bottom = PredefinedMenuItem::separator(app)?;
     let sep_end = PredefinedMenuItem::separator(app)?;
-    let items: [&dyn IsMenuItem<Wry>; 10] = [
+    let items: [&dyn IsMenuItem<Wry>; 6] = [
         &sep_top,
         &omlx_label,
         &load_menu,
-        &sep_mid,
-        &ds4_label,
-        &ds4_toggle,
-        &sep_bottom,
         &stop_all,
         &helpers,
         &sep_end,
@@ -875,8 +714,6 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
         menu: menu.clone(),
         omlx_label,
         load_menu,
-        ds4_label,
-        ds4_toggle,
         stop_all,
         helpers,
         dynamic: Mutex::new(Dynamic::default()),
@@ -887,10 +724,9 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
     tauri::async_runtime::spawn(async move {
         loop {
             let urls = load_urls();
-            let (omlx, ds4) = tokio::join!(fetch_omlx(&urls), fetch_ds4(&urls));
+            let omlx = fetch_omlx(&urls).await;
             let view = build_view(
                 &omlx,
-                &ds4,
                 engine_helpers::current_state(),
                 engine_lifetime::load().lifetime,
             );
@@ -923,7 +759,6 @@ pub(crate) fn on_menu_event(app: &AppHandle, id: &str) {
     tauri::async_runtime::spawn(async move {
         let urls = load_urls();
         let result = match &action {
-            Action::Ds4Toggle => ds4_toggle(&urls).await,
             Action::StopAll => stop_all(&urls).await,
             Action::Unload(dir) => unload_model(&urls, dir).await,
             Action::Load(dir) => load_model(&urls, dir).await,
@@ -962,29 +797,24 @@ mod tests {
         parse_omlx_status(&serde_json::from_str(body).unwrap()).unwrap()
     }
 
-    fn ds4(body: Value) -> Ds4Status {
-        parse_ds4_status(&body).unwrap()
-    }
-
     #[test]
     fn urls_default_when_config_missing_or_invalid() {
         assert_eq!(parse_urls(""), EngineUrls::default());
         assert_eq!(parse_urls("not = [valid"), EngineUrls::default());
         assert_eq!(EngineUrls::default().omlx, "http://127.0.0.1:8843");
-        assert_eq!(EngineUrls::default().ds4, "http://127.0.0.1:8001");
     }
 
     #[test]
-    fn urls_follow_ports_and_map_wildcard_hosts_to_loopback() {
-        let urls = parse_urls(
-            "[omlx]\nport = 18843\n[ds4]\nhost = \"0.0.0.0\"\nlauncher_port = 18001\nserver_port = 18000\n",
+    fn urls_follow_ports_and_wildcard_hosts() {
+        assert_eq!(
+            parse_urls("[omlx]\nport = 18843\nhost = \"0.0.0.0\"\n").omlx,
+            "http://127.0.0.1:18843"
         );
-        assert_eq!(urls.omlx, "http://127.0.0.1:18843");
-        assert_eq!(urls.ds4, "http://127.0.0.1:18001");
-        let urls =
-            parse_urls("[omlx]\nhost = \"192.168.3.78\"\nport = 9000\n[ds4]\nlauncher_port = 0\n");
-        assert_eq!(urls.omlx, "http://192.168.3.78:9000");
-        assert_eq!(urls.ds4, DEFAULT_DS4_URL);
+        assert_eq!(
+            parse_urls("[omlx]\nhost = \"192.168.3.78\"\nport = 9000\n").omlx,
+            "http://192.168.3.78:9000"
+        );
+        assert_eq!(parse_urls("[omlx]\nport = 0\n"), EngineUrls::default());
     }
 
     #[test]
@@ -1107,39 +937,6 @@ mod tests {
         assert_eq!(omlx_label(&status), "oMLX: 2 loaded (4.2 GB)");
     }
 
-    #[test]
-    fn ds4_state_and_labels() {
-        let stopped = ds4(json!({"loaded": false, "pid": null, "in_flight": 0,
-            "idle_seconds_remaining": null, "stats": {"live": null, "last": null}}));
-        assert!(!stopped.starting && !stopped.loaded);
-        assert_eq!(ds4_label(&stopped), "DwarfStar: stopped");
-        assert!(!must_stop_ds4_before_load(&stopped));
-
-        let starting = ds4(json!({"loaded": false, "pid": 4242, "in_flight": 0, "stats": {}}));
-        assert!(starting.starting);
-        assert_eq!(ds4_label(&starting), "DwarfStar: starting");
-        assert!(must_stop_ds4_before_load(&starting));
-
-        let loaded = ds4(json!({"loaded": true, "pid": 4242, "in_flight": 0,
-            "idle_seconds_remaining": 252.4,
-            "stats": {"live": null, "last": {"gen_tps": 31.24, "ttft_ms": 800.0}}}));
-        assert_eq!(
-            ds4_label(&loaded),
-            "DwarfStar: loaded, idle, unloads in 4m 12s, 31.2 tok/s"
-        );
-        assert!(must_stop_ds4_before_load(&loaded));
-
-        let busy = ds4(json!({"loaded": true, "pid": 1, "in_flight": 2,
-            "stats": {"live": {"gen_tps": 40.0}, "last": {"gen_tps": 31.0}}}));
-        assert_eq!(
-            ds4_label(&busy),
-            "DwarfStar: loaded, generating, 40.0 tok/s"
-        );
-
-        assert!(!must_stop_ds4_before_load(&Ds4Status::default()));
-        assert_eq!(ds4_label(&Ds4Status::default()), "DwarfStar: not running");
-    }
-
     fn failure(reason: &str, count: u64) -> Failure {
         Failure {
             reason: reason.to_string(),
@@ -1150,7 +947,9 @@ mod tests {
     #[test]
     fn failure_marker_parses_only_when_complete() {
         assert_eq!(
-            parse_failure(r#"{"reason": "port 8843 already in use", "ts": 1760000000.5, "count": 3}"#),
+            parse_failure(
+                r#"{"reason": "port 8843 already in use", "ts": 1760000000.5, "count": 3}"#
+            ),
             Some(failure("port 8843 already in use", 3))
         );
         assert_eq!(
@@ -1182,14 +981,6 @@ mod tests {
             omlx_label(&omlx_down),
             "oMLX failing: venv missing: /x/omlx/bin/python"
         );
-        let ds4_down = Ds4Status {
-            failure: Some(failure("model file missing: /m.gguf", 4)),
-            ..Ds4Status::default()
-        };
-        assert_eq!(
-            ds4_label(&ds4_down),
-            "DwarfStar failing: model file missing: /m.gguf (x4)"
-        );
         let long = OmlxStatus {
             failure: Some(failure(&"a".repeat(200), 1)),
             ..OmlxStatus::default()
@@ -1202,21 +993,16 @@ mod tests {
         let mut up = omlx(OMLX_BODY);
         up.failure = Some(failure("old", 1));
         assert!(omlx_label(&up).starts_with("oMLX: 1 loaded"));
-        let mut up = ds4(json!({"loaded": false, "pid": null}));
-        up.failure = Some(failure("old", 1));
-        assert_eq!(ds4_label(&up), "DwarfStar: stopped");
     }
 
     #[test]
     fn view_enables_controls_from_reachability() {
         let down = build_view(
             &OmlxStatus::default(),
-            &Ds4Status::default(),
             HelperState::NotRegistered,
             EngineLifetime::WithApp,
         );
-        assert!(!down.load_enabled && !down.ds4_toggle_enabled && !down.stop_all_enabled);
-        assert_eq!(down.ds4_toggle_text, "Start DwarfStar");
+        assert!(!down.load_enabled && !down.stop_all_enabled);
         assert_eq!(
             down.helpers_label,
             "Engines: not running as helpers (enable in Settings)"
@@ -1224,12 +1010,10 @@ mod tests {
 
         let up = build_view(
             &omlx(OMLX_BODY),
-            &ds4(json!({"loaded": true, "pid": 9, "in_flight": 0})),
             HelperState::Enabled,
             EngineLifetime::Always,
         );
-        assert!(up.load_enabled && up.ds4_toggle_enabled && up.stop_all_enabled);
-        assert_eq!(up.ds4_toggle_text, "Stop DwarfStar");
+        assert!(up.load_enabled && up.stop_all_enabled);
         assert_eq!(up.helpers_label, "Engines: running as background helpers");
         assert_eq!(up.loads.len(), 1);
     }
@@ -1246,15 +1030,20 @@ mod tests {
             helpers_label(Partial, WithApp),
             "Engines: helpers partly enabled (stop on quit)"
         );
-        assert_eq!(helpers_label(Enabled, Always), "Engines: running as background helpers");
+        assert_eq!(
+            helpers_label(Enabled, Always),
+            "Engines: running as background helpers"
+        );
         for state in [NotRegistered, RequiresApproval, NotFound, Unsupported] {
-            assert!(!helpers_label(state, WithApp).contains("stop on quit"), "{state:?}");
+            assert!(
+                !helpers_label(state, WithApp).contains("stop on quit"),
+                "{state:?}"
+            );
         }
     }
 
     #[test]
     fn menu_ids_round_trip_to_actions() {
-        assert_eq!(parse_action("engine:ds4-toggle"), Some(Action::Ds4Toggle));
         assert_eq!(parse_action("engine:stop-all"), Some(Action::StopAll));
         assert_eq!(parse_action("engine:helpers"), Some(Action::OpenLoginItems));
         assert_eq!(

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Map an oMLX final ``usage`` block (durations in seconds) onto the llama.cpp ``timings`` object the chat UI reads its tok/s badge from. DwarfStar's launcher already emits ``timings`` itself, so a line that carries one passes through untouched."""
+"""Map an oMLX final ``usage`` block onto the llama.cpp timings object."""
 
 from __future__ import annotations
 
 import json
 from typing import Any, Optional
 
-ATTACHED_PROVIDER_TYPES = frozenset({"omlx", "dwarfstar"})
+ATTACHED_PROVIDER_TYPES = frozenset({"omlx"})
 
 
 def _num(value: Any) -> Optional[float]:

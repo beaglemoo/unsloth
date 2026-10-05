@@ -39,15 +39,15 @@ export function engineLifetimeOf(
 /** The trade-off, shown under the control. Names the clients that care. */
 export function engineLifetimeNote(lifetime: EngineLifetime): string {
   return lifetime === "with_app"
-    ? "pi, Claude Code and OpenCode only get local models while Unsloth is open. On quit Unsloth unloads the oMLX models, stops DwarfStar once its reply finishes (up to 30 s) and takes the helpers down; the next launch starts them again."
+    ? "pi, Claude Code and OpenCode only get local models while Unsloth is open. On quit Unsloth unloads the oMLX models and takes the helper down; the next launch starts it again."
     : "pi, Claude Code and OpenCode keep their local models after Unsloth quits, at the cost of the engines holding memory and a login item until you turn them off.";
 }
 
 /** What the "Engines enabled" row says about the lifetime. */
 export function enginesEnabledDescription(lifetime: EngineLifetime): string {
   return lifetime === "with_app"
-    ? "Run oMLX and DwarfStar as macOS login items while Unsloth is open. They start with Unsloth and stop when it quits."
-    : "Run oMLX and DwarfStar as macOS login items. They keep serving after Unsloth quits.";
+    ? "Run oMLX as a macOS login item while Unsloth is open. It starts with Unsloth and stops when it quits."
+    : "Run oMLX as a macOS login item. It keeps serving after Unsloth quits.";
 }
 
 export interface EngineLifetimeRow {

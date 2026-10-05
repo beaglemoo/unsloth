@@ -12,10 +12,8 @@ function settings(
   return {
     enabled: true,
     omlxUrl: "http://127.0.0.1:8843",
-    ds4Url: "http://127.0.0.1:8001",
     scanDenylist: [],
     arbitrateLocalLoads: true,
-    prewarmDs4OnSelect: true,
     ...patch,
   };
 }
@@ -29,25 +27,10 @@ test("a changed oMLX URL triggers a sync even though the model ids are the same"
   );
 });
 
-test("a changed DwarfStar URL triggers a sync", () => {
-  const previous = settings();
-  const saved = settings({ ds4Url: "http://localhost:18001" });
-  assert.equal(
-    settingsSaveSyncAction(previous, saved, { ds4Url: saved.ds4Url }),
-    "sync",
-  );
-});
-
 test("saving the URLs unchanged, or a toggle, needs no sync", () => {
   const previous = settings();
   assert.equal(
     settingsSaveSyncAction(previous, settings(), { omlxUrl: previous.omlxUrl }),
-    "none",
-  );
-  assert.equal(
-    settingsSaveSyncAction(previous, settings({ prewarmDs4OnSelect: false }), {
-      prewarmDs4OnSelect: false,
-    }),
     "none",
   );
 });

@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared by omlx-launch and ds4-ondemand-launch (sourced, never run). Needs ENGINES_HOME set.
+# Shared by omlx-launch (sourced, never run). Needs ENGINES_HOME set.
 
 # engines_rotate_log <file> [max bytes] [keep]: when the file is over the limit (default 20 MB),
 # shift <file>.N -> <file>.N+1 (keeping 3) and move the file to <file>.1. Run on start, before
