@@ -5,6 +5,7 @@ import { AttachedEnginesContextSection } from "@/features/attached-engines/engin
 import {
   AttachedEnginesPanel,
   AttachedEnginesSettingsSection,
+  OmlxDashboardSection,
 } from "@/features/attached-engines";
 import { useT } from "@/i18n";
 
@@ -31,6 +32,7 @@ export function AttachedEnginesTab() {
       <AttachedEnginesSettingsSection />
       <AttachedEnginesPanel />
       <AttachedEnginesContextSection />
+      <OmlxDashboardSection />
     </div>
   );
 }
