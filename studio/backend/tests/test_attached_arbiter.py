@@ -79,7 +79,13 @@ def test_disabled_arbitration_never_contacts_engine(admission, monkeypatch, conf
     assert admission == []
 
 
-def test_using_omlx_requires_no_peer_eviction(admission):
+@pytest.fixture
+def idle_studio(monkeypatch):
+    monkeypatch.setattr(arbiter, "_training_active", lambda: False)
+    monkeypatch.setattr(arbiter, "_local_memory_active", lambda: False)
+
+
+def test_using_omlx_requires_no_peer_eviction(admission, idle_studio):
     result = asyncio.run(arbiter.before_omlx_use())
     result.require_clear()
     assert admission == []
@@ -93,3 +99,80 @@ def test_thread_admission_rejects_waiting_on_its_own_loop(admission):
     result = asyncio.run(work())
     assert "own event loop" in result.error
     assert admission == []
+
+
+def test_omlx_use_is_refused_while_training(admission, monkeypatch):
+    monkeypatch.setattr(arbiter, "_training_active", lambda: True)
+    monkeypatch.setattr(arbiter, "_local_memory_active", lambda: False)
+    result = asyncio.run(arbiter.before_omlx_use())
+    with pytest.raises(arbiter.AttachedAdmissionError, match = "Studio is training"):
+        result.require_clear()
+    assert result.skipped == "error"
+    assert admission == []
+
+
+def test_omlx_use_is_refused_while_a_local_model_is_resident(admission, monkeypatch):
+    monkeypatch.setattr(arbiter, "_training_active", lambda: False)
+    monkeypatch.setattr(arbiter, "_local_memory_active", lambda: True)
+    result = asyncio.run(arbiter.before_omlx_use())
+    with pytest.raises(arbiter.AttachedAdmissionError, match = "local model loaded"):
+        result.require_clear()
+    assert admission == []
+
+
+def test_a_failing_residency_probe_refuses_omlx_use(admission, monkeypatch):
+    monkeypatch.setattr(arbiter, "_training_active", lambda: False)
+
+    def broken():
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(arbiter, "_local_memory_active", broken)
+    result = asyncio.run(arbiter.before_omlx_use())
+    assert "probe failed" in result.error
+
+
+def test_omlx_use_gate_is_off_when_local_arbitration_is_off(admission, monkeypatch):
+    config = replace(DEFAULT_CONFIG, enabled = True, arbitrate_local_loads = False)
+    monkeypatch.setattr(arbiter, "get_config", lambda: config)
+    monkeypatch.setattr(arbiter, "_training_active", lambda: True)
+    monkeypatch.setattr(arbiter, "_local_memory_active", lambda: True)
+    asyncio.run(arbiter.before_omlx_use()).require_clear()
+
+
+def test_omlx_use_gate_does_not_block_local_admission(admission, monkeypatch):
+    # Training and local loads free oMLX; only Studio's own oMLX use is gated.
+    monkeypatch.setattr(arbiter, "_training_active", lambda: True)
+    monkeypatch.setattr(arbiter, "_local_memory_active", lambda: True)
+    result = asyncio.run(arbiter.free_for_local("training"))
+    result.require_clear()
+    assert "unload omlx" in admission
+
+
+def test_omlx_refusal_is_a_retryable_503_on_the_proxy_and_admin_paths(admission, monkeypatch):
+    import routes.attached_engines as attached_routes
+
+    monkeypatch.setattr(arbiter, "_training_active", lambda: True)
+    with pytest.raises(Exception) as caught:
+        asyncio.run(attached_routes._admit_omlx_use())
+    assert caught.value.status_code == 503
+    assert caught.value.headers == {"Retry-After": "15"}
+    assert "Studio is training" in caught.value.detail
+
+
+def test_local_memory_probe_covers_loaded_loading_and_managed_engines(monkeypatch):
+    import routes.inference as inf_mod
+    from types import SimpleNamespace as NS
+    import core.inference.llama_cpp as llama_mod
+
+    def probe(llama_active = False, load = False, **backend):
+        monkeypatch.setattr(inf_mod, "get_llama_cpp_backend", lambda: NS(is_active = llama_active))
+        monkeypatch.setattr(llama_mod, "chat_load_active", lambda: load)
+        monkeypatch.setattr(inf_mod, "_peek_inference_backend", lambda: NS(**backend) if backend else None)
+        return inf_mod._attached_local_memory_active()
+
+    assert not probe()
+    assert probe(llama_active = True)
+    assert probe(load = True)
+    assert probe(active_model_name = "m")
+    assert probe(loading_models = ("m",))
+    assert probe(_managed_engine = object())
