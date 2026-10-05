@@ -1359,7 +1359,7 @@ export function ChatProvidersSettings({
     if (!provider) return;
     openedProviderRef.current = openProviderId;
     if (isAttachedConnection(provider)) {
-      // Never offer the edit form for an attached engine; its page is the Attached engines tab.
+      // Never offer the edit form for an attached engine; its page is the oMLX tab.
       useSettingsDialogStore.getState().openDialog("attached-engines");
       onOpenProviderConsumed?.();
       return;

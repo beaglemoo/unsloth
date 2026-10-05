@@ -31,7 +31,7 @@ import {
   HomeWifiIcon,
   LibrariesIcon,
   PaintBrush02Icon,
-  PlugSocketIcon,
+  AiChipIcon,
   Search01Icon,
   Settings02Icon,
   UserCircleIcon,
@@ -230,7 +230,7 @@ const TABS: TabDef[] = [
   {
     id: "attached-engines",
     labelKey: "settings.tabs.attachedEngines",
-    icon: PlugSocketIcon,
+    icon: AiChipIcon,
   },
   {
     id: "remote-lan",
