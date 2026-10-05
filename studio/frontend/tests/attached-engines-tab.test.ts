@@ -89,11 +89,12 @@ test("the engine pieces moved off the API Keys and Resources tabs onto the new o
   assert.match(tab, /<AttachedEnginesSettingsSection \/>/);
   assert.match(tab, /<AttachedEnginesPanel \/>/);
   assert.match(tab, /<AttachedEnginesContextSection \/>/);
+  assert.match(tab, /<OmlxDashboardSection \/>/);
 });
 
 test("with the flag off only the enable toggle is rendered", () => {
   const section = src("features/attached-engines/settings-section.tsx");
-  const enable = section.indexOf('label="Enable attached engines"');
+  const enable = section.indexOf('label="Enable oMLX"');
   const gate = section.indexOf("settings?.enabled ? (");
   assert.ok(enable > 0 && gate > enable);
   // everything else sits behind the flag, the Engines enabled switch included
