@@ -149,9 +149,10 @@ def free_for_local_from_thread(reason: Reason, loop: asyncio.AbstractEventLoop) 
         except RuntimeError:
             pass
         future = asyncio.run_coroutine_threadsafe(free_for_local(reason), loop)
-        return future.result(timeout = _THREAD_WAIT_S)
-    except concurrent.futures.TimeoutError:
-        future.cancel()
-        return ArbiterResult(skipped = "error", error = "Shared-memory admission timed out; training was blocked.")
+        try:
+            return future.result(timeout = _THREAD_WAIT_S)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return ArbiterResult(skipped = "error", error = "Shared-memory admission timed out; training was blocked.")
     except Exception as exc:
         return ArbiterResult(skipped = "error", error = f"Shared-memory admission failed: {exc}")
