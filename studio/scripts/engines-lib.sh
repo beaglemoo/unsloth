@@ -7,6 +7,9 @@
 # Environment (all optional; the overrides exist for tests):
 #   OMLX_URL            engine base URL (default 127.0.0.1:8843)
 #   ENGINE_PORTS        ports that must be free while the helper is stopped (default 8843)
+#   LEGACY_DS4_URL      one-time migration: the DwarfStar launcher of a pre-removal app, if one still
+#                       answers (default 127.0.0.1:8001); LEGACY_DS4_PORTS its ports (default 8001 8000);
+#                       LEGACY_DS4_WAIT seconds to wait for its launchd job to go (default 20)
 #   LAUNCHCTL           launchctl binary (only ever used to look at, or boot out, the helpers)
 #   HELPER_APP          the Unsloth.app whose Contents/MacOS/unsloth-studio starts and stops the
 #                       helpers (default: INSTALLED_APP when the caller sets it, else
@@ -18,6 +21,16 @@
 
 OMLX_URL="${OMLX_URL:-http://127.0.0.1:8843}"
 ENGINE_PORTS="${ENGINE_PORTS:-8843}"
+# One-time migration for an install over a pre-removal app, which still ran the DwarfStar (ds4)
+# launcher as a second helper. The new bundle has no ds4 launcher, so a left-over job would
+# crash-loop once the bundle is swapped. Remove this block with the migration once no install
+# can predate the removal.
+LEGACY_DS4_URL="${LEGACY_DS4_URL:-http://127.0.0.1:8001}"
+LEGACY_DS4_PORTS="${LEGACY_DS4_PORTS:-8001 8000}"
+LEGACY_DS4_LABEL=ai.unsloth.studio.ds4
+LEGACY_DS4_WAIT="${LEGACY_DS4_WAIT:-20}"
+# 1 once the legacy launcher answered /admin/status in this run
+LEGACY_DS4_SEEN=0
 LAUNCHCTL="${LAUNCHCTL:-launchctl}"
 HELPER_START_WAIT="${HELPER_START_WAIT:-20}"
 PGREP="${PGREP:-pgrep}"
@@ -64,7 +77,25 @@ fetch_roster() { curl -fsS -m 10 "$OMLX_URL/v1/models" | roster_from_json; }
 # True when oMLX answers /api/status.
 omlx_up() { curl -fsS -m 5 -o /dev/null "$OMLX_URL/api/status" 2>/dev/null; }
 
-# die unless oMLX is idle: nothing generating or loading.
+# Migration only: die unless the legacy ds4 launcher, when one answers, is idle (nothing in
+# flight and not starting). An answer that cannot be read counts as busy.
+legacy_ds4_require_idle() {
+  local status verdict
+  status="$(curl -fsS -m 3 "$LEGACY_DS4_URL/admin/status" 2>/dev/null)" || return 0
+  LEGACY_DS4_SEEN=1
+  verdict="$(printf '%s' "$status" | python3 -c '
+import json, sys
+try:
+    s = json.load(sys.stdin)
+    busy = int(s.get("in_flight") or 0) > 0 or bool(s.get("starting"))
+except Exception:
+    busy = True
+print("busy" if busy else "idle")' 2>/dev/null || echo busy)"
+  [ "$verdict" = idle ] || die "the legacy DwarfStar launcher at $LEGACY_DS4_URL is busy or starting; wait for it to go idle"
+}
+
+# die unless oMLX (and, for the migration, the legacy ds4 launcher) is idle: nothing generating,
+# loading or starting.
 engines_require_idle() {
   local status summary busy
   if status="$(curl -fsS -m 5 "$OMLX_URL/api/status" 2>/dev/null)"; then
@@ -72,6 +103,7 @@ engines_require_idle() {
     busy="$(printf '%s\n' "$summary" | head -n 1)"
     [ "$busy" = 0 ] || die "oMLX is busy (active + waiting + loading = $busy); wait for it to go idle"
   fi
+  legacy_ds4_require_idle
 }
 
 # Unload every oMLX model gracefully and only while idle, so nothing holding
@@ -115,6 +147,16 @@ engines_quiesce() {
     fi
   else
     log "oMLX: $OMLX_URL not reachable, nothing to unload"
+  fi
+  # Migration only: the legacy ds4 launcher was idle above; ask it to unload (best effort, the
+  # helper unregister that follows stops it either way).
+  if [ "$LEGACY_DS4_SEEN" = 1 ]; then
+    log "legacy DwarfStar: stopping it while idle"
+    post "$LEGACY_DS4_URL/admin/stop?if_idle=1" 30
+    case "$POST_CODE" in
+      200|202) ;;
+      *) warn "legacy DwarfStar stop answered HTTP $POST_CODE; continuing (the helper unregister stops it)" ;;
+    esac
   fi
 }
 
@@ -249,6 +291,29 @@ helpers_stop() {
   fi
 }
 
+# Migration only (install over a pre-removal app): the legacy ds4 helper can outlive the old
+# app's unregister. The new bundle has no ds4 launcher, so a job still in launchd would crash-loop
+# after the swap. When it is still loaded, unregister once more through the old app's CLI (the
+# app that registered it; bootout when that app has no CLI), wait up to LEGACY_DS4_WAIT s, and die
+# when it is still there (the install's rollback then runs).
+helpers_clear_legacy_ds4() {
+  local bin start=$SECONDS
+  helper_loaded "$LEGACY_DS4_LABEL" || return 0
+  warn "the legacy $LEGACY_DS4_LABEL job is still loaded; unregistering it once more"
+  bin="$(helper_cli)"
+  if helper_cli_supported "$bin"; then
+    run "$bin" --engine-helpers unregister || true
+  else
+    run "$LAUNCHCTL" bootout "$HELPER_DOMAIN/$LEGACY_DS4_LABEL" || true
+  fi
+  [ "$DRY" = 0 ] || return 0
+  while helper_loaded "$LEGACY_DS4_LABEL"; do
+    [ $((SECONDS - start)) -lt "$LEGACY_DS4_WAIT" ] || die "the legacy $LEGACY_DS4_LABEL job is still loaded after ${LEGACY_DS4_WAIT} s; the new bundle has no ds4 launcher, so it would crash-loop. Not swapping the app"
+    sleep "${HEALTH_POLL:-1}"
+  done
+  log "the legacy $LEGACY_DS4_LABEL job is gone"
+}
+
 # True once every label in STOPPED_HELPERS is loaded, waiting up to HELPER_START_WAIT seconds.
 owed_helpers_loaded() {
   local start=$SECONDS label up
@@ -315,18 +380,24 @@ helpers_start() {
   return 1
 }
 
+# The ports the gate watches: the engine ports, plus the legacy ds4 ones only when that launcher
+# was seen in this run (migration).
+gate_ports() {
+  if [ "$LEGACY_DS4_SEEN" = 1 ]; then printf '%s %s' "$ENGINE_PORTS" "$LEGACY_DS4_PORTS"; else printf '%s' "$ENGINE_PORTS"; fi
+}
+
 port_owners() {
   local port
-  for port in $ENGINE_PORTS; do
+  for port in $(gate_ports); do
     lsof -nP "-iTCP:$port" -sTCP:LISTEN 2>/dev/null || true
   done
 }
 
 # Wait until none of the engine ports listens. Never kills the owner.
 wait_ports_free() {
-  log "port-free gate: ports $ENGINE_PORTS must stop listening (${PORT_GATE_TIMEOUT} s)"
+  log "port-free gate: ports $(gate_ports) must stop listening (${PORT_GATE_TIMEOUT} s)"
   if [ "$DRY" = 1 ]; then
-    printf '[dry-run] poll lsof for ports %s every 2 s until empty (timeout %s s)\n' "$ENGINE_PORTS" "$PORT_GATE_TIMEOUT"
+    printf '[dry-run] poll lsof for ports %s every 2 s until empty (timeout %s s)\n' "$(gate_ports)" "$PORT_GATE_TIMEOUT"
     return 0
   fi
   local start=$SECONDS owners

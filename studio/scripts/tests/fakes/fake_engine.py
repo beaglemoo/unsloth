@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """A stand-in for the oMLX HTTP surface the update script talks to.
 
-    fake_engine.py omlx <engines home> <port>
+    fake_engine.py omlx|ds4 <engines home> <port>
 
 oMLX answers /api/status, /v1/models and POST /v1/models/<id>/unload. It reports 500 on
 /v1/models while <home>/omlx/VERSION says "bad", which is how a test makes a venv unhealthy.
+ds4 stands for the legacy DwarfStar launcher of a pre-removal app (migration tests only): it answers
+/admin/status and POST /admin/stop; <home>/ds4-busy makes it report a request in flight and
+<home>/ds4-starting that it is starting.
 
 """
 
@@ -42,12 +45,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"active_requests": 1 if flag(home / "omlx-busy") else 0, "waiting_requests": 0, "models_loading": 0, "loaded_models": loaded})
             if self.path == "/v1/models":
                 return self.reply(500 if version == "bad" else 200, {"data": [{"id": "m1"}, {"id": "m2"}]})
+        elif self.path == "/admin/status":
+            return self.reply(
+                200,
+                {
+                    "loaded": flag(home / "ds4-loaded"),
+                    "in_flight": 1 if flag(home / "ds4-busy") else 0,
+                    "starting": flag(home / "ds4-starting"),
+                },
+            )
         self.reply(404)
 
     def do_POST(self):
         if kind == "omlx" and self.path.startswith("/v1/models/") and self.path.endswith("/unload"):
             (home / "omlx-loaded").unlink(missing_ok=True)
             CALLS.open("a").write("omlx-unload\n")
+            return self.reply(200)
+        if kind == "ds4" and self.path.startswith("/admin/stop"):
+            (home / "ds4-loaded").unlink(missing_ok=True)
+            CALLS.open("a").write(f"ds4-stop {self.path}\n")
             return self.reply(200)
         self.reply(404)
 
