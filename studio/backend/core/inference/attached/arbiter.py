@@ -101,12 +101,12 @@ def _local_workload() -> Optional[str]:
 
 
 async def _admit(reason: str, *, local: bool) -> ArbiterResult:
-    config = get_config()
-    if not config.enabled:
-        return ArbiterResult(skipped = "disabled")
-    if local and not config.arbitrate_local_loads:
-        return ArbiterResult(skipped = "arbitration_off")
     try:
+        config = get_config()
+        if not config.enabled:
+            return ArbiterResult(skipped = "disabled")
+        if local and not config.arbitrate_local_loads:
+            return ArbiterResult(skipped = "arbitration_off")
         async with _lock():
             if not local and config.arbitrate_local_loads:
                 busy = _local_workload()
