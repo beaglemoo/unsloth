@@ -157,10 +157,10 @@ export function AttachedEnginesSettingsSection() {
   return (
     <SettingsSection
       title="Configuration"
-      description="Turn the engines on, set where Studio reaches them and how they share memory with local loads."
+      description="Turn oMLX on, set where Studio reaches it and how it shares memory with local loads."
     >
       <SettingsRow
-        label="Enable attached engines"
+        label="Enable oMLX"
         description="Show oMLX in the model picker and free its memory before a local load or training run."
         below={error ? <span className={ERROR_CLASS}>{error}</span> : null}
       >
