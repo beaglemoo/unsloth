@@ -1352,6 +1352,25 @@ def test_generated_config_has_only_omlx():
     assert "OMLX_PEER_EVICT_URLS" not in config["omlx"]["env"]
 
 
+def test_peer_url_removal_also_removes_the_comment_the_old_migration_wrote(home):
+    note = "# oMLX asks the ds4 launcher to unload when it needs memory (added by the engines.toml migration)."
+    peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
+    config, result = config_migrate(home, f'[omlx.env]\nOMLX_NAX = "1"\n{note}\n{peer}\n[ds4]\nhost = "0.0.0.0"\n')
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == '[omlx.env]\nOMLX_NAX = "1"\n[ds4]\nhost = "0.0.0.0"\n'
+
+
+def test_peer_url_removal_keeps_other_comments_and_a_non_adjacent_note(home):
+    note = "# oMLX asks the ds4 launcher to unload."
+    peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
+    config, result = config_migrate(home, f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n{peer}\n')
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n'
+    other = 'x = 1\n# oMLX asks something else\n' + f'[omlx.env]\n# oMLX asks something else\n{peer}\n'
+    config, result = config_migrate(home, other)
+    assert config.read_text() == 'x = 1\n# oMLX asks something else\n[omlx.env]\n# oMLX asks something else\n'
+
+
 def test_peer_url_removal_preserves_config_and_backs_up_once(home):
     import tomllib
     original = '# saved\n[omlx]\nport = 9000\n[omlx.env]\nOMLX_NAX = "1"\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"\n[ds4]\nhost = "0.0.0.0"\n'
