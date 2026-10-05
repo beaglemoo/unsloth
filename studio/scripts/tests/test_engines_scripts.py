@@ -27,6 +27,8 @@ pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="the engine scr
 
 def run(cmd, env_extra=None, **kw):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("UNSLOTH_", "ENGINES_"))}
+    # the legacy ds4 migration probes a launcher URL: never let a test reach the real :8001
+    env["LEGACY_DS4_URL"] = "http://127.0.0.1:9"
     env.update(env_extra or {})
     return subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=60, **kw)
 
@@ -397,6 +399,7 @@ class Rig:
         self.app = tmp_path / "helper-app" / "Unsloth.app"
         make_app(self.app, "helper", cli="cli")
         self.omlx_port = free_port()
+        self.ds4_port = free_port()
         self.labels = ("ai.unsloth.studio.omlx",)
         make_venv(home / "omlx", "old")
         (home / ".provisioned").write_text("omlx=old-key\nomlx_kernels=1\n")
@@ -435,6 +438,11 @@ class Rig:
             "FAKE_OMLX_PORT": str(self.omlx_port),
             "FAKE_PY": sys.executable,
             "STAGE_VERSION": "none",
+            # the legacy ds4 launcher of a pre-removal app: absent unless a test starts it
+            "LEGACY_DS4_URL": f"http://127.0.0.1:{self.ds4_port}",
+            "LEGACY_DS4_PORTS": str(self.ds4_port),
+            "LEGACY_DS4_WAIT": "3",
+            "FAKE_DS4_PORT": str(self.ds4_port),
         }
         # the pre-with_app behaviour by default: the helpers outlive the app. The with_app tests
         # call set_desktop.
@@ -443,6 +451,30 @@ class Rig:
         assert run([str(self.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "register"], self.env).returncode == 0
         self.wait_up()
         (self.lc / "calls.log").unlink(missing_ok=True)
+
+    def start_legacy_ds4(self, busy=False, starting=False):
+        """The ds4 helper a pre-removal app registered: a job in launchd answering /admin/status."""
+        import time
+        import urllib.request
+
+        if busy:
+            (self.home / "ds4-busy").write_text("1")
+        if starting:
+            (self.home / "ds4-starting").write_text("1")
+        label = "ai.unsloth.studio.ds4"
+        # detached like the fake CLI starts engines, so a kill is reaped by init and `kill -0` ends
+        subprocess.run(
+            ["bash", "-c", '"$FAKE_PY" "$0/fake_engine.py" ds4 "$FAKE_HOME" "$FAKE_DS4_PORT" >/dev/null 2>&1 & echo $! >"$FAKE_LC/$1.pid"; disown', str(FAKES), label],
+            env={**os.environ, **self.env},
+            check=True,
+        )
+        (self.lc / f"registered.{label}").touch()
+        for _ in range(100):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{self.ds4_port}/admin/status", timeout=1).read()
+                break
+            except OSError:
+                time.sleep(0.1)
 
     def launchctl(self, *args):
         return run([str(FAKES / "fake-launchctl"), *args], self.env)
@@ -1459,3 +1491,96 @@ def test_a_port_gate_timeout_after_the_backend_swap_restores_everything(tmp_path
         assert_rolled_back(tmp_path, rig, result)
     finally:
         rig.close()
+
+
+
+# --- migration over a pre-removal app: the legacy ds4 helper ------------------------------------
+
+LEGACY_LABEL = "ai.unsloth.studio.ds4"
+
+
+def test_a_legacy_ds4_job_left_after_the_first_unregister_is_unregistered_again(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.start_legacy_ds4()
+        result = install_app_rig(tmp_path, rig, {"FAKE_LEGACY_DS4_STICKY": "1"})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "legacy ai.unsloth.studio.ds4 job is still loaded" in result.stderr
+        assert "the legacy ai.unsloth.studio.ds4 job is gone" in result.stdout
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
+        # unregister twice through the OLD app, then register through the new one
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers unregister", "engine-helpers register"]
+        assert not rig.loaded(LEGACY_LABEL)
+        # the launcher was seen idle, so it was asked to stop while idle
+        assert "ds4-stop /admin/stop?if_idle=1" in rig.calls()
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
+def test_a_legacy_ds4_job_that_survives_both_unregisters_fails_the_install_and_rolls_back(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.start_legacy_ds4()
+        result = txn(tmp_path, rig, extra_env={"FAKE_LEGACY_DS4_STICKY": "99", "LEGACY_DS4_WAIT": "1"})
+        assert "still loaded after 1 s" in result.stderr, result.stdout + result.stderr
+        assert_rolled_back(tmp_path, rig, result)
+        assert not any(c.startswith("mv ") for c in rig.calls())
+    finally:
+        rig.close()
+
+
+@pytest.mark.parametrize("state", [{"busy": True}, {"starting": True}])
+def test_a_busy_legacy_ds4_launcher_refuses_the_install_before_anything_stops(tmp_path, home, state):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.start_legacy_ds4(**state)
+        result = install_app_rig(tmp_path, rig)
+        assert result.returncode != 0 and "legacy DwarfStar launcher" in result.stderr and "busy or starting" in result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert helpers_touched(rig) == []
+        assert not any(c.startswith("ds4-stop") for c in rig.calls())
+    finally:
+        rig.close()
+
+
+def test_the_idle_check_and_the_port_gate_ignore_a_legacy_launcher_that_is_not_there(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen()
+            # a stranger on a legacy port with no launcher answering: not watched, not refused
+            result = install_app_rig(tmp_path, rig, {"LEGACY_DS4_PORTS": str(held.getsockname()[1])})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not any(c.startswith("ds4-stop") for c in rig.calls())
+    finally:
+        rig.close()
+
+
+def test_the_port_gate_watches_the_legacy_ports_only_when_the_launcher_was_seen(home):
+    snippet = (
+        'log() { :; }; warn() { :; }; die() { exit 1; }; DRY=0; . "%s/engines-lib.sh"; '
+        'echo "unseen=$(gate_ports)"; LEGACY_DS4_SEEN=1; echo "seen=$(gate_ports)"'
+    ) % SCRIPTS
+    result = run(["bash", "-c", snippet], env_for(home, ENGINE_PORTS="1111", LEGACY_DS4_PORTS="2222 3333"))
+    assert result.returncode == 0, result.stderr
+    assert "unseen=1111\n" in result.stdout and "seen=1111 2222 3333" in result.stdout
+
+
+def test_an_idle_legacy_launcher_is_stopped_during_the_quiesce(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.start_legacy_ds4()
+        result = fork_fn(tmp_path, "DRY=0; engines_quiesce", rig.fork_env())
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ds4-stop /admin/stop?if_idle=1" in rig.calls()
+    finally:
+        rig.close()
+
+
+def test_a_busy_legacy_launcher_is_refused_by_the_update_script_too(rig):
+    rig.start_legacy_ds4(busy=True)
+    result = rig.update(STAGE_VERSION="new")
+    assert result.returncode != 0 and "legacy DwarfStar launcher" in result.stderr
+    assert helpers_touched(rig) == []
