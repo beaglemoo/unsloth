@@ -176,3 +176,39 @@ def test_local_memory_probe_covers_loaded_loading_and_managed_engines(monkeypatc
     assert probe(active_model_name = "m")
     assert probe(loading_models = ("m",))
     assert probe(_managed_engine = object())
+
+
+def test_thread_admission_timeout_blocks_training_and_cancels(admission, monkeypatch):
+    import concurrent.futures
+
+    class Future:
+        cancelled = False
+
+        def result(self, timeout):
+            raise concurrent.futures.TimeoutError()
+
+        def cancel(self):
+            Future.cancelled = True
+
+    def submit(coro, loop):
+        coro.close()
+        return Future()
+
+    monkeypatch.setattr(arbiter.asyncio, "run_coroutine_threadsafe", submit)
+    result = arbiter.free_for_local_from_thread("training", asyncio.new_event_loop())
+    assert "timed out" in result.error
+    assert Future.cancelled
+
+
+def test_thread_admission_timeout_before_future_exists_is_not_unbound(admission, monkeypatch):
+    import concurrent.futures
+
+    def raising(coro, loop):
+        coro.close()
+        raise concurrent.futures.TimeoutError()
+
+    monkeypatch.setattr(arbiter.asyncio, "run_coroutine_threadsafe", raising)
+    result = arbiter.free_for_local_from_thread("training", asyncio.new_event_loop())
+    assert result.skipped == "error"
+    assert "UnboundLocalError" not in result.error and "referenced before assignment" not in result.error
+    assert result.error.startswith("Shared-memory admission failed")
