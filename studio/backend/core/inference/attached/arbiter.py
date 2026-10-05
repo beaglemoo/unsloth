@@ -79,6 +79,27 @@ async def free_comfyui(*, transport = None) -> None:
         logger.info("ComfyUI memory release skipped: %s", type(exc).__name__)
 
 
+def _training_active() -> bool:
+    from core.training import get_training_backend
+
+    return bool(get_training_backend().is_training_active())
+
+
+def _local_memory_active() -> bool:
+    from routes.inference import _attached_local_memory_active
+
+    return _attached_local_memory_active()
+
+
+def _local_workload() -> Optional[str]:
+    """What Studio is running that oMLX must not share memory with, if anything."""
+    if _training_active():
+        return "is training"
+    if _local_memory_active():
+        return "has a local model loaded"
+    return None
+
+
 async def _admit(reason: str, *, local: bool) -> ArbiterResult:
     config = get_config()
     if not config.enabled:
@@ -87,6 +108,12 @@ async def _admit(reason: str, *, local: bool) -> ArbiterResult:
         return ArbiterResult(skipped = "arbitration_off")
     try:
         async with _lock():
+            if not local and config.arbitrate_local_loads:
+                busy = _local_workload()
+                if busy:
+                    raise AttachedAdmissionError(
+                        f"Studio {busy}; finish or unload it to use oMLX."
+                    )
             if local:
                 await free_comfyui()
                 unloaded = await OmlxClient(config.omlx_url).unload_all()

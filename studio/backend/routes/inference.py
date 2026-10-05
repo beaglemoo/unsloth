@@ -11465,6 +11465,17 @@ def _loaded_slot_ident() -> Optional[str]:
 
 
 
+def _attached_local_memory_active() -> bool:
+    from core.inference.llama_cpp import chat_load_active
+
+    llama = get_llama_cpp_backend()
+    backend = _peek_inference_backend()
+    return bool(llama.is_active or chat_load_active()
+                or getattr(backend, "_managed_engine", None) is not None
+                or getattr(backend, "active_model_name", None)
+                or tuple(getattr(backend, "loading_models", ()) or ()))
+
+
 async def _admit_attached_local_load():
     from core.inference.attached.arbiter import free_for_local
 
@@ -20493,6 +20504,8 @@ async def _unload_model_impl(request: UnloadRequest, current_subject: str):
     except Exception as e:
         logger.error(f"Error unloading model: {e}", exc_info = True)
         raise HTTPException(status_code = 500, detail = "Failed to unload model")
+
+
 @studio_router.post("/cancel")
 async def cancel_inference(request: Request, current_subject: str = Depends(get_current_subject)):
     """Cancel in-flight inference requests.
