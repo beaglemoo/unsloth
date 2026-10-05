@@ -2,7 +2,3 @@
 	path = studio/engines/omlx
 	url = https://github.com/beaglemoo/omlx.git
 	branch = chore/merge-upstream-2026-10-03
-[submodule "studio/engines/ds4"]
-	path = studio/engines/ds4
-	url = https://github.com/beaglemoo/ds4.git
-	branch = feat/unsloth-bundle
