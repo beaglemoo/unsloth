@@ -22,10 +22,8 @@ def _config(*entries: str) -> settings.AttachedEnginesConfig:
     return settings.AttachedEnginesConfig(
         enabled = False,
         omlx_url = settings.DEFAULT_OMLX_URL,
-        ds4_url = settings.DEFAULT_DS4_URL,
         scan_denylist = tuple(entries),
         arbitrate_local_loads = True,
-        prewarm_ds4_on_select = True,
     )
 
 

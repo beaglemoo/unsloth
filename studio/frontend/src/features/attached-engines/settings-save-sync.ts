@@ -18,7 +18,6 @@ export function settingsSaveSyncAction(
   // Turning the flag off takes the seeded rows out of the picker.
   if (update.enabled === false && !saved.enabled) return "remove";
   if (!saved.enabled || previous === null) return "none";
-  const urlChanged =
-    previous.omlxUrl !== saved.omlxUrl || previous.ds4Url !== saved.ds4Url;
+  const urlChanged = previous.omlxUrl !== saved.omlxUrl;
   return urlChanged ? "sync" : "none";
 }

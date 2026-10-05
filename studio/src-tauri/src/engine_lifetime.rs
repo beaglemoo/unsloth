@@ -1,4 +1,4 @@
-//! How long the bundled engines (oMLX, ds4) live, and the intent that goes with it. Behind the
+//! How long the bundled engines (oMLX) live, and the intent that goes with it. Behind the
 //! `attached-engines` feature.
 //!
 //! Two values are kept in `<engines home>/desktop.json` (`~/.unsloth/engines`, or
@@ -118,7 +118,9 @@ fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
     })
 }
 
-fn update(change: impl FnOnce(&mut DesktopEngineSettings)) -> Result<DesktopEngineSettings, String> {
+fn update(
+    change: impl FnOnce(&mut DesktopEngineSettings),
+) -> Result<DesktopEngineSettings, String> {
     let path = settings_path().ok_or("no engines home")?;
     let mut settings = std::fs::read_to_string(&path)
         .map(|text| parse_settings(&text))
@@ -151,7 +153,9 @@ pub(crate) fn resolve_enabled(settings: &DesktopEngineSettings, state: HelperSta
     let enabled = effective_enabled(settings, state);
     if settings.engines_enabled.is_none() && enabled {
         match save_enabled(true) {
-            Ok(()) => info!("engine lifetime: remembered engines_enabled=true from the helper registration"),
+            Ok(()) => info!(
+                "engine lifetime: remembered engines_enabled=true from the helper registration"
+            ),
             Err(error) => warn!("engine lifetime: could not remember engines_enabled: {error}"),
         }
     }
@@ -172,7 +176,11 @@ pub(crate) enum LaunchPlan {
 /// they are restarted to start from a known state; unregistered ones are registered. `always`:
 /// registered stays as it is. `RequiresApproval` is left alone in both: an unregister and a
 /// register would lose the pending approval, and there is nothing running to reconcile.
-pub(crate) fn launch_plan(enabled: bool, lifetime: EngineLifetime, state: HelperState) -> LaunchPlan {
+pub(crate) fn launch_plan(
+    enabled: bool,
+    lifetime: EngineLifetime,
+    state: HelperState,
+) -> LaunchPlan {
     if !enabled {
         return LaunchPlan::Nothing;
     }
@@ -180,7 +188,9 @@ pub(crate) fn launch_plan(enabled: bool, lifetime: EngineLifetime, state: Helper
         (_, HelperState::Unsupported | HelperState::NotFound | HelperState::RequiresApproval) => {
             LaunchPlan::Nothing
         }
-        (EngineLifetime::WithApp, HelperState::Enabled | HelperState::Partial) => LaunchPlan::Restart,
+        (EngineLifetime::WithApp, HelperState::Enabled | HelperState::Partial) => {
+            LaunchPlan::Restart
+        }
         (EngineLifetime::WithApp, HelperState::NotRegistered) => LaunchPlan::Register,
         (EngineLifetime::Always, HelperState::Enabled) => LaunchPlan::Nothing,
         (EngineLifetime::Always, HelperState::Partial | HelperState::NotRegistered) => {
@@ -190,11 +200,7 @@ pub(crate) fn launch_plan(enabled: bool, lifetime: EngineLifetime, state: Helper
 }
 
 /// Run the plan with the actions injected, so the decision and the call are tested together.
-pub(crate) fn apply_launch_plan(
-    plan: LaunchPlan,
-    register: impl FnOnce(),
-    restart: impl FnOnce(),
-) {
+pub(crate) fn apply_launch_plan(plan: LaunchPlan, register: impl FnOnce(), restart: impl FnOnce()) {
     match plan {
         LaunchPlan::Nothing => {}
         LaunchPlan::Register => register(),
@@ -208,6 +214,7 @@ pub(crate) fn reconcile_at_launch() {
     let spawned = std::thread::Builder::new()
         .name("engine-launch-reconcile".to_string())
         .spawn(|| {
+            engine_helpers::unregister_legacy_helper_once();
             let settings = load();
             let state = engine_helpers::current_state();
             let enabled = resolve_enabled(&settings, state);
@@ -230,7 +237,9 @@ pub(crate) fn reconcile_at_launch() {
 fn log_result(what: &str, status: engine_helpers::EngineHelpersStatus) {
     match serde_json::to_string(&status) {
         Ok(json) => info!("engine helpers {what} at launch: {json}"),
-        Err(error) => warn!("engine helpers {what} at launch: could not encode the status: {error}"),
+        Err(error) => {
+            warn!("engine helpers {what} at launch: could not encode the status: {error}")
+        }
     }
 }
 
@@ -261,9 +270,18 @@ mod tests {
     #[test]
     fn settings_round_trip_through_the_file_text() {
         for settings in [
-            DesktopEngineSettings { engines_enabled: Some(true), lifetime: EngineLifetime::Always },
-            DesktopEngineSettings { engines_enabled: Some(false), lifetime: EngineLifetime::WithApp },
-            DesktopEngineSettings { engines_enabled: None, lifetime: EngineLifetime::Always },
+            DesktopEngineSettings {
+                engines_enabled: Some(true),
+                lifetime: EngineLifetime::Always,
+            },
+            DesktopEngineSettings {
+                engines_enabled: Some(false),
+                lifetime: EngineLifetime::WithApp,
+            },
+            DesktopEngineSettings {
+                engines_enabled: None,
+                lifetime: EngineLifetime::Always,
+            },
         ] {
             assert_eq!(parse_settings(&render_settings(&settings)), settings);
         }
@@ -280,16 +298,28 @@ mod tests {
 
     #[test]
     fn lifetime_words_are_the_ones_the_ui_and_scripts_use() {
-        assert_eq!(EngineLifetime::parse("with_app"), Some(EngineLifetime::WithApp));
-        assert_eq!(EngineLifetime::parse(" always "), Some(EngineLifetime::Always));
+        assert_eq!(
+            EngineLifetime::parse("with_app"),
+            Some(EngineLifetime::WithApp)
+        );
+        assert_eq!(
+            EngineLifetime::parse(" always "),
+            Some(EngineLifetime::Always)
+        );
         assert_eq!(EngineLifetime::parse("WithApp"), None);
-        assert_eq!(serde_json::to_string(&EngineLifetime::WithApp).unwrap(), "\"with_app\"");
+        assert_eq!(
+            serde_json::to_string(&EngineLifetime::WithApp).unwrap(),
+            "\"with_app\""
+        );
         assert_eq!(EngineLifetime::default(), EngineLifetime::WithApp);
     }
 
     #[test]
     fn the_remembered_choice_wins_over_the_registration() {
-        let said = |enabled| DesktopEngineSettings { engines_enabled: Some(enabled), ..Default::default() };
+        let said = |enabled| DesktopEngineSettings {
+            engines_enabled: Some(enabled),
+            ..Default::default()
+        };
         assert!(effective_enabled(&said(true), NotRegistered));
         assert!(!effective_enabled(&said(false), Enabled));
     }
@@ -312,7 +342,14 @@ mod tests {
     #[test]
     fn disabled_engines_are_never_touched_at_launch() {
         for lifetime in [EngineLifetime::WithApp, EngineLifetime::Always] {
-            for state in [Enabled, NotRegistered, Partial, RequiresApproval, NotFound, Unsupported] {
+            for state in [
+                Enabled,
+                NotRegistered,
+                Partial,
+                RequiresApproval,
+                NotFound,
+                Unsupported,
+            ] {
                 assert_eq!(launch_plan(false, lifetime, state), LaunchPlan::Nothing);
             }
         }
@@ -366,7 +403,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join(SETTINGS_FILE);
         write_atomic(&path, &render_settings(&DesktopEngineSettings::default())).unwrap();
-        assert_eq!(parse_settings(&std::fs::read_to_string(&path).unwrap()).lifetime, EngineLifetime::WithApp);
+        assert_eq!(
+            parse_settings(&std::fs::read_to_string(&path).unwrap()).lifetime,
+            EngineLifetime::WithApp
+        );
         let entries: Vec<_> = std::fs::read_dir(path.parent().unwrap()).unwrap().collect();
         assert_eq!(entries.len(), 1, "no temp file is left behind");
     }

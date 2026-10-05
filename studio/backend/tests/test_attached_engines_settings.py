@@ -28,7 +28,6 @@ def stored_settings(monkeypatch):
     for var in (
         settings.ENABLED_ENV_VAR,
         settings.OMLX_URL_ENV_VAR,
-        settings.DS4_URL_ENV_VAR,
         settings.SCAN_DENYLIST_ENV_VAR,
     ):
         monkeypatch.delenv(var, raising = False)
@@ -42,17 +41,14 @@ def test_defaults_are_off_and_loopback():
     assert config == settings.DEFAULT_CONFIG
     assert config.enabled is False
     assert config.omlx_url == "http://127.0.0.1:8843"
-    assert config.ds4_url == "http://127.0.0.1:8001"
-    assert config.scan_denylist == ("~/Homelab/dwarfstar/gguf",)
+    assert config.scan_denylist == ()
     assert config.arbitrate_local_loads is True
-    assert config.prewarm_ds4_on_select is True
 
 
 def test_set_config_round_trips_and_keeps_other_fields(stored_settings):
     config = settings.set_config(enabled = True, omlx_url = "http://localhost:9000/v1/")
     assert config.enabled is True
     assert config.omlx_url == "http://localhost:9000"
-    assert config.ds4_url == "http://127.0.0.1:8001"
     config = settings.set_config(scan_denylist = ["/a", " /b ", "/a", ""])
     assert config.scan_denylist == ("/a", "/b")
     assert config.enabled is True
@@ -63,7 +59,7 @@ def test_set_config_round_trips_and_keeps_other_fields(stored_settings):
 
 def test_none_leaves_stored_value_untouched():
     settings.set_config(enabled = True)
-    assert settings.set_config(enabled = None, prewarm_ds4_on_select = False).enabled is True
+    assert settings.set_config(enabled = None).enabled is True
 
 
 @pytest.mark.parametrize(
@@ -81,8 +77,6 @@ def test_none_leaves_stored_value_untouched():
 def test_non_loopback_or_malformed_url_rejected(url):
     with pytest.raises(ValueError):
         settings.set_config(omlx_url = url)
-    with pytest.raises(ValueError):
-        settings.set_config(ds4_url = url)
 
 
 def test_ipv6_and_127_range_loopback_accepted():
@@ -103,13 +97,11 @@ def test_env_overrides_win_over_stored(monkeypatch):
     settings.set_config(enabled = False, omlx_url = "http://127.0.0.1:1111")
     monkeypatch.setenv(settings.ENABLED_ENV_VAR, "1")
     monkeypatch.setenv(settings.OMLX_URL_ENV_VAR, "http://127.0.0.1:2222/v1")
-    monkeypatch.setenv(settings.DS4_URL_ENV_VAR, "http://localhost:3333")
     monkeypatch.setenv(settings.SCAN_DENYLIST_ENV_VAR, os.pathsep.join(["/x", "/y"]))
     settings._invalidate()
     config = settings.get_config()
     assert config.enabled is True
     assert config.omlx_url == "http://127.0.0.1:2222"
-    assert config.ds4_url == "http://localhost:3333"
     assert config.scan_denylist == ("/x", "/y")
     monkeypatch.setenv(settings.ENABLED_ENV_VAR, "0")
     settings._invalidate()
@@ -146,7 +138,7 @@ def test_reads_are_cached_until_write(stored_settings):
     assert settings.get_config().enabled is False
     stored_settings[settings.ATTACHED_ENGINES_SETTING_KEY] = {"enabled": True}
     assert settings.get_config().enabled is False  # cached
-    settings.set_config(prewarm_ds4_on_select = False)  # write invalidates
+    settings.set_config(scan_denylist = [])  # write invalidates
     assert settings.get_config().enabled is True
 
 
@@ -154,11 +146,11 @@ def test_route_handlers_round_trip():
     response = routes.get_attached_engines_settings(current_subject = "owner")
     assert response.enabled is False
     response = routes.update_attached_engines_settings(
-        routes.AttachedEnginesPayload(enabled = True, ds4_url = "http://127.0.0.1:9001/v1"),
+        routes.AttachedEnginesPayload(enabled = True, omlx_url = "http://127.0.0.1:9001/v1"),
         current_subject = "owner",
     )
     assert response.enabled is True
-    assert response.ds4_url == "http://127.0.0.1:9001"
+    assert response.omlx_url == "http://127.0.0.1:9001"
     assert routes.get_attached_engines_settings(current_subject = "owner").enabled is True
 
 
@@ -180,3 +172,20 @@ def test_routes_registered_under_owner_router():
     }
     assert ("/attached-engines", ("GET",)) in paths
     assert ("/attached-engines", ("PUT",)) in paths
+
+
+def test_legacy_stored_settings_are_ignored_without_losing_omlx(stored_settings, monkeypatch):
+    stored_settings[settings.ATTACHED_ENGINES_SETTING_KEY] = {
+        "enabled": True,
+        "omlx_url": "http://localhost:9000",
+        "ds4_url": {"invalid": "ignored"},
+        "prewarm_ds4_on_select": "obsolete",
+    }
+    monkeypatch.setenv("UNSLOTH_DS4_URL", "http://invalid.example")
+    settings._invalidate()
+    config = settings.get_config()
+    assert config.enabled
+    assert config.omlx_url == "http://localhost:9000"
+    assert config.scan_denylist == ()
+    settings.set_config(arbitrate_local_loads = False)
+    assert settings.get_config().omlx_url == "http://localhost:9000"

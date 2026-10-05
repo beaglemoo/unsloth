@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Resolve engines.toml and exec the oMLX server or the ds4 on-demand launcher.
+"""Resolve engines.toml and exec the oMLX server.
 
-Run by omlx-launch / ds4-ondemand-launch with the interpreter of the matching
-user-side venv under ~/.unsloth/engines. Stdlib only (needs Python 3.11+ for
+Run by omlx-launch with the user-side venv under ~/.unsloth/engines. Stdlib only (needs Python 3.11+ for
 tomllib). The process is replaced via execve, so launchd supervises the real
 server directly.
 
-    engines_launch.py omlx|ds4 [--print]
+    engines_launch.py omlx [--print]
 
 --print shows the resolved argv/env additions instead of exec'ing.
 
@@ -19,7 +18,6 @@ precondition passed. The tray, the engines panel and /api/engines/attached/statu
 Environment:
     UNSLOTH_ENGINES_HOME    default ~/.unsloth/engines
     UNSLOTH_ENGINES_CONFIG  default <home>/engines.toml
-    UNSLOTH_ENGINES_BUNDLE  dir holding ds4/ (default: this script's directory)
     ENGINES_FAIL_NO_SLEEP   1: write the marker but skip the backoff sleep (set by the wrappers
                             on a terminal, and by tests)
 """
@@ -160,60 +158,17 @@ def omlx(cfg: dict) -> tuple[list[str], dict[str, str], str | None]:
     return argv, env, None
 
 
-def ds4(cfg: dict) -> tuple[list[str], dict[str, str], str | None]:
-    section = cfg.get("ds4", {})
-    python = HOME / "ds4-ondemand" / "bin" / "python"
-    if not python.exists():
-        die(f"ds4-ondemand venv missing: {python} (run studio/scripts/build-engines-mac.sh)")
-    script = HERE / "ds4" / "ds4_ondemand.py"
-    if not script.exists():
-        die(f"launcher not found: {script}")
-    workdir = Path(expand(section.get("workdir") or HERE / "ds4"))
-    binary = Path(expand(section.get("binary") or HERE / "ds4" / "ds4-server"))
-    log_dir = Path(expand(section.get("log_dir") or DEFAULT_LOG_DIR))
-    model = expand(section.get("model", "~/Homelab/dwarfstar/ds4flash.gguf"))
-    if _failing_engine and not os.path.exists(model):
-        die(f"model file missing: {model}")
-    launcher_port = int(section.get("launcher_port", 8001))
-    server_port = int(section.get("server_port", 8000))
-    require_free_port(launcher_port, "ds4 launcher", section.get("host"))
-    require_free_port(server_port, "ds4-server")
-    env = base_env()
-    env.update(
-        {
-            "DS4_ONDEMAND_HOST": str(section.get("host", "127.0.0.1")),
-            "DS4_ONDEMAND_PORT": str(launcher_port),
-            "DS4_SERVER_PORT": str(server_port),
-            "DS4_BINARY": str(binary),
-            "DS4_WORKDIR": str(workdir),
-            "DS4_LOG_DIR": str(log_dir),
-            "DS4_MODEL_FILE": model,
-            "DS4_CTX": str(int(section.get("ctx", 131072))),
-            "DS4_PREFILL_CHUNK": str(int(section.get("prefill_chunk", 1024))),
-            "DS4_START_TIMEOUT": str(section.get("start_timeout", 120)),
-            "DS4_IDLE_SECONDS": str(section.get("idle_seconds", 300)),
-            "OMLX_BASE_URL": str(section.get("omlx_url", "http://127.0.0.1:8843")),
-        }
-    )
-    if section.get("alias"):
-        env["DS4_MODEL_ALIAS"] = str(section["alias"])
-    if section.get("vision"):
-        env["DS4_VISION_FILE"] = expand(section["vision"])
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return [str(python), str(script)], env, str(workdir)
-
-
 def main(argv: list[str]) -> None:
     args = [a for a in argv[1:] if a != "--print"]
-    if len(args) != 1 or args[0] not in ("omlx", "ds4"):
-        die("usage: engines_launch.py omlx|ds4 [--print]")
+    if len(args) != 1 or args[0] != "omlx":
+        die("usage: engines_launch.py omlx [--print]")
     global _failing_engine
     if "--print" not in argv:
         _failing_engine = args[0]
     cfg = load_config()
-    command, env, cwd = (omlx if args[0] == "omlx" else ds4)(cfg)
+    command, env, cwd = omlx(cfg)
     if "--print" in argv:
-        shown = {k: v for k, v in env.items() if k.startswith(("OMLX_", "DS4_", "Malloc"))}
+        shown = {k: v for k, v in env.items() if k.startswith(("OMLX_", "Malloc"))}
         print(json.dumps({"argv": command, "cwd": cwd, "env": shown}, indent=2))
         return
     clear_failure(args[0])

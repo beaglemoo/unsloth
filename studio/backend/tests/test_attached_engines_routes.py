@@ -23,8 +23,7 @@ if str(_BACKEND) not in sys.path:
 import routes.attached_engines as routes  # noqa: E402
 from auth import policy  # noqa: E402
 from auth.authentication import get_current_subject  # noqa: E402
-from core.inference.attached import ATTACHED_DS4_ID, ATTACHED_OMLX_ID, arbiter  # noqa: E402
-from core.inference.attached.ds4_client import Ds4Client  # noqa: E402
+from core.inference.attached import ATTACHED_OMLX_ID, arbiter  # noqa: E402
 from core.inference.attached.omlx_client import OmlxClient  # noqa: E402
 from routes.provider_credentials import provider_config_guard  # noqa: E402
 from storage import providers_db  # noqa: E402
@@ -50,13 +49,10 @@ def _row(model_id, path, **over):
 
 
 class Fake:
-    """Both engines behind MockTransports."""
+    """oMLX behind a MockTransport."""
 
     def __init__(self):
         self.omlx_up = True
-        self.ds4_up = True
-        self.ds4_loaded = False
-        self.ds4_pid = None
         self.calls: list[str] = []
         self.chat_ids = [
             "swift-1.5-27b",
@@ -68,13 +64,6 @@ class Fake:
         self.models_fail = False
         self.ctx_setting = 131072
         self.native = 262144
-        self.ds4_cfg = {
-            "ctx": 100000,
-            "ctx_active": 100000,
-            "ctx_min": 4096,
-            "ctx_max": 393216,
-            "pending_restart": False,
-        }
 
     def omlx(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(f"omlx {request.method} {request.url.raw_path.decode()}")
@@ -138,53 +127,13 @@ class Fake:
             return httpx.Response(200, json = {"data": [{"id": i} for i in ids]})
         return httpx.Response(404)
 
-    def ds4(self, request: httpx.Request) -> httpx.Response:
-        self.calls.append(f"ds4 {request.method} {request.url.path}")
-        if not self.ds4_up:
-            raise httpx.ConnectError("refused", request = request)
-        if request.url.path == "/admin/config":
-            if request.method == "POST":
-                self.ds4_post = json.loads(request.content)
-                self.ds4_cfg["ctx"] = self.ds4_post["ctx"]
-                return httpx.Response(200, json = {**self.ds4_cfg, "applied": "next_start"})
-            return httpx.Response(200, json = self.ds4_cfg)
-        if request.url.path == "/admin/hold":
-            return httpx.Response(200, json = {"hold_id": "test-hold"})
-        if request.method == "DELETE" and request.url.path.startswith("/admin/hold/"):
-            return httpx.Response(200, json = {})
-        if request.url.path == "/admin/start":
-            self.ds4_loaded, self.ds4_pid = True, 7
-            return httpx.Response(200, json = {"status": "ok"})
-        if request.url.path == "/admin/stop":
-            self.ds4_loaded, self.ds4_pid = False, None
-            return httpx.Response(200, json = {"status": "ok"})
-        if request.url.path == "/v1/models":
-            if self.models_fail:
-                return httpx.Response(200, content = b"garbage")
-            return httpx.Response(
-                200,
-                json = {"data": [{"id": "qwen3.8-flash-next"}, {"id": "qwen3.8-flash-next-chat"}]},
-            )
-        return httpx.Response(
-            200,
-            json = {
-                "loaded": self.ds4_loaded,
-                "pid": self.ds4_pid,
-                "in_flight": 0,
-                "stats": {"live": None, "last": None, "totals": {}},
-                "config": {"ds4_start_timeout": 120.0},
-            },
-        )
-
 
 def _config(**over) -> AttachedEnginesConfig:
     base = dict(
         enabled = True,
         omlx_url = "http://127.0.0.1:8843",
-        ds4_url = "http://127.0.0.1:8001",
         scan_denylist = (),
         arbitrate_local_loads = True,
-        prewarm_ds4_on_select = True,
     )
     base.update(over)
     return AttachedEnginesConfig(**base)
@@ -202,11 +151,6 @@ def fake(monkeypatch, tmp_path):
             module,
             "OmlxClient",
             lambda url: OmlxClient(url, transport = httpx.MockTransport(state.omlx)),
-        )
-        monkeypatch.setattr(
-            module,
-            "Ds4Client",
-            lambda url: Ds4Client(url, transport = httpx.MockTransport(state.ds4)),
         )
     monkeypatch.setattr(providers_db, "studio_db_path", lambda: tmp_path / "studio.db")
     providers_db.reset_schema_state_for_tests()
@@ -239,12 +183,8 @@ def test_every_route_but_sync_is_404_when_flag_off(client, fake):
         ("post", "/omlx/load", {"model_id": "x"}),
         ("post", "/omlx/unload", {"model_id": "x"}),
         ("post", "/omlx/unload-all", None),
-        ("post", "/ds4/start", None),
-        ("post", "/ds4/stop", None),
         ("post", "/omlx/context/get", {"model_id": "x"}),
         ("post", "/omlx/context", {"model_id": "x", "max_context_window": 8192}),
-        ("get", "/ds4/context", None),
-        ("post", "/ds4/context", {"ctx": 8192}),
         ("post", "/prepare", {"provider": "omlx"}),
     ):
         response = client.request(method.upper(), f"/api/engines/attached{path}", json = body)
@@ -270,14 +210,13 @@ def test_routes_require_owner_and_authentication(fake):
     assert fake.calls == []
 
 
-def test_status_reports_both_engines_hash_and_notices(client, fake):
-    arbiter._record("training", ["Stopped DwarfStar"], 1)
+def test_status_reports_omlx_hash_and_notices(client, fake):
+    arbiter._record("training", ["Unloaded oMLX"])
     body = client.get("/api/engines/attached/status").json()
     assert body["enabled"] is True
     assert body["omlx"]["reachable"] is True
     assert body["omlx"]["memory_bytes"] == 5 and body["omlx"]["ceiling_bytes"] == 50
     assert body["omlx"]["chat_model_ids"] == fake.chat_ids
-    assert body["ds4"]["reachable"] is True and body["ds4"]["loaded"] is False
     assert len(body["models_hash"]) == 16
     assert [n["reason"] for n in body["notices"]] == ["training"]
     later = client.get("/api/engines/attached/status", params = {"since": time.time() + 5}).json()
@@ -287,25 +226,19 @@ def test_status_reports_both_engines_hash_and_notices(client, fake):
 
 
 def test_status_with_engines_down_never_errors(client, fake):
-    fake.omlx_up = fake.ds4_up = False
+    fake.omlx_up = False
     body = client.get("/api/engines/attached/status").json()
     assert body["omlx"]["reachable"] is False and body["omlx"]["chat_model_ids"] == []
-    assert body["ds4"]["reachable"] is False
 
 
 def test_sync_seeds_rows_with_live_models(client, fake):
     response = client.post("/api/engines/attached/sync")
     assert response.status_code == 200
-    assert response.json()["rows"] == {"omlx": "created", "dwarfstar": "created"}
     omlx = providers_db.get_provider(ATTACHED_OMLX_ID)
-    ds4 = providers_db.get_provider(ATTACHED_DS4_ID)
     assert omlx["provider_type"] == "omlx"
     assert omlx["base_url"] == "http://127.0.0.1:8843/v1"
     assert omlx["models"] == fake.chat_ids
     assert EMBED not in omlx["available_models"]
-    assert ds4["provider_type"] == "dwarfstar"
-    assert ds4["base_url"] == "http://127.0.0.1:8001/v1"
-    assert ds4["models"] == ["qwen3.8-flash-next", "qwen3.8-flash-next-chat"]
     assert omlx["is_enabled"] == 1
 
 
@@ -389,25 +322,9 @@ def test_sync_deletes_rows_when_flag_off(client, fake):
     fake.config["value"] = _config(enabled = False)
     calls_before = len(fake.calls)
     response = client.post("/api/engines/attached/sync")
-    assert response.json() == {"enabled": False, "deleted": [ATTACHED_OMLX_ID, ATTACHED_DS4_ID]}
     assert providers_db.get_provider(ATTACHED_OMLX_ID) is None
-    assert providers_db.get_provider(ATTACHED_DS4_ID) is None
     assert providers_db.get_provider("userrow") is not None
     assert len(fake.calls) == calls_before
-
-
-def test_omlx_load_resolves_profile_id_to_directory_and_stops_ds4_first(client, fake):
-    fake.ds4_loaded, fake.ds4_pid = True, 7
-    response = client.post(
-        "/api/engines/attached/omlx/load", json = {"model_id": "swift-1.5-27b:fast"}
-    )
-    assert response.status_code == 200
-    assert response.json()["loaded"] == SWIFT_DIR
-    assert response.json()["actions"] == ["Stopped DwarfStar"]
-    stop = fake.calls.index("ds4 POST /admin/stop")
-    load = fake.calls.index(f"omlx POST /admin/api/models/{SWIFT_DIR}/load")
-    assert stop < load
-    assert SWIFT_DIR in fake.loaded
 
 
 def test_omlx_load_unknown_model_and_failures(client, fake):
@@ -447,46 +364,6 @@ def test_ids_with_colons_only_ever_travel_in_bodies(client, fake):
     )
 
 
-def test_ds4_start_is_a_background_task(client, fake):
-    response = client.post("/api/engines/attached/ds4/start")
-    assert response.json() == {"starting": True, "loaded": False, "reachable": True}
-    assert _wait_for(lambda: "ds4 POST /admin/start" in fake.calls)
-    again = client.post("/api/engines/attached/ds4/start").json()
-    assert again["loaded"] is True or again["starting"] is True
-    assert fake.calls.count("ds4 POST /admin/start") == 1
-
-
-def test_ds4_start_when_unreachable_does_not_spawn(client, fake):
-    fake.ds4_up = False
-    assert client.post("/api/engines/attached/ds4/start").json()["reachable"] is False
-
-
-def test_ds4_stop(client, fake):
-    fake.ds4_loaded, fake.ds4_pid = True, 7
-    body = client.post("/api/engines/attached/ds4/stop").json()
-    assert body["loaded"] is False and body["reachable"] is True
-
-
-def test_prepare_omlx_stops_ds4(client, fake):
-    fake.ds4_loaded, fake.ds4_pid = True, 7
-    body = client.post("/api/engines/attached/prepare", json = {"provider": "omlx"}).json()
-    assert body["actions"] == ["Stopped DwarfStar"]
-    assert fake.ds4_loaded is False
-
-
-def test_prepare_dwarfstar_prewarms_only_when_enabled(client, fake):
-    body = client.post("/api/engines/attached/prepare", json = {"provider": "dwarfstar"}).json()
-    assert body["prewarm"] is True and body["starting"] is True
-    assert _wait_for(lambda: "ds4 POST /admin/start" in fake.calls)
-
-    fake.ds4_loaded, fake.ds4_pid = False, None
-    fake.calls.clear()
-    fake.config["value"] = _config(prewarm_ds4_on_select = False)
-    body = client.post("/api/engines/attached/prepare", json = {"provider": "dwarfstar"}).json()
-    assert body == {"provider": "dwarfstar", "starting": False, "prewarm": False}
-    assert fake.calls == []
-
-
 def test_prepare_rejects_unknown_provider(client):
     assert (
         client.post("/api/engines/attached/prepare", json = {"provider": "ollama"}).status_code == 422
@@ -504,14 +381,12 @@ def test_sync_preserves_saved_models_when_a_catalog_fetch_fails(client, fake):
     client.post("/api/engines/attached/sync")
     providers_db.update_provider(ATTACHED_OMLX_ID, models = ["swift-1.5-27b"])
     before_omlx = providers_db.get_provider(ATTACHED_OMLX_ID)
-    before_ds4 = providers_db.get_provider(ATTACHED_DS4_ID)
-    fake.models_fail = True  # both engines answer status, but not their model listing
+    fake.models_fail = True
     body = client.post("/api/engines/attached/sync").json()
-    assert body["rows"] == {"omlx": "kept_models", "dwarfstar": "kept_models"}
-    for row_id, before in ((ATTACHED_OMLX_ID, before_omlx), (ATTACHED_DS4_ID, before_ds4)):
-        after = providers_db.get_provider(row_id)
-        assert after["models"] == before["models"]
-        assert after["available_models"] == before["available_models"]
+    assert body["rows"] == {"omlx": "kept_models"}
+    after = providers_db.get_provider(ATTACHED_OMLX_ID)
+    assert after["models"] == before_omlx["models"]
+    assert after["available_models"] == before_omlx["available_models"]
     assert providers_db.get_provider(ATTACHED_OMLX_ID)["models"] == ["swift-1.5-27b"]
 
 
@@ -537,7 +412,6 @@ def test_status_exposes_engine_failure_when_the_reader_is_available(client, monk
     body = client.get("/api/engines/attached/status").json()
 
     assert body["omlx"]["failure"] == {"reason": "omlx failed"}
-    assert body["ds4"]["failure"] == {"reason": "ds4 failed"}
 
 
 def test_omlx_context_get_resolves_alias_and_reports_all_three_values(client, fake):
@@ -589,18 +463,28 @@ def test_omlx_context_unknown_model_and_engine_down(client, fake):
     assert client.post(url, json = {"model_id": "swift-1.5-27b"}).status_code == 502
 
 
-def test_ds4_context_get_and_set_proxy_the_launcher(client, fake):
-    got = client.get("/api/engines/attached/ds4/context").json()
-    assert got["ctx_max"] == 393216 and got["pending_restart"] is False
-    done = client.post("/api/engines/attached/ds4/context", json = {"ctx": 200000}).json()
-    assert fake.ds4_post == {"ctx": 200000}
-    assert done["applied"] == "next_start" and done["ctx"] == 200000
+@pytest.mark.parametrize("enabled", [True, False])
+def test_sync_deletes_legacy_row_idempotently_and_keeps_user_rows(client, fake, enabled):
+    legacy_id = "attachedds400001"
+    providers_db.create_provider(
+        id = legacy_id, provider_type = "dwarfstar", display_name = "Legacy", base_url = "http://localhost/v1"
+    )
+    providers_db.create_provider(
+        id = "userrow", provider_type = "custom", display_name = "Mine", base_url = "http://localhost/v1"
+    )
+    fake.config["value"] = _config(enabled = enabled)
+    for _ in range(2):
+        assert client.post("/api/engines/attached/sync").status_code == 200
+        assert providers_db.get_provider(legacy_id) is None
+        assert providers_db.get_provider("userrow") is not None
+    assert (providers_db.get_provider(ATTACHED_OMLX_ID) is not None) == enabled
 
 
-def test_ds4_context_rejects_out_of_range_and_reports_old_launcher(client, fake):
-    url = "/api/engines/attached/ds4/context"
-    assert client.post(url, json = {"ctx": 500000}).status_code == 422
-    assert client.post(url, json = {"ctx": 10}).status_code == 422
-    assert not hasattr(fake, "ds4_post")
-    fake.ds4_up = False
-    assert client.get(url).status_code == 502
+def test_legacy_provider_type_can_be_listed_before_sync(fake, monkeypatch):
+    from routes import providers
+    legacy_id = "attachedds400001"
+    providers_db.create_provider(
+        id = legacy_id, provider_type = "dwarfstar", display_name = "Legacy", base_url = "http://localhost/v1"
+    )
+    monkeypatch.setattr(providers.credential_secrets, "has_secret", lambda *args: False)
+    assert providers._provider_response(providers_db.get_provider(legacy_id)).display_name == "Legacy"

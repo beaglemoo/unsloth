@@ -8,38 +8,22 @@ import { toast } from "@/lib/toast";
 import { SettingsRow } from "@/features/settings/components/settings-row";
 import { SettingsSection } from "@/features/settings/components/settings-section";
 import { useState } from "react";
-import {
-  loadOmlxModel,
-  startDs4,
-  stopDs4,
-  unloadAllOmlxModels,
-  unloadOmlxModel,
-} from "./api";
+import { loadOmlxModel, unloadAllOmlxModels, unloadOmlxModel } from "./api";
 import {
   selectAttachedEnabled,
   useAttachedEnginesStore,
 } from "./attached-engines-store";
 import { formatCountdown, remainingNow } from "./attached-active";
 import { failureMessage } from "./failure";
-import { formatTps, formatTtft } from "./format";
 import {
   groupOmlxModels,
   loadableGroups,
   residentGroups,
   type OmlxModelGroup,
 } from "./omlx-groups";
-import type { AttachedDs4Status, AttachedOmlxStatus } from "./types";
+import type { AttachedOmlxStatus } from "./types";
 import { useNow } from "./use-active-attached";
 import { refreshAttachedStatus } from "./use-attached-engines";
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col">
-      <span className="text-ui-10 text-muted-foreground">{label}</span>
-      <span className="font-mono text-xs tabular-nums">{value}</span>
-    </div>
-  );
-}
 
 function groupLabel(group: OmlxModelGroup): string {
   const tags = [
@@ -188,83 +172,7 @@ function OmlxBlock({
   );
 }
 
-function ds4State(status: AttachedDs4Status | null): string {
-  if (!status?.reachable) return "Offline";
-  if (status.starting) return "Starting";
-  return status.loaded ? "Loaded" : "Idle";
-}
-
-function ds4Description(
-  status: AttachedDs4Status,
-  receivedAt: number | undefined,
-  now: number,
-): string {
-  const state = ds4State(status);
-  if (!status.loaded) return `${state}.`;
-  if (status.inFlight > 0) return `${state}. In use, idle timer paused.`;
-  const timer = unloadsIn(status.idleRemainingS, receivedAt, now);
-  return timer ? `${state}, ${timer}.` : `${state}.`;
-}
-
-function Ds4Block({
-  status,
-  receivedAt,
-  now,
-  busy,
-  run,
-}: {
-  receivedAt: number | undefined;
-  now: number;
-  status: AttachedDs4Status | null;
-  busy: string | null;
-  run: (key: string, action: () => Promise<void>, failure: string) => void;
-}) {
-  const reachable = status?.reachable === true;
-  const running = status?.loaded === true || status?.starting === true;
-  return (
-    <SettingsRow
-      label="DwarfStar"
-      description={
-        status && reachable
-          ? ds4Description(status, receivedAt, now)
-          : status?.failure
-            ? failureMessage("DwarfStar", status.failure)
-            : "Not reachable. Check that the DwarfStar launcher is running and the URL is right."
-      }
-    >
-      <div className="flex items-center gap-4">
-        {reachable ? (
-          <>
-            <Stat label="Live" value={formatTps(status?.liveTps ?? null)} />
-            <Stat label="Last" value={formatTps(status?.lastGenTps ?? null)} />
-            <Stat label="TTFT" value={formatTtft(status?.lastTtftMs ?? null)} />
-            <Stat label="In flight" value={String(status?.inFlight ?? 0)} />
-          </>
-        ) : null}
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy !== null || !reachable || running}
-            onClick={() => run("ds4-start", startDs4, "Could not start DwarfStar")}
-          >
-            {busy === "ds4-start" ? "Starting" : "Start"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={busy !== null || !reachable || !running}
-            onClick={() => run("ds4-stop", stopDs4, "Could not stop DwarfStar")}
-          >
-            {busy === "ds4-stop" ? "Stopping" : "Stop"}
-          </Button>
-        </div>
-      </div>
-    </SettingsRow>
-  );
-}
-
-/** Live oMLX and DwarfStar state with the controls Studio has over them. Owner-only; hidden while the flag is off. */
+/** Live oMLX state with the controls Studio has over it. Owner-only; hidden while the flag is off. */
 export function AttachedEnginesPanel() {
   const enabled = useAttachedEnginesStore(selectAttachedEnabled);
   const status = useAttachedEnginesStore((s) => s.status);
@@ -290,7 +198,7 @@ export function AttachedEnginesPanel() {
   return (
     <SettingsSection
       title="Engines"
-      description="Live state of the attached oMLX and DwarfStar engines."
+      description="Live state of the attached oMLX engine."
     >
       {status === null ? (
         <SettingsRow label="Engines" description="Checking engine status." />
@@ -298,13 +206,6 @@ export function AttachedEnginesPanel() {
         <>
           <OmlxBlock
             status={status.omlx}
-            receivedAt={status.receivedAt}
-            now={now}
-            busy={busy}
-            run={run}
-          />
-          <Ds4Block
-            status={status.ds4}
             receivedAt={status.receivedAt}
             now={now}
             busy={busy}

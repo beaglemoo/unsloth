@@ -92,11 +92,11 @@ test("the trade-off names the clients that lose local models while Unsloth is cl
 });
 
 test("the Engines enabled description matches the mode", () => {
-  assert.match(enginesEnabledDescription("with_app"), /stop when it quits/);
-  assert.doesNotMatch(enginesEnabledDescription("with_app"), /keep serving/);
+  assert.match(enginesEnabledDescription("with_app"), /stops when it quits/);
+  assert.doesNotMatch(enginesEnabledDescription("with_app"), /keeps serving/);
   assert.match(
     enginesEnabledDescription("always"),
-    /keep serving after Unsloth quits/,
+    /keeps serving after Unsloth quits/,
   );
 });
 
