@@ -17,20 +17,18 @@ const src = (path: string) =>
   readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
 
 const omlx = { id: "attachedomlx0001", providerType: "omlx", models: ["a", "b", "c"] };
-const ds4 = { id: "attachedds400001", providerType: "dwarfstar", models: ["d"] };
 const openai = { id: "p1", providerType: "openai", models: ["gpt-x", "gpt-y"] };
 const custom = { id: "p2", providerType: "custom", models: ["m"] };
 
 test("attached rows are recognised by type or by their seeded id", () => {
   assert.equal(isAttachedConnection(omlx), true);
-  assert.equal(isAttachedConnection(ds4), true);
   assert.equal(isAttachedConnection({ id: "attachedomlx0001", providerType: "custom" }), true);
   assert.equal(isAttachedConnection(openai), false);
   assert.equal(isAttachedConnection(custom), false);
 });
 
 test("the Connections list drops attached rows and their models from the counts", () => {
-  const view = connectionsListView([omlx, openai, ds4, custom]);
+  const view = connectionsListView([omlx, openai, custom]);
   assert.deepEqual(
     view.visible.map((p) => p.id),
     ["p1", "p2"],
@@ -49,7 +47,7 @@ test("without attached rows nothing is hidden and no pointer is shown", () => {
 });
 
 test("only attached rows leaves an empty list with the pointer", () => {
-  const view = connectionsListView([omlx, ds4]);
+  const view = connectionsListView([omlx]);
   assert.equal(view.visible.length, 0);
   assert.equal(view.connectionCount, 0);
   assert.equal(view.modelCount, 0);
@@ -57,24 +55,23 @@ test("only attached rows leaves an empty list with the pointer", () => {
 });
 
 test("the input array is not mutated, so the picker keeps its attached rows", () => {
-  const all = [omlx, openai, ds4];
+  const all = [omlx, openai];
   connectionsListView(all);
-  assert.equal(all.length, 3);
+  assert.equal(all.length, 2);
 });
 
 test("a request to configure an attached connection lands on Attached engines", () => {
-  const all = [omlx, openai, ds4];
+  const all = [omlx, openai];
   assert.equal(settingsTabForConnection(all, "attachedomlx0001"), "attached-engines");
-  assert.equal(settingsTabForConnection(all, "attachedds400001"), "attached-engines");
   assert.equal(settingsTabForConnection(all, "p1"), "connections");
   assert.equal(settingsTabForConnection([], "attachedomlx0001"), "attached-engines");
   assert.equal(settingsTabForConnection(all, "unknown"), "connections");
 });
 
-test("the notice wording names both engines and the tab", () => {
+test("the notice wording names the engine and the tab", () => {
   assert.equal(
     `${ATTACHED_CONNECTIONS_NOTICE} ${ATTACHED_CONNECTIONS_LINK}`,
-    "oMLX and DwarfStar are managed in Attached engines",
+    "oMLX is managed in Attached engines",
   );
 });
 

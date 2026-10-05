@@ -1,11 +1,11 @@
 #!/bin/bash
-# Build (and later install) the fork's Unsloth.app with the bundled oMLX and ds4 engines.
+# Build (and later install) the fork's Unsloth.app with the bundled oMLX engine.
 #
 #   build-fork-mac.sh [--build] [--dry-run] [--adhoc]     default phase
 #   build-fork-mac.sh --install [--dry-run]               explicit, separate phase
 #
 # build phase (touches neither /Applications, ~/.unsloth/studio nor any running app):
-#   1. build-engines-mac.sh (ds4 build, engine venvs, engines.toml)
+#   1. build-engines-mac.sh (engine venv and engines.toml)
 #   2. UNSLOTH_DESKTOP_BACKEND_VERSION from unsloth/_version.py in THIS repo; it must be
 #      numeric and >= 2026.8.4 (never read from the installed ~/.unsloth/studio)
 #   3. frontend build
@@ -17,7 +17,7 @@
 #   1. quit Unsloth (never killed; aborts if it does not exit within 120 s, QUIT_WAIT) and stop a
 #      surviving :8888 backend; the engines must be idle (nothing generating, loading or starting).
 #      With the engine lifetime on with_app (the default) the app's own quit first unloads the
-#      oMLX models, stops ds4 (waiting up to 30 s for a reply in flight) and unregisters the
+#      oMLX models and unregisters the
 #      helpers, so the quit can take up to about a minute
 #   2. build the fork wheel into a scratch dir first (uv build, else pip wheel) as a fail-fast
 #      gate: nothing is touched when the checkout does not build
@@ -32,7 +32,7 @@
 #   6. back up /Applications/Unsloth.app to ~/Applications/Unsloth-upstream-0.1.815.app.bak (once;
 #      copied to a .partial name and renamed, so an interrupted copy is never taken for a backup)
 #   7. ditto the built app to /Applications/Unsloth.app.new and codesign-verify it, then unload
-#      oMLX models, stop ds4, take the helpers out of launchd (the helpers exec from inside the
+#      oMLX models, take the helper out of launchd (the helper execs from inside the
 #      bundle: `unsloth-studio --engine-helpers unregister` of the installed app, or launchctl
 #      bootout for an app from before that CLI), move the old app to
 #      ~/Applications/Unsloth-prev.app.bak, move the new one into place and register the helpers
@@ -148,6 +148,9 @@ phase_build() {
   run npm run build --prefix "$STUDIO/frontend"
 
   log "4/5 tauri build"
+  # Tauri copies resources beside the release executable without pruning old entries.
+  # Recreate that generated engine resource directory so retired resources cannot linger.
+  run rm -rf "$STUDIO/src-tauri/target/release/engines"
   [ -x "$STUDIO/node_modules/.bin/tauri" ] || run npm ci --prefix "$STUDIO"
   local identity="$SIGNING_IDENTITY"
   [ "$ADHOC" = 1 ] && identity="-"
@@ -189,7 +192,7 @@ quit_unsloth() {
     run osascript -e "tell application id \"$APP_BUNDLE_ID\" to quit"
     if [ "$DRY" = 0 ]; then
       local i
-      # A with_app quit first unloads the oMLX models and stops ds4 (up to 45 s), then reaps the backend.
+      # A with_app quit first unloads the oMLX models, then reaps the backend.
       for i in $(seq 1 "${QUIT_WAIT:-120}"); do app_running || break; sleep 1; done
       app_running && die "Unsloth did not quit within ${QUIT_WAIT:-120} s; not forcing it"
     fi
@@ -403,9 +406,11 @@ install_app() {
   run ditto "$DIST_APP" "$staged"
   run codesign --verify --deep --strict --verbose=2 "$staged"
 
-  log "unload oMLX models and stop ds4, then boot the helpers out of launchd"
+  log "unload oMLX models, then boot the helper out of launchd"
   engines_quiesce
-  helpers_stop
+  # The old bundle still contains the legacy SMAppService plist. Its CLI must unregister it
+  # before this swap: a new bundle cannot address a plist it no longer contains.
+  HELPER_APP="$INSTALLED_APP" helpers_stop
   wait_ports_free
 
   if [ -e "$INSTALLED_APP" ]; then

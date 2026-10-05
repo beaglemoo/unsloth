@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-// The attached engines (oMLX, DwarfStar) are seeded connection rows, but they are managed on the
+// The attached engine (oMLX) is a seeded connection row, managed on the
 // Attached engines settings tab. Settings > Connections hides them; the model picker keeps them.
 
 import { attachedProviderKind } from "./external-providers.ts";
@@ -13,7 +13,7 @@ type ConnectionLike = {
 };
 
 export const ATTACHED_CONNECTIONS_NOTICE =
-  "oMLX and DwarfStar are managed in";
+  "oMLX is managed in";
 export const ATTACHED_CONNECTIONS_LINK = "Attached engines";
 
 export function isAttachedConnection(

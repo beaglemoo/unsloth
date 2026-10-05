@@ -42,7 +42,7 @@ from models.providers import (
 )
 
 # custom endpoints are treated as local because skipping their chat template can forge a turn (#7066).
-_TEMPLATE_APPLYING_PROVIDERS = frozenset({"vllm", "llama_cpp", "ollama", "custom", "lemonade", "omlx", "dwarfstar"})
+_TEMPLATE_APPLYING_PROVIDERS = frozenset({"vllm", "llama_cpp", "ollama", "custom", "lemonade", "omlx"})
 
 # only vLLM and llama.cpp document both continuation flags on /v1/chat/completions.
 _CONTINUATION_FLAG_PROVIDERS = frozenset({"vllm", "llama_cpp"})
@@ -61,7 +61,6 @@ _USAGE_STREAM_OPTION_PROVIDERS = frozenset(
         "xai",
         "azure",
         "omlx",
-        "dwarfstar",
     }
 )
 

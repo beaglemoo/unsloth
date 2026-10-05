@@ -11,7 +11,7 @@ import { engineContextTargets } from "./engine-context-targets";
 
 /**
  * Context length for every attached model in one place: the same control the chat settings show
- * for the selected model, once per oMLX chat model and once for DwarfStar. Owner-only; hidden
+ * for the selected model, once per oMLX chat model. Owner-only; hidden
  * while the flag is off. Each control renders nothing while its engine cannot be read.
  */
 export function AttachedEnginesContextSection() {
@@ -23,7 +23,7 @@ export function AttachedEnginesContextSection() {
   return (
     <SettingsSection
       title="Context length"
-      description="The prompt cap for each oMLX model and the single context length DwarfStar runs with. Changes wait for Apply."
+      description="The prompt cap for each oMLX model. Changes wait for Apply."
     >
       <div className="flex flex-col gap-4 py-3">
         {targets.map((target) => (

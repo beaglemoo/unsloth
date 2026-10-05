@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""The oMLX and DwarfStar registry entries: hidden, loopback, and wired to the right body shape."""
+"""The oMLX and legacy engine registry entries: hidden, loopback, and wired to the right body shape."""
 
 from __future__ import annotations
 
@@ -65,12 +65,9 @@ def _stream(provider_type: str, base_url: str, model: str, **kwargs):
 
 def test_registry_entries_are_hidden_loopback_and_not_managed():
     omlx = providers_mod.get_provider_info("omlx")
-    ds4 = providers_mod.get_provider_info("dwarfstar")
     assert omlx["display_name"] == "oMLX"
     assert omlx["base_url"] == "http://127.0.0.1:8843/v1"
-    assert ds4["display_name"] == "DwarfStar"
-    assert ds4["base_url"] == "http://127.0.0.1:8001/v1"
-    for info in (omlx, ds4):
+    for info in (omlx,):
         assert info["hidden"] is True
         assert not info.get("managed")
         assert (
@@ -78,11 +75,10 @@ def test_registry_entries_are_hidden_loopback_and_not_managed():
         )
     assert omlx["supports_chat_template_kwargs"] is True
     assert providers_mod.get_connectable_provider_info("omlx") is omlx
-    assert providers_mod.get_connectable_provider_info("dwarfstar") is ds4
 
 
 def test_both_are_template_applying_and_request_usage():
-    for provider_type in ("omlx", "dwarfstar"):
+    for provider_type in ("omlx",):
         assert provider_type in ep_mod._TEMPLATE_APPLYING_PROVIDERS
         assert provider_type in ep_mod._USAGE_STREAM_OPTION_PROVIDERS
 
@@ -107,36 +103,11 @@ def test_omlx_streams_reasoning_and_carries_sampling():
     assert "answer" in joined
 
 
-def test_dwarfstar_bodies_carry_no_sampling_keys():
-    captured, lines = _stream(
-        "dwarfstar",
-        "http://127.0.0.1:8001/v1",
-        "qwen3.8-flash-next-reasoner",
-        temperature = 0.6,
-        top_p = 0.9,
-        top_k = 40,
-        min_p = 0.05,
-        repetition_penalty = 1.1,
-        presence_penalty = 1.5,
-        max_tokens = 256,
-    )
-    body = captured["body"]
-    for key in SAMPLING_KEYS:
-        assert key not in body, key
-    assert body["model"] == "qwen3.8-flash-next-reasoner"
-    assert body["max_tokens"] == 256
-    assert body["stream_options"] == {"include_usage": True}
-    assert any("reasoning_content" in line for line in lines)
 
 
-def test_dwarfstar_defaults_also_omit_sampling_keys():
-    """The route layer always fills temperature/top_p/presence_penalty defaults."""
-    captured, _ = _stream("dwarfstar", "http://127.0.0.1:8001/v1", "qwen3.8-flash-next")
-    for key in SAMPLING_KEYS:
-        assert key not in captured["body"], key
 
 
-@pytest.mark.parametrize("provider_type", ["omlx", "dwarfstar"])
+@pytest.mark.parametrize("provider_type", ["omlx", "legacy"])
 def test_colon_and_slash_free_model_ids_pass_through_verbatim(provider_type):
     captured, _ = _stream(provider_type, "http://127.0.0.1:8843/v1", "swift-1.5-27b:medium")
     assert captured["body"]["model"] == "swift-1.5-27b:medium"
