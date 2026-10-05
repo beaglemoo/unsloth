@@ -47,7 +47,7 @@ const ERROR_CLASS =
   "max-w-[calc(260px*var(--ui-space-scale,1))] text-right text-xs text-destructive";
 
 /**
- * Owner-only settings for oMLX on the Attached engines tab. Always
+ * Owner-only settings for oMLX on the oMLX tab. Always
  * rendered for the owner, since the enable toggle lives here: everything else, including the
  * Engines enabled switch and the Engine lifetime control, is hidden while the feature is off.
  */

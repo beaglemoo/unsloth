@@ -964,7 +964,7 @@ export function ModelSelector({
   // Remote model settings live on its connection, not ModelConfigPage's local load settings.
   function handleConfigureConnection(providerId: string) {
     setOpen(false);
-    // oMLX is not listed in Connections; its page is Attached engines.
+    // oMLX is not listed in Connections; its page is the oMLX tab.
     if (
       settingsTabForConnection(
         useExternalProvidersStore.getState().providers,
