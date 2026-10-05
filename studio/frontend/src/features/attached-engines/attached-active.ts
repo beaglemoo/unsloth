@@ -5,7 +5,6 @@
 // window and when the engine will unload it. Pure, so the node suite can drive it.
 
 import type {
-  AttachedDs4Status,
   AttachedOmlxModel,
   AttachedOmlxStatus,
   AttachedProvider,
@@ -33,11 +32,6 @@ export function activeContextWindow(
   active: ActiveAttached | null,
 ): number | null {
   if (!status || !active) return null;
-  if (active.kind === "dwarfstar") {
-    const ds4 = status.ds4;
-    if (!ds4?.reachable) return null;
-    return ds4.ctxActive ?? ds4.ctx ?? null;
-  }
   if (!status.omlx?.reachable) return null;
   const rows = omlxRowsFor(status.omlx, active.modelId);
   const withCap = rows.find((row) => row.maxContextWindow !== null);
@@ -45,22 +39,19 @@ export function activeContextWindow(
 }
 
 /** The most output tokens the selected attached model accepts: oMLX's own `max_tokens` for the
- *  model, DwarfStar's running context. Null when the engine has not said. */
+ *  model. Null when the engine has not said. */
 export function attachedMaxOutputTokens(
   status: AttachedStatus | null,
   active: ActiveAttached | null,
 ): number | null {
   if (!status || !active) return null;
-  if (active.kind === "dwarfstar") {
-    return status.ds4?.reachable ? (status.ds4.ctxActive ?? status.ds4.ctx ?? null) : null;
-  }
   if (!status.omlx?.reachable) return null;
   return omlxRowsFor(status.omlx, active.modelId).find((row) => row.maxTokens !== null)?.maxTokens ?? null;
 }
 
 /** Max Tokens as it goes on the wire: bounded by the selected attached model's output ceiling
  *  when the engine has reported one. Applied at send time only; the saved value is never lowered,
- *  so a small DwarfStar context does not shrink the setting for every other model. */
+ *  so a small attached-model cap does not shrink the setting for every other model. */
 export function capMaxTokensForAttached(
   maxTokens: number,
   status: AttachedStatus | null,
@@ -75,20 +66,9 @@ export type UnloadState =
   | { kind: "not-loaded" }
   | { kind: "loading" }
   | { kind: "pinned" }
-  /** DwarfStar mid-request: the idle timer is paused. */
-  | { kind: "busy" }
   /** Loaded, but the engine reported no idle timer. */
   | { kind: "untimed" }
   | { kind: "countdown"; remainingS: number };
-
-function ds4Unload(ds4: AttachedDs4Status | null): UnloadState {
-  if (!ds4?.reachable) return { kind: "offline" };
-  if (ds4.starting) return { kind: "loading" };
-  if (!ds4.loaded) return { kind: "not-loaded" };
-  if (ds4.inFlight > 0) return { kind: "busy" };
-  if (ds4.idleRemainingS === null) return { kind: "untimed" };
-  return { kind: "countdown", remainingS: ds4.idleRemainingS };
-}
 
 function omlxUnload(
   omlx: AttachedOmlxStatus | null,
@@ -113,9 +93,7 @@ export function unloadStateFor(
   active: ActiveAttached | null,
 ): UnloadState | null {
   if (!status || !active) return null;
-  return active.kind === "dwarfstar"
-    ? ds4Unload(status.ds4)
-    : omlxUnload(status.omlx, active.modelId);
+  return omlxUnload(status.omlx, active.modelId);
 }
 
 /** Seconds left now, counted down from the poll that reported `baseS`. Never negative. */
@@ -151,8 +129,6 @@ export function describeUnload(
       return "Not loaded";
     case "pinned":
       return "Pinned, stays loaded";
-    case "busy":
-      return "In use";
     case "untimed":
       return "Stays loaded";
     case "countdown": {

@@ -23,18 +23,16 @@ def _config(*entries: str, enabled: bool = False) -> settings.AttachedEnginesCon
     return settings.AttachedEnginesConfig(
         enabled = enabled,
         omlx_url = settings.DEFAULT_OMLX_URL,
-        ds4_url = settings.DEFAULT_DS4_URL,
         scan_denylist = tuple(entries),
         arbitrate_local_loads = True,
-        prewarm_ds4_on_select = True,
     )
 
 
 @pytest.fixture
 def tree(tmp_path, monkeypatch):
-    """models/ with a denied dwarfstar gguf folder and an ordinary one, both holding fake .gguf."""
+    """models/ with a denied legacy gguf folder and an ordinary one, both holding fake .gguf."""
     models = tmp_path / "models"
-    denied = models / "dwarfstar-gguf"
+    denied = models / "legacy-gguf"
     allowed = models / "llama-gguf"
     for folder in (denied, allowed):
         folder.mkdir(parents = True)
@@ -50,7 +48,7 @@ def test_is_denied_matches_entry_and_descendants_only(tree, tmp_path):
     assert denylist.is_denied(denied / "nested" / "deeper")
     assert not denylist.is_denied(allowed)
     assert not denylist.is_denied(models)
-    sibling = models / "dwarfstar-gguf-extra"
+    sibling = models / "legacy-gguf-extra"
     sibling.mkdir()
     assert not denylist.is_denied(sibling)
 
@@ -78,12 +76,12 @@ def test_symlink_into_denied_folder_is_denied(tree, tmp_path):
 
 def test_tilde_entries_expand(tmp_path, monkeypatch):
     home = tmp_path / "home"
-    target = home / "Homelab" / "dwarfstar" / "gguf"
+    target = home / "Homelab" / "legacy" / "gguf"
     target.mkdir(parents = True)
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setattr(settings, "get_config", lambda: _config("~/Homelab/dwarfstar/gguf"))
+    monkeypatch.setattr(settings, "get_config", lambda: _config("~/Homelab/legacy/gguf"))
     assert denylist.is_denied(target / "mmproj.gguf")
-    assert denylist.is_denied("~/Homelab/dwarfstar/gguf")
+    assert denylist.is_denied("~/Homelab/legacy/gguf")
 
 
 def test_garbage_input_never_raises(tree):
@@ -110,7 +108,7 @@ def test_scan_models_dir_unaffected_without_a_denylist(tree, monkeypatch):
     models, _, _ = tree
     monkeypatch.setattr(settings, "get_config", lambda: _config())
     names = {Path(row.path).name for row in _scan_models_dir(models)}
-    assert names == {"llama-gguf", "dwarfstar-gguf"}
+    assert names == {"llama-gguf", "legacy-gguf"}
 
 
 @pytest.mark.parametrize("module", [studio_db, hub_scan_folders])
@@ -120,7 +118,7 @@ def test_registering_a_denied_folder_is_refused(tree, module):
         module.add_scan_folder_with_status(str(denied))
     with pytest.raises(ValueError, match = "deny-list"):
         module.add_scan_folder_with_status(str(denied / "."))
-    assert [row for row in module.list_scan_folders() if "dwarfstar" in row["path"]] == []
+    assert [row for row in module.list_scan_folders() if "legacy" in row["path"]] == []
 
 
 @pytest.mark.parametrize("module", [studio_db, hub_scan_folders])

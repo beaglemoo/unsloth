@@ -50,7 +50,7 @@ function run(replies: Array<AttachedStatus | null>, failDisabled = false) {
   return { poller, calls, tick, timers };
 }
 
-const OK: AttachedStatus = { omlx: null, ds4: null, modelsHash: "h", notices: [] };
+const OK: AttachedStatus = { omlx: null, modelsHash: "h", notices: [] };
 
 test("a 404 from /status runs the disabled-feature sync, then stops polling", async () => {
   const h = run([OK, null]);

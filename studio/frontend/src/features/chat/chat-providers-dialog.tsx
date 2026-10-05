@@ -450,7 +450,7 @@ export function ChatProvidersSettings({
     setBaseUrlDraft("");
   }, [providerType, editingProviderId, registryByType]);
 
-  // The attached engines (oMLX, DwarfStar) are managed on their own settings tab: they are not
+  // The attached engine (oMLX) is managed on its own settings tab: it is not
   // listed, editable or counted here, though the store still holds them for the model picker.
   const listView = useMemo(() => connectionsListView(providers), [providers]);
   const totalModels = listView.modelCount;

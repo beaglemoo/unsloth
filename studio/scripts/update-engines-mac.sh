@@ -1,19 +1,18 @@
 #!/bin/bash
-# Safely update the engine venvs (oMLX, ds4-ondemand) from the pinned submodules while Unsloth's
-# background helpers keep their place in launchd. Run it after bumping studio/engines/{omlx,ds4}.
+# Safely update the oMLX venv from its pinned submodule while Unsloth's
+# background helper keeps its place in launchd. Run it after bumping studio/engines/omlx.
 #
 #   update-engines-mac.sh [--dry-run] [--yes] [--force]
 #
 #   1. preflight: the engines must be idle (nothing generating, loading or starting), then
-#      build-engines-mac.sh --migrate-config brings an old engines.toml up to date (ds4 host
-#      0.0.0.0 -> 127.0.0.1 unless "# keep-lan" / `lan = true`, OMLX_PEER_EVICT_URLS added; a
+#      build-engines-mac.sh --migrate-config removes the old generated OMLX_PEER_EVICT_URLS line; a
 #      backup engines.toml.bak-<timestamp> is written first and every change is logged)
 #   2. stage: build-engines-mac.sh --stage-only builds and validates <venv>.new while the helpers
 #      keep serving, so they are down only for the swap, not for the multi-minute build
 #      (the submodule pin check runs here; the build fails on a mismatch or a dirty submodule)
-#   3. idle again, then unload oMLX models and stop ds4 gracefully (idle only; nothing is killed)
+#   3. idle again, then unload oMLX models gracefully (idle only; nothing is killed)
 #   4. stop the helpers (`unsloth-studio --engine-helpers unregister`, else launchctl bootout),
-#      wait until :8843, :8001 and :8000 are free
+#      wait until :8843 is free
 #   5. swap: build-engines-mac.sh --swap-only (live -> <venv>.old, .new -> live, then .provisioned)
 #   6. start the helpers again (`unsloth-studio --engine-helpers register`) and wait for health.
 #      In with_app mode (engine_lifetime in ~/.unsloth/engines/desktop.json, the default) they are
@@ -22,15 +21,14 @@
 #   7. on any failure after the swap: stop the helpers, build-engines-mac.sh --rollback-venvs,
 #      start them again, wait for health, and exit 1. <venv>.failed keeps the broken venv for inspection.
 #
-# Only the venvs change. The ds4-server binary and the launcher script live inside Unsloth.app:
-# a ds4 submodule bump also needs build-fork-mac.sh and --install.
+# Only the oMLX venv changes.
 #
 # The helper stop and start live in engines-lib.sh and use the app's `--engine-helpers` CLI
 # (macOS refuses `launchctl bootstrap` of a bundled helper). They have only been exercised with
 # --dry-run and a fake app. If a helper does not come back, use Unsloth > Settings >
 # Attached engines > Engines enabled, off and on.
 #
-# Environment: UNSLOTH_ENGINES_HOME (default ~/.unsloth/engines), OMLX_URL, DS4_URL, ENGINE_PORTS,
+# Environment: UNSLOTH_ENGINES_HOME (default ~/.unsloth/engines), OMLX_URL, ENGINE_PORTS,
 #   HELPER_APP, LAUNCHCTL, PGREP, BUILD_ENGINES (the build script), HEALTH_TIMEOUT (default 240 s)
 set -euo pipefail
 
@@ -49,7 +47,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENGINES_HOME="${UNSLOTH_ENGINES_HOME:-$HOME/.unsloth/engines}"
 BUILD_ENGINES="${BUILD_ENGINES:-$SCRIPT_DIR/build-engines-mac.sh}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-240}"
-VENVS=(ds4-ondemand omlx)
+VENVS=(omlx)
 
 log() { printf '[engines-update] %s\n' "$*"; }
 warn() { printf '[engines-update] warning: %s\n' "$*" >&2; }
@@ -69,7 +67,7 @@ command -v python3 >/dev/null || die "python3 not found"
 
 # pre | stopped | swapping: how far the run got, for the EXIT handler.
 STAGE=pre
-WANT_OMLX=0 WANT_DS4=0
+WANT_OMLX=0
 ROSTER=""
 SWAPPED=()
 
@@ -92,7 +90,7 @@ confirm() {
 # Nothing to wait for when helpers_start left the helpers stopped (with_app, Unsloth closed).
 healthy() {
   if [ "$HELPERS_LEFT_STOPPED" = 1 ]; then return 0; fi
-  wait_engines_healthy "$HEALTH_TIMEOUT" "$WANT_OMLX" "$WANT_DS4"
+  wait_engines_healthy "$HEALTH_TIMEOUT" "$WANT_OMLX"
 }
 
 rollback_swap() {
@@ -114,7 +112,7 @@ rollback_swap() {
     log "rolled back; the previous engines are serving again"
   else
     warn "engines are not healthy after the rollback"
-    show_launch_failure omlx; show_launch_failure ds4
+    show_launch_failure omlx
   fi
 }
 
@@ -141,18 +139,18 @@ engines_require_idle
 run "$BUILD_ENGINES" --migrate-config
 for _label in "${HELPER_LABELS[@]}"; do
   if helper_loaded "$_label"; then
-    case "$_label" in *.omlx) WANT_OMLX=1 ;; *.ds4) WANT_DS4=1 ;; esac
+    WANT_OMLX=1
     log "$_label is loaded"
   else
     log "$_label is not loaded"
   fi
 done
 if [ "$WANT_OMLX" = 1 ] && omlx_up; then ROSTER="$(fetch_roster 2>/dev/null || true)"; fi
-if [ "$DRY" = 1 ]; then WANT_OMLX=1; WANT_DS4=1; fi
+if [ "$DRY" = 1 ]; then WANT_OMLX=1; fi
 
 # 2 -------------------------------------------------------------------------------------------
 log "2/6 stage the new venvs (the helpers keep serving)"
-build_args=(--stage-only --skip-ds4)
+build_args=(--stage-only)
 [ "$FORCE" = 0 ] || build_args+=(--force)
 run "$BUILD_ENGINES" "${build_args[@]}"
 if [ "$DRY" = 0 ]; then
@@ -167,8 +165,8 @@ else
 fi
 
 # 3 -------------------------------------------------------------------------------------------
-log "3/6 idle check, then unload oMLX models and stop ds4"
-confirm "This stops the oMLX and ds4 helpers for a moment to swap in ${SWAPPED[*]}. Continue?"
+log "3/6 idle check, then unload oMLX models"
+confirm "This stops the oMLX helper for a moment to swap in ${SWAPPED[*]}. Continue?"
 engines_quiesce
 
 # 4 -------------------------------------------------------------------------------------------
@@ -186,7 +184,7 @@ run "$BUILD_ENGINES" --swap-only
 log "6/6 restart the helpers and wait for health"
 helpers_start || die "the helpers did not restart"
 if [ "$DRY" = 1 ]; then
-  log "dry-run: would poll $OMLX_URL/v1/models and $DS4_URL/admin/status for up to ${HEALTH_TIMEOUT} s, then compare the roster"
+  log "dry-run: would poll $OMLX_URL/v1/models for up to ${HEALTH_TIMEOUT} s, then compare the roster"
   log "dry-run complete"
   STAGE=pre
   exit 0
@@ -198,7 +196,7 @@ if [ "$HELPERS_LEFT_STOPPED" = 1 ]; then
   exit 0
 fi
 if ! healthy; then
-  show_launch_failure omlx; show_launch_failure ds4
+  show_launch_failure omlx
   die "the engines did not become healthy within ${HEALTH_TIMEOUT} s with the new venvs"
 fi
 if [ -n "$ROSTER" ]; then

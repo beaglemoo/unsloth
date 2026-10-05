@@ -1,14 +1,9 @@
 #!/bin/bash
-# Provision the attached engines (oMLX and ds4) for the Unsloth desktop app on macOS.
+# Provision the oMLX attached engine for the Unsloth desktop app on macOS.
 #
-#   1. Build ds4-server (make) from the studio/engines/ds4 submodule and stage it,
-#      with its metal/ shaders and the on-demand launcher, in the Tauri resources
-#      staging dir (default studio/src-tauri/engines-staging, bundled as
-#      Contents/Resources/engines by tauri.fork.conf.json).
-#   2. Create or refresh the user-side venvs in ~/.unsloth/engines:
+#   1. Create or refresh the user-side venv:
 #        omlx/          oMLX installed non-editable from the submodule with its pinned deps
-#        ds4-ondemand/  fastapi/uvicorn/httpx for ds4_ondemand.py
-#   3. Write ~/.unsloth/engines/engines.toml if it is missing. An existing one is kept, but an
+#   2. Write ~/.unsloth/engines/engines.toml if it is missing. An existing one is kept, but an
 #      old generated file is migrated (see --migrate-config).
 #
 # Idempotent: work is skipped when the submodule commit recorded in
@@ -22,18 +17,15 @@
 # the staged venv waits in <venv>.new: stop the helper and run update-engines-mac.sh (which does
 # this safely), or --swap-only. <venv>.old is kept for rollback (--rollback-venvs).
 #
-# Usage: studio/scripts/build-engines-mac.sh [--force] [--skip-ds4] [--skip-venvs]
+# Usage: studio/scripts/build-engines-mac.sh [--force] [--skip-venvs]
 #                                            [--stage-only | --swap-only | --rollback-venvs [name...]
 #                                             | --migrate-config]
 #   --stage-only       build and validate the venvs in <venv>.new, do not swap
 #   --swap-only        swap the venvs already staged (no build, no submodule checks)
-#   --rollback-venvs   put <venv>.old back (names: omlx, ds4-ondemand; default both)
+#   --rollback-venvs   put <venv>.old back (name: omlx)
 #   --migrate-config   only migrate an existing engines.toml (the full and --stage-only runs do it
-#                      too; update-engines-mac.sh calls this explicitly). Two independent edits:
-#                        [ds4] host = "0.0.0.0" (the old generated value) -> "127.0.0.1", unless the
-#                          [ds4] section has a "# keep-lan" comment or `lan = true` (a deliberate
-#                          LAN choice is never overridden)
-#                        [omlx.env] OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" when absent
+#                      too; update-engines-mac.sh calls this explicitly). It removes the legacy
+#                      [omlx.env] OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" line.
 #                      The original is copied to engines.toml.bak-<timestamp> first, every change is
 #                      logged, comments and other keys are preserved, and a second run is a no-op.
 #                      Helpers read the file when they start, so it takes effect at their next restart.
@@ -48,19 +40,18 @@
 #   FORCE_REPLACE_RUNNING=1  refresh a venv even while a helper is running from it
 set -euo pipefail
 
-FORCE=0 SKIP_DS4=0 SKIP_VENVS=0 MODE=full
+FORCE=0 SKIP_VENVS=0 MODE=full
 ROLLBACK_NAMES=()
 for arg in "$@"; do
   case "$arg" in
     --force) FORCE=1 ;;
-    --skip-ds4) SKIP_DS4=1 ;;
     --skip-venvs) SKIP_VENVS=1 ;;
     --stage-only) MODE=stage ;;
     --swap-only) MODE=swap ;;
     --rollback-venvs) MODE=rollback ;;
     --migrate-config) MODE=migrate ;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
-    omlx|ds4-ondemand)
+    omlx)
       [ "$MODE" = rollback ] || { echo "unexpected argument: $arg" >&2; exit 2; }
       ROLLBACK_NAMES+=("$arg") ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
@@ -79,7 +70,7 @@ OMLX_PYTHON="${OMLX_PYTHON:-3.13}"
 OMLX_EXTRAS="${OMLX_EXTRAS:-}"
 OMLX_WITH_CUSTOM_KERNEL="${OMLX_WITH_CUSTOM_KERNEL:-1}"
 
-OMLX_COMMIT="" DS4_COMMIT=""
+OMLX_COMMIT=""
 
 log() { printf '[engines] %s\n' "$*"; }
 die() { printf '[engines] error: %s\n' "$*" >&2; exit 1; }
@@ -98,14 +89,13 @@ marker_set() {
 # --- submodules -----------------------------------------------------------
 init_submodules() {
   local sub
-  for sub in omlx ds4; do
+  for sub in omlx; do
     if ! [ -f "$ENGINES_SRC/$sub/.git" ] && ! [ -d "$ENGINES_SRC/$sub/.git" ]; then
       log "initialising submodule studio/engines/$sub"
       git -C "$REPO" submodule update --init "studio/engines/$sub"
     fi
   done
   OMLX_COMMIT="$(git -C "$ENGINES_SRC/omlx" rev-parse HEAD)"
-  DS4_COMMIT="$(git -C "$ENGINES_SRC/ds4" rev-parse HEAD)"
 }
 
 # The engines are built from the submodule checkouts, so those must be exactly what the repo
@@ -118,8 +108,8 @@ check_submodule_pins() {
       " ") ;;
       *) die "submodule pin mismatch: $line (check out the pinned commit, or commit the submodule bump)" ;;
     esac
-  done < <(git -C "$REPO" submodule status -- studio/engines/omlx studio/engines/ds4)
-  for sub in omlx ds4; do
+  done < <(git -C "$REPO" submodule status -- studio/engines/omlx)
+  for sub in omlx; do
     dirty="$(git -C "$ENGINES_SRC/$sub" status --porcelain)"
     [ -z "$dirty" ] || die "submodule studio/engines/$sub has local changes; commit or discard them first"
   done
@@ -136,7 +126,7 @@ export_tree() { # <submodule dir> <dest>
 # and a venv python resolves to its base interpreter in the process list.
 venv_in_use() { # <venv dir>
   local pid
-  for pid in $(pgrep -x omlx-server; pgrep -f ds4_ondemand.py; pgrep -f "$1/bin/python"); do
+  for pid in $(pgrep -x omlx-server; pgrep -f "$1/bin/python"); do
     lsof -p "$pid" -Fn 2>/dev/null | grep "^n$1/" >/dev/null && return 0
   done
   return 1
@@ -174,41 +164,16 @@ pip_install() { # <venv dir> <pip args...>
   fi
 }
 
-# --- ds4 build + staging --------------------------------------------------
+# --- staging --------------------------------------------------------------
 stage_wrappers() {
+  # Staging is generated bundle input. Recreate it so a previous build cannot retain
+  # resources for an engine that is no longer bundled.
+  rm -rf "$STAGING"
   mkdir -p "$STAGING"
   local f
-  for f in omlx-launch ds4-ondemand-launch engines_launch.py engines-common.sh; do
+  for f in omlx-launch engines_launch.py engines-common.sh; do
     cmp -s "$WRAPPERS/$f" "$STAGING/$f" || install -m 0755 "$WRAPPERS/$f" "$STAGING/$f"
   done
-}
-
-ds4_staged_ok() {
-  [ -x "$STAGING/ds4/ds4-server" ] && [ -d "$STAGING/ds4/metal" ] && [ -f "$STAGING/ds4/ds4_ondemand.py" ]
-}
-
-build_ds4() {
-  local want="$DS4_COMMIT"
-  if [ "$FORCE" = 0 ] && [ "$(marker_get ds4_build)" = "$want" ] && ds4_staged_ok; then
-    log "ds4: up to date ($want)"
-    return
-  fi
-  log "ds4: building $want"
-  local src="$BUILD_ROOT/ds4"
-  export_tree "$ENGINES_SRC/ds4" "$src"
-  local jobs; jobs="$(sysctl -n hw.ncpu)"
-  make -C "$src" -j"$jobs" ds4-server >"$BUILD_ROOT/ds4-build.log" 2>&1 \
-    || { tail -n 30 "$BUILD_ROOT/ds4-build.log" >&2; die "ds4 make failed (log: $BUILD_ROOT/ds4-build.log)"; }
-  [ -x "$src/ds4-server" ] || die "ds4-server was not produced"
-  local dest="$STAGING/ds4"
-  rm -rf "$dest"; mkdir -p "$dest"
-  install -m 0755 "$src/ds4-server" "$dest/ds4-server"
-  cp -R "$src/metal" "$dest/metal"
-  install -m 0644 "$src/ondemand/ds4_ondemand.py" "$dest/ds4_ondemand.py"
-  # ds4-server compiles its shaders from metal/*.metal in its cwd; fail early if the set is empty.
-  ls "$dest"/metal/*.metal >/dev/null
-  marker_set ds4_build "$want"
-  log "ds4: staged in $dest"
 }
 
 # --- venvs ----------------------------------------------------------------
@@ -231,35 +196,10 @@ discard_stale_staged() { # <new dir>
   rm -rf "$1"
 }
 
-validate_ds4_ondemand() { # <venv dir>
-  "$1/bin/python" -c "import fastapi, uvicorn, httpx"
-  # The launcher itself must at least compile under this interpreter.
-  "$1/bin/python" -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' \
-    "$ENGINES_SRC/ds4/ondemand/ds4_ondemand.py"
-}
-
 validate_omlx() { # <venv dir>
   "$1/bin/python" -c "import omlx, mlx.core, mlx_lm, mlx_vlm; print('omlx', omlx.__version__)"
   # Startup smoke test: the entry point the helper execs must load and parse its CLI.
   "$1/bin/python" -m omlx.cli serve --help >/dev/null
-}
-
-stage_ds4_ondemand() {
-  local venv="$ENGINES_HOME/ds4-ondemand" new="$ENGINES_HOME/ds4-ondemand.new" want="$DS4_COMMIT"
-  if [ "$FORCE" = 0 ] && [ "$(marker_get ds4_ondemand)" = "$want" ] && [ -x "$venv/bin/python" ]; then
-    log "ds4-ondemand venv: up to date ($want)"
-    discard_stale_staged "$new"
-    return
-  fi
-  if [ "$FORCE" = 0 ] && staged_ok "$new" "$want"; then
-    log "ds4-ondemand venv: already staged ($want)"
-    return
-  fi
-  log "ds4-ondemand venv: staging $want in $new"
-  make_venv "$new" "3.11+"
-  pip_install "$new" -r "$ENGINES_SRC/ds4/ondemand/requirements.txt"
-  validate_ds4_ondemand "$new"
-  record_staged "$new" ds4_ondemand "$want"
 }
 
 stage_omlx() {
@@ -368,11 +308,8 @@ rollback_venv() { # <live dir>
   fi
 }
 
-# Brings an engines.toml written by an older release up to date, without touching anything the
-# user chose. Line based, so comments, ordering and every other key survive. Two independent edits:
-#   [ds4] host = "0.0.0.0" (the old generated value, exactly) becomes "127.0.0.1", unless the
-#     [ds4] section carries an opt-out: a comment containing "keep-lan" or the key `lan = true`
-#   [omlx.env] gains OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" when the key is absent
+# Brings an engines.toml written by an older release up to date without touching other settings.
+# The retired peer URL is removed only when it has the old generated value.
 # Nothing is written when there is nothing to change, so a second run is a no-op; otherwise the
 # original is copied to engines.toml.bak-<timestamp> first. The result must still parse (tomllib).
 migrate_config() {
@@ -434,47 +371,14 @@ def span(name):
 
 
 changes = []
-LAN_OPT_OUT = re.compile(r"^\s*lan\s*=\s*true\s*(#.*)?$|#.*keep-lan", re.IGNORECASE)
-OLD_HOST = re.compile(r'^(\s*host\s*=\s*)"0\.0\.0\.0"(\s*(#.*)?)$')
-
-ds4 = span("ds4")
-if ds4:
-    body = [line.rstrip("\r\n") for line in lines[ds4[0] + 1:ds4[1]]]
-    hosts = [i for i in range(ds4[0] + 1, ds4[1]) if OLD_HOST.match(lines[i].rstrip("\r\n"))]
-    if hosts:
-        if any(LAN_OPT_OUT.search(line) for line in body):
-            say('[ds4] host = "0.0.0.0" kept: an opt-out marker (keep-lan / lan = true) is present')
-        else:
-            for i in hosts:
-                raw = lines[i]
-                tail = raw[len(raw.rstrip("\r\n")):]
-                lines[i] = OLD_HOST.sub(r'\1"127.0.0.1"\2', raw.rstrip("\r\n")) + tail
-            changes.append(
-                '[ds4] host "0.0.0.0" -> "127.0.0.1": the launcher no longer listens on the LAN '
-                "(add a '# keep-lan' comment in [ds4] to keep LAN access)"
-            )
-
 PEER = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
-PEER_NOTE = "# oMLX asks the ds4 launcher to unload when it needs memory (added by the engines.toml migration)."
 env = span("omlx.env")
-has_peer = env and any(
-    re.match(r"""^\s*["']?OMLX_PEER_EVICT_URLS["']?\s*=""", line) for line in lines[env[0] + 1:env[1]]
-)
-if not has_peer:
-    if env:
-        at = env[0]
-        for i in range(env[0] + 1, env[1]):
-            stripped = lines[i].strip()
-            if stripped and not stripped.startswith("#"):
-                at = i
-        if not lines[at].endswith("\n"):
-            lines[at] += eol
-        lines[at + 1:at + 1] = [PEER_NOTE + eol, PEER + eol]
-    else:
-        if lines and not lines[-1].endswith("\n"):
-            lines[-1] += eol
-        lines += [eol, "[omlx.env]" + eol, PEER_NOTE + eol, PEER + eol]
-    changes.append(f"[omlx.env] added {PEER}")
+if env:
+    peer_lines = [i for i in range(env[0] + 1, env[1]) if lines[i].strip() == PEER]
+    if peer_lines:
+        for i in reversed(peer_lines):
+            del lines[i]
+        changes.append(f"[omlx.env] removed {PEER}")
 
 if not changes:
     say("up to date, nothing to migrate")
@@ -521,7 +425,6 @@ main() {
   touch "$MARKER"
   case "$MODE" in
     swap)
-      swap_venv "$ENGINES_HOME/ds4-ondemand"
       swap_venv "$ENGINES_HOME/omlx"
       [ "$PENDING_SWAPS" = 0 ] || die "$PENDING_SWAPS staged venv(s) not swapped (an engine is running)"
       log "swap done"
@@ -531,7 +434,7 @@ main() {
       return 0 ;;
     rollback)
       local name
-      [ "${#ROLLBACK_NAMES[@]}" -gt 0 ] || ROLLBACK_NAMES=(ds4-ondemand omlx)
+      [ "${#ROLLBACK_NAMES[@]}" -gt 0 ] || ROLLBACK_NAMES=(omlx)
       for name in "${ROLLBACK_NAMES[@]}"; do rollback_venv "$ENGINES_HOME/$name"; done
       log "rollback done"
       return 0 ;;
@@ -539,17 +442,14 @@ main() {
   init_submodules
   check_submodule_pins
   stage_wrappers
-  [ "$SKIP_DS4" = 1 ] || build_ds4
   if [ "$SKIP_VENVS" = 0 ]; then
-    stage_ds4_ondemand
     stage_omlx
     if [ "$MODE" = full ]; then
-      swap_venv "$ENGINES_HOME/ds4-ondemand"
       swap_venv "$ENGINES_HOME/omlx"
     fi
   fi
   write_default_config
-  log "done (omlx=${OMLX_COMMIT:0:8} ds4=${DS4_COMMIT:0:8}); staging: $STAGING"
+  log "done (omlx=${OMLX_COMMIT:0:8}); staging: $STAGING"
   [ "$PENDING_SWAPS" = 0 ] || log "$PENDING_SWAPS staged venv(s) are waiting in $ENGINES_HOME/*.new"
 }
 

@@ -860,7 +860,7 @@ export function ChatSettingsPanel({
         activeExternalProvider?.maxOutputTokens,
       )
     : localMaxTokensCeiling(baseContext, params.maxSeqLength);
-  // oMLX and DwarfStar report their own output ceiling (the model's max_tokens, the context).
+  // oMLX reports its own output ceiling.
   const maxTokensMax =
     attachedOutputCap != null
       ? Math.min(providerMaxTokensMax, attachedOutputCap)
@@ -913,7 +913,7 @@ export function ChatSettingsPanel({
   const setSeed = set("seed");
 
   // Max Tokens is bounded at send time (chat-adapter), never in the saved params: a small
-  // DwarfStar context or a short connection cap must not lower the setting for good.
+  // A short connection cap must not lower the setting for good.
 
   function applyPresetParamsWithinCurrentLimits(
     preset: Preset,

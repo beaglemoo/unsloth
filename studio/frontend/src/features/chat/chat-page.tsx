@@ -2528,7 +2528,7 @@ export function ChatPage({
     () => isExternalModelId(inferenceParams.checkpoint),
     [inferenceParams.checkpoint],
   );
-  // oMLX / DwarfStar report their own cap; null for every other model.
+  // oMLX reports its own cap; null for every other model.
   const attachedContextWindow = useActiveAttachedContext();
   const contextWindowKnown =
     attachedContextWindow != null ||

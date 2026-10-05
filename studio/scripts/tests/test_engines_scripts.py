@@ -111,26 +111,6 @@ class TestEnginesLaunch:
         assert "fake-engine" in result.stdout and "-m omlx.cli serve" in result.stdout
         assert not (home / "omlx.fail").exists()
 
-    def test_ds4_model_missing_and_ports(self, home):
-        fake_python(home / "ds4-ondemand" / "bin" / "python")
-        (home / "bundle" / "ds4").mkdir(parents=True)
-        (home / "bundle" / "ds4" / "ds4_ondemand.py").write_text("")
-        cfg = f'[ds4]\nmodel = "{home}/nope.gguf"\nlauncher_port = {free_port()}\nserver_port = {free_port()}\n'
-        result = launch(home, "ds4", cfg)
-        assert result.returncode == 78
-        assert "model file missing" in read_fail(home, "ds4")["reason"]
-        (home / "nope.gguf").write_text("x")
-        with socket.socket() as busy:
-            busy.bind(("127.0.0.1", 0))
-            busy.listen()
-            result = launch(home, "ds4", cfg.replace(f"server_port = {cfg.split('server_port = ')[1].split()[0]}", f"server_port = {busy.getsockname()[1]}"))
-        assert result.returncode == 78
-        assert "ds4-server" in read_fail(home, "ds4")["reason"]
-        assert read_fail(home, "ds4")["count"] == 2
-        result = launch(home, "ds4", cfg)
-        assert result.returncode == 0, result.stderr
-        assert not (home / "ds4.fail").exists()
-
     def test_print_mode_leaves_no_marker_and_ignores_a_busy_port(self, home):
         fake_python(home / "omlx" / "bin" / "python")
         with socket.socket() as busy:
@@ -140,9 +120,6 @@ class TestEnginesLaunch:
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)["argv"][1:4] == ["-m", "omlx.cli", "serve"]
         assert not (home / "omlx.fail").exists()
-        result = run([sys.executable, str(ENGINES / "engines_launch.py"), "ds4", "--print"], env_for(home))
-        assert result.returncode == 78
-        assert not (home / "ds4.fail").exists()
 
     def test_backoff_schedule(self):
         sys.path.insert(0, str(ENGINES))
@@ -163,7 +140,7 @@ class TestEnginesLaunch:
 
 @pytest.mark.parametrize(
     "wrapper,name,log",
-    [("omlx-launch", "omlx", "omlx.log"), ("ds4-ondemand-launch", "ds4", "ds4-launcher.log")],
+    [("omlx-launch", "omlx", "omlx.log")],
 )
 class TestWrappers:
     def test_missing_venv_writes_the_marker_and_the_log(self, home, wrapper, name, log):
@@ -205,34 +182,9 @@ class TestWrappers:
         assert not (logs / f"{log}.1").exists()
 
 
-def test_shipped_defaults():
-    import tomllib
-
-    cfg = tomllib.loads((ENGINES / "engines.default.toml").read_text())
-    assert cfg["ds4"]["host"] == "127.0.0.1"
-    assert cfg["omlx"]["env"]["OMLX_PEER_EVICT_URLS"] == "http://127.0.0.1:8001"
-    assert 'section.get("host", "127.0.0.1")' in (ENGINES / "engines_launch.py").read_text()
-
-
 def test_build_engines_stages_the_common_helper():
     text = (SCRIPTS / "build-engines-mac.sh").read_text()
     assert "engines-common.sh" in text
-
-
-def test_bash_backoff_schedule_matches_python(home):
-    waits = []
-    for _ in range(8):
-        result = run(
-            ["bash", "-c", 'sleep() { echo "SLEEP $1"; }; . "$1"; engines_fail ds4 "boom"', "_", str(ENGINES / "engines-common.sh")],
-            {"ENGINES_HOME": str(home)},
-        )
-        assert result.returncode == 78
-        waits.append(int(result.stdout.split("SLEEP ")[1].split()[0]))
-    assert waits == [10, 20, 40, 80, 160, 300, 300, 300]
-    assert read_fail(home, "ds4")["count"] == 8
-
-
-# --- migrate-engines-mac.sh rollback -----------------------------------------------------------
 
 
 def migrate(home_dir, snippet, **env):
@@ -331,21 +283,6 @@ def marker(home):
     return dict(line.split("=", 1) for line in (home / ".provisioned").read_text().splitlines() if "=" in line)
 
 
-def test_swap_replaces_the_venv_keeps_old_and_records_the_marker_after(home):
-    make_venv(home / "omlx", "old")
-    (home / ".provisioned").write_text("omlx=old-key\nomlx_kernels=1\nds4_build=abc\n")
-    make_venv(home / "omlx.new", "new", ["omlx", "new-key", "omlx_kernels=0"])
-    result = build_fn(home, 'venv_in_use() { return 1; }; swap_venv "$ENGINES_HOME/omlx"')
-    assert result.returncode == 0, result.stderr
-    assert (home / "omlx" / "VERSION").read_text() == "new"
-    assert (home / "omlx.old" / "VERSION").read_text() == "old"
-    assert not (home / "omlx.new").exists() and not (home / "omlx" / ".staged").exists()
-    assert marker(home) == {"omlx": "new-key", "omlx_kernels": "0", "ds4_build": "abc"}
-    # the entry point and pyvenv.cfg now name the live path, not omlx.new
-    assert (home / "omlx" / "bin" / "omlx").read_text().startswith(f"#!{home}/omlx/bin/python")
-    assert f"{home}/omlx.new" not in (home / "omlx" / "pyvenv.cfg").read_text()
-
-
 def test_swap_waits_while_an_engine_runs_from_the_venv(home):
     make_venv(home / "omlx", "old")
     (home / ".provisioned").write_text("omlx=old-key\n")
@@ -397,36 +334,6 @@ def test_rollback_restores_the_old_venv_and_markers(home):
     assert again.returncode == 0 and "no omlx.old" in again.stdout
 
 
-def test_staging_never_touches_the_live_venv_or_the_marker(home):
-    make_venv(home / "ds4-ondemand", "old")
-    (home / ".provisioned").write_text("ds4_ondemand=old\n")
-    snippet = (
-        'HAVE_UV=0; DS4_COMMIT=newcommit; FORCE=0; ENGINES_SRC=/nonexistent; '
-        'make_venv() { mkdir -p "$1/bin"; printf "#!/bin/sh\\n" >"$1/bin/python"; chmod +x "$1/bin/python"; }; '
-        'pip_install() { :; }; validate_ds4_ondemand() { :; }; '
-        'stage_ds4_ondemand; stage_ds4_ondemand'
-    )
-    result = build_fn(home, snippet)
-    assert result.returncode == 0, result.stderr
-    assert (home / "ds4-ondemand" / "VERSION").read_text() == "old"
-    assert (home / "ds4-ondemand.new" / ".staged").read_text().splitlines() == ["ds4_ondemand", "newcommit"]
-    assert marker(home) == {"ds4_ondemand": "old"}
-    assert result.stdout.count("staging newcommit") == 1 and "already staged" in result.stdout
-
-
-def test_a_failed_validation_leaves_no_staged_record(home):
-    snippet = (
-        'HAVE_UV=0; DS4_COMMIT=c; FORCE=0; ENGINES_SRC=/nonexistent; '
-        'make_venv() { mkdir -p "$1/bin"; }; pip_install() { :; }; validate_ds4_ondemand() { return 1; }; '
-        'stage_ds4_ondemand'
-    )
-    result = build_fn(home, snippet)
-    assert result.returncode != 0
-    assert not (home / "ds4-ondemand.new" / ".staged").exists()
-    swap = build_fn(home, 'swap_venv "$ENGINES_HOME/ds4-ondemand"')
-    assert swap.returncode != 0  # the half-built venv is refused, not swapped
-
-
 def git(cwd, *args):
     subprocess.run(
         ["git", "-c", "protocol.file.allow=always", "-c", "user.email=t@t", "-c", "user.name=t", *args],
@@ -437,7 +344,7 @@ def git(cwd, *args):
 @pytest.fixture
 def repo_with_submodules(tmp_path):
     subs = tmp_path / "subs"
-    for name in ("omlx", "ds4"):
+    for name in ("omlx",):
         d = subs / name
         d.mkdir(parents=True)
         git(d, "init", "-q", "-b", "main")
@@ -447,7 +354,7 @@ def repo_with_submodules(tmp_path):
     repo = tmp_path / "repo"
     (repo / "studio" / "engines").mkdir(parents=True)
     git(repo, "init", "-q", "-b", "main")
-    for name in ("omlx", "ds4"):
+    for name in ("omlx",):
         git(repo, "submodule", "add", "-q", str(subs / name), f"studio/engines/{name}")
     git(repo, "commit", "-q", "-m", "pin")
     return repo
@@ -470,14 +377,8 @@ def test_pin_check_fails_on_a_moved_submodule(repo_with_submodules, home):
     assert result.returncode != 0 and "pin mismatch" in result.stderr
 
 
-def test_pin_check_fails_on_a_dirty_submodule(repo_with_submodules, home):
-    (repo_with_submodules / "studio" / "engines" / "ds4" / "f").write_text("dirty")
-    result = pins(repo_with_submodules, home)
-    assert result.returncode != 0 and "local changes" in result.stderr
-
-
 def test_pin_check_fails_on_an_uninitialised_submodule(repo_with_submodules, home):
-    git(repo_with_submodules, "submodule", "deinit", "-f", "studio/engines/ds4")
+    git(repo_with_submodules, "submodule", "deinit", "-f", "studio/engines/omlx")
     result = pins(repo_with_submodules, home)
     assert result.returncode != 0 and "pin mismatch" in result.stderr
 
@@ -495,11 +396,10 @@ class Rig:
         self.lc.mkdir()
         self.app = tmp_path / "helper-app" / "Unsloth.app"
         make_app(self.app, "helper", cli="cli")
-        self.omlx_port, self.ds4_port = free_port(), free_port()
-        self.labels = ("ai.unsloth.studio.omlx", "ai.unsloth.studio.ds4")
+        self.omlx_port = free_port()
+        self.labels = ("ai.unsloth.studio.omlx",)
         make_venv(home / "omlx", "old")
-        make_venv(home / "ds4-ondemand", "old")
-        (home / ".provisioned").write_text("omlx=old-key\nomlx_kernels=1\nds4_ondemand=old-ds4\n")
+        (home / ".provisioned").write_text("omlx=old-key\nomlx_kernels=1\n")
         # stage-only is simulated (a real build needs uv, the network and minutes); swap and
         # rollback run the real build-engines-mac.sh.
         self.build = tmp_path / "fake-build"
@@ -521,8 +421,7 @@ class Rig:
         self.env = {
             "UNSLOTH_ENGINES_HOME": str(home),
             "OMLX_URL": f"http://127.0.0.1:{self.omlx_port}",
-            "DS4_URL": f"http://127.0.0.1:{self.ds4_port}",
-            "ENGINE_PORTS": f"{self.omlx_port} {self.ds4_port}",
+            "ENGINE_PORTS": f"{self.omlx_port}",
             "LAUNCHCTL": str(FAKES / "fake-launchctl"),
             "HELPER_APP": str(self.app),
             "PGREP": str(FAKES / "fake-pgrep"),
@@ -534,7 +433,6 @@ class Rig:
             "FAKE_LC": str(self.lc),
             "FAKE_HOME": str(home),
             "FAKE_OMLX_PORT": str(self.omlx_port),
-            "FAKE_DS4_PORT": str(self.ds4_port),
             "FAKE_PY": sys.executable,
             "STAGE_VERSION": "none",
         }
@@ -573,7 +471,7 @@ class Rig:
         import time
         import urllib.request
 
-        for url in (f"http://127.0.0.1:{self.omlx_port}/api/status", f"http://127.0.0.1:{self.ds4_port}/admin/status"):
+        for url in (f"http://127.0.0.1:{self.omlx_port}/api/status",):
             for _ in range(100):
                 try:
                     urllib.request.urlopen(url, timeout=1).read()
@@ -609,7 +507,6 @@ def rig(tmp_path, home):
 
 def test_update_swaps_the_venv_with_the_helpers_stopped_for_the_swap_only(rig):
     (rig.home / "omlx-loaded").write_text("1")
-    (rig.home / "ds4-loaded").write_text("1")
     result = rig.update(STAGE_VERSION="new")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (rig.home / "omlx" / "VERSION").read_text() == "new"
@@ -620,7 +517,6 @@ def test_update_swaps_the_venv_with_the_helpers_stopped_for_the_swap_only(rig):
     order = [
         "fake stage: new",
         "omlx-unload",
-        "ds4-stop /admin/stop?if_idle=1",
         "engine-helpers unregister",
         "engine-helpers register",
     ]
@@ -648,21 +544,13 @@ def test_update_with_nothing_staged_does_not_touch_the_helpers(rig):
     assert helpers_touched(rig) == []
 
 
-def test_update_refuses_while_an_engine_is_busy_and_stages_nothing(rig):
-    (rig.home / "ds4-busy").write_text("1")
-    result = rig.update(STAGE_VERSION="new")
-    assert result.returncode != 0 and "in flight" in result.stderr
-    assert not any(c.startswith("fake stage") for c in rig.calls()) and helpers_touched(rig) == []
-    assert (rig.home / "omlx" / "VERSION").read_text() == "old"
-
-
 def test_update_rolls_back_when_the_new_venv_is_unhealthy(rig):
     result = rig.update(STAGE_VERSION="bad")
     assert result.returncode != 0
     assert "rolling back" in result.stdout and "rolled back" in result.stdout, result.stdout + result.stderr
     assert (rig.home / "omlx" / "VERSION").read_text() == "old"
     assert (rig.home / "omlx.failed" / "VERSION").read_text() == "bad"
-    assert marker(rig.home) == {"omlx": "old-key", "omlx_kernels": "1", "ds4_ondemand": "old-ds4"}
+    assert marker(rig.home) == {"omlx": "old-key", "omlx_kernels": "1"}
     assert all(rig.loaded(label) for label in rig.labels)
 
 
@@ -719,7 +607,7 @@ def lib_fn(rig, snippet, extra=None):
 def test_helpers_stop_and_start_go_through_the_app_cli(rig):
     result = lib_fn(rig, 'helpers_stop; echo "owed=${STOPPED_HELPERS[*]}"; helpers_start; echo "owed=${STOPPED_HELPERS[*]-}"')
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "owed=ai.unsloth.studio.omlx ai.unsloth.studio.ds4" in result.stdout
+    assert "owed=ai.unsloth.studio.omlx" in result.stdout
     assert result.stdout.strip().splitlines()[-1] == "owed="
     assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
     assert not any(c.startswith("launchctl bootout") for c in rig.calls())
@@ -744,13 +632,12 @@ def test_an_app_without_the_cli_is_never_run_and_falls_back_to_bootout(rig, tmp_
     assert "gui-started" not in rig.calls()
     assert [c for c in rig.calls() if c.startswith("launchctl bootout")] == [
         "launchctl bootout gui/501/ai.unsloth.studio.omlx",
-        "launchctl bootout gui/501/ai.unsloth.studio.ds4",
     ]
     assert rig.cli_calls() == []
     assert not any(rig.loaded(label) for label in rig.labels)
     # and the old app cannot bring them back: say so, with the manual fallback, and do not call
     # launchctl bootstrap or kickstart
-    started = lib_fn(rig, 'STOPPED_HELPERS=(ai.unsloth.studio.omlx ai.unsloth.studio.ds4); helpers_start', {"HELPER_APP": str(old)})
+    started = lib_fn(rig, 'STOPPED_HELPERS=(ai.unsloth.studio.omlx); helpers_start', {"HELPER_APP": str(old)})
     assert started.returncode != 0
     assert "no --engine-helpers" in started.stderr and "Attached engines > Engines enabled" in started.stderr
     assert_no_launchd_start(rig)
@@ -761,13 +648,13 @@ def test_an_app_with_no_executable_falls_back_to_bootout(rig, tmp_path):
     make_app(bare, "bare")
     result = lib_fn(rig, "helpers_stop", {"HELPER_APP": str(bare)})
     assert result.returncode == 0, result.stdout + result.stderr
-    assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 2
+    assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 1
 
 
 def test_a_failing_status_falls_back_to_bootout(rig):
     result = lib_fn(rig, "helpers_stop", {"FAKE_STATUS_FAIL": "1"})
     assert result.returncode == 0, result.stdout + result.stderr
-    assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 2
+    assert sum(c.startswith("launchctl bootout") for c in rig.calls()) == 1
     assert rig.cli_calls() == []
 
 
@@ -802,12 +689,12 @@ def test_helpers_that_are_already_loaded_are_left_alone(rig):
     assert rig.cli_calls() == []
 
 
-def test_helpers_stop_with_no_loaded_helper_does_nothing(rig):
+def test_helpers_stop_with_no_loaded_helper_cleans_legacy_registration(rig):
     lib_fn(rig, "helpers_stop")
     rig.calls_before = len(rig.calls())
     again = lib_fn(rig, "helpers_stop")
     assert again.returncode == 0 and "not loaded, leaving it alone" in again.stdout
-    assert rig.cli_calls() == ["engine-helpers unregister"]
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers unregister"]
 
 
 def test_helper_dry_run_prints_the_cli_calls_and_changes_nothing(rig):
@@ -1011,7 +898,6 @@ def test_the_app_swap_happens_with_the_helpers_out_of_launchd(tmp_path, home):
     finally:
         rig.close()
 
-
 def install_app_rig(tmp_path, rig, extra_env=None, snippet="install_app", old_cli="cli"):
     """Run install_app against the fake engines and app; returns the result."""
     make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
@@ -1028,7 +914,7 @@ def test_the_first_install_over_an_app_without_the_cli_boots_out_then_registers_
         calls = rig.calls()
         # the old binary is never run (it would start its GUI); launchctl takes the helpers down
         assert "gui-started" not in calls
-        assert sum(c.startswith("launchctl bootout") for c in calls) == 2
+        assert sum(c.startswith("launchctl bootout") for c in calls) == 1
         # the booted-out helpers keep their registration, so register alone does nothing and the
         # new app's restart is what brings them back
         assert rig.cli_calls() == ["engine-helpers register", "engine-helpers restart"]
@@ -1038,84 +924,11 @@ def test_the_first_install_over_an_app_without_the_cli_boots_out_then_registers_
         rig.close()
 
 
-def test_a_failed_unregister_still_restarts_the_helper_that_was_stopped(tmp_path, home):
-    rig = Rig(tmp_path, home)
-    try:
-        # oMLX is unregistered and stopped, ds4 refuses: the install stops before the swap
-        result = install_app_rig(tmp_path, rig, {"FAKE_UNREGISTER_FAIL": "ds4"})
-        assert result.returncode != 0, result.stdout + result.stderr
-        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
-        assert not any(c.startswith("mv ") for c in rig.calls())
-        assert rig.cli_calls()[0] == "engine-helpers unregister"
-        assert "engine-helpers register" in rig.cli_calls()
-        assert_no_launchd_start(rig)
-        assert all(rig.loaded(label) for label in rig.labels)
-    finally:
-        rig.close()
-
-
-def test_a_failed_second_bootout_with_an_app_without_the_cli_cannot_restart_and_says_so(tmp_path, home):
-    rig = Rig(tmp_path, home)
-    try:
-        result = install_app_rig(tmp_path, rig, {"FAKE_BOOTOUT_FAIL": "ds4"}, old_cli="old")
-        assert result.returncode != 0, result.stdout + result.stderr
-        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
-        assert not any(c.startswith("mv ") for c in rig.calls())
-        # oMLX was booted out first; the old app cannot register it again, so the user is told how
-        assert "no --engine-helpers" in result.stderr and "Attached engines > Engines enabled" in result.stderr
-        assert "gui-started" not in rig.calls()
-        assert_no_launchd_start(rig)
-    finally:
-        rig.close()
-
-
-def test_a_port_gate_timeout_restarts_the_stopped_helpers(tmp_path, home):
-    rig = Rig(tmp_path, home)
-    try:
-        with socket.socket() as held:
-            held.bind(("127.0.0.1", 0))
-            held.listen()
-            port = held.getsockname()[1]
-            result = install_app_rig(
-                tmp_path, rig, {"ENGINE_PORTS": f"{rig.omlx_port} {rig.ds4_port} {port}", "PORT_GATE_TIMEOUT": "2"}
-            )
-        assert result.returncode != 0 and "ports still held" in result.stderr, result.stdout + result.stderr
-        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
-        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
-        assert all(rig.loaded(label) for label in rig.labels)
-    finally:
-        rig.close()
-
-
-def test_a_busy_engine_blocks_the_app_swap_and_leaves_the_app_alone(tmp_path, home):
-    rig = Rig(tmp_path, home)
-    try:
-        make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
-        make_app(tmp_path / "Apps" / "Unsloth.app", "old", cli="cli")
-        (home / "ds4-busy").write_text("1")
-        result = fork_fn(tmp_path, "codesign() { :; }; DRY=0; install_app", rig.fork_env())
-        assert result.returncode != 0 and "in flight" in result.stderr
-        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
-        assert helpers_touched(rig) == []
-    finally:
-        rig.close()
-
-
-# --- build-fork-mac.sh --install: backend and app are one transaction ---------------------------
-
 TXN_STUBS = (
     "quit_unsloth() { :; }; build_fork_wheel() { WHEEL=/none; }; prune_backend_backups() { echo pruned; }; "
     "codesign() { :; }; DRY=0; install_backend() { echo new >\"$STUDIO_VENV/lib/mod.py\"; }; "
     "check_installed_version() { :; }; verify_backend() { :; }; APP_BACKUP=\"$HOME/app.bak\"; "
 )
-
-
-def txn(tmp_path, rig, overrides="true", extra_env=None):
-    """phase_install against the fake engines and launchctl with every backend step stubbed."""
-    make_backend(tmp_path)
-    make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
-    make_app(tmp_path / "Apps" / "Unsloth.app", "old", cli="cli")
-    return fork_fn(tmp_path, TXN_STUBS + overrides + "; phase_install", rig.fork_env(extra_env))
 
 
 def assert_rolled_back(tmp_path, rig, result):
@@ -1136,11 +949,19 @@ FAILURES = {
     "app-backup-copy": ('ditto() { case "$2" in *.partial) mkdir -p "$2"; return 1;; esac; command ditto "$@"; }', {}),
     "staging-the-new-app": ('ditto() { case "$2" in *.new) mkdir -p "$2"; return 1;; esac; command ditto "$@"; }', {}),
     "verifying-the-new-bundle": ('codesign() { case "$*" in *Unsloth.app.new*) return 1;; esac; }', {}),
-    "quiesce": ('engines_quiesce() { die "ds4 became busy"; }', {}),
-    "unregister": ("true", {"FAKE_UNREGISTER_FAIL": "ds4"}),
+    "quiesce": ('engines_quiesce() { die "oMLX became busy"; }', {}),
+    "unregister": ("true", {"FAKE_UNREGISTER_FAIL_AFTER": "omlx"}),
     "swap": ('mv() { [ "$1" = "$INSTALLED_APP.new" ] && return 1; command mv "$@"; }', {}),
     "final-verify": ('codesign() { [ "${!#}" = "$INSTALLED_APP" ] && return 1; return 0; }', {}),
 }
+
+
+def txn(tmp_path, rig, overrides="true", extra_env=None):
+    """phase_install against the fake engines and launchctl with every backend step stubbed."""
+    make_backend(tmp_path)
+    make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
+    make_app(tmp_path / "Apps" / "Unsloth.app", "old", cli="cli")
+    return fork_fn(tmp_path, TXN_STUBS + overrides + "; phase_install", rig.fork_env(extra_env))
 
 
 @pytest.mark.parametrize("phase_name", list(FAILURES))
@@ -1155,26 +976,6 @@ def test_a_failure_after_the_backend_swap_restores_the_backend_and_the_app(tmp_p
         if phase_name == "final-verify":
             # the helpers had come up from the new bundle: unregistered again for the restore
             assert rig.cli_calls().count("engine-helpers unregister") == 2
-    finally:
-        rig.close()
-
-
-def test_a_port_gate_timeout_after_the_backend_swap_restores_everything(tmp_path, home):
-    rig = Rig(tmp_path, home)
-    try:
-        with socket.socket() as held:
-            held.bind(("127.0.0.1", 0))
-            held.listen()
-            result = txn(
-                tmp_path,
-                rig,
-                extra_env={
-                    "ENGINE_PORTS": f"{rig.omlx_port} {rig.ds4_port} {held.getsockname()[1]}",
-                    "PORT_GATE_TIMEOUT": "2",
-                },
-            )
-        assert "ports still held" in result.stderr, result.stdout + result.stderr
-        assert_rolled_back(tmp_path, rig, result)
     finally:
         rig.close()
 
@@ -1206,23 +1007,6 @@ def test_a_failure_in_the_prune_after_verification_does_not_roll_back(tmp_path, 
         rig.close()
 
 
-def test_an_up_to_date_venv_discards_a_stale_staged_one(home):
-    make_venv(home / "ds4-ondemand", "live")
-    (home / ".provisioned").write_text("ds4_ondemand=pinned\n")
-    make_venv(home / "ds4-ondemand.new", "stale", ["ds4_ondemand", "reverted-bump"])
-    snippet = (
-        'HAVE_UV=0; DS4_COMMIT=pinned; FORCE=0; ENGINES_SRC=/nonexistent; '
-        'make_venv() { echo unexpected-build >&2; return 1; }; stage_ds4_ondemand; '
-        'swap_venv "$ENGINES_HOME/ds4-ondemand"'
-    )
-    result = build_fn(home, snippet)
-    assert result.returncode == 0, result.stderr
-    assert "discarding stale staged venv" in result.stdout
-    assert not (home / "ds4-ondemand.new").exists() and not (home / "ds4-ondemand.old").exists()
-    assert (home / "ds4-ondemand" / "VERSION").read_text() == "live"
-    assert marker(home) == {"ds4_ondemand": "pinned"}
-
-
 def test_an_up_to_date_omlx_venv_discards_a_stale_staged_one(home):
     make_venv(home / "omlx", "live")
     key = "abc:py3.13:kernels1:extras[]"
@@ -1239,169 +1023,6 @@ def test_an_up_to_date_omlx_venv_discards_a_stale_staged_one(home):
 
 
 # --- engines.toml migration ---------------------------------------------------------------------
-
-# What the first release generated: ds4 on the LAN, no peer eviction.
-OLD_CONFIG = """\
-# Unsloth attached engines (oMLX and DwarfStar/ds4).
-# my own note: keep this file tidy
-
-[omlx]
-base_path = "~/.omlx-tuned"
-port = 8843
-# host = "127.0.0.1"   # unset: oMLX uses the host from <base_path>/settings.json
-
-[omlx.env]
-OMLX_QWEN35_SPARSE_BOUNDARIES = "1"
-OMLX_NAX = "1"
-OMLX_SUPERVISED = "launchd"
-
-[ds4]
-model = "~/Homelab/dwarfstar/ds4flash.gguf"
-# Launcher (OpenAI-compatible, on demand) and the internal ds4-server port.
-host = "0.0.0.0"
-launcher_port = 8001
-ctx = 65536
-"""
-
-
-def write_config(home, text):
-    cfg = home / "engines.toml"
-    cfg.write_text(text)
-    return cfg
-
-
-def backups(home):
-    return sorted(p.name for p in home.glob("engines.toml.bak-*"))
-
-
-def migrate_cfg(home):
-    return build_fn(home, "migrate_config")
-
-
-def parsed(cfg):
-    import tomllib
-
-    return tomllib.loads(cfg.read_text())
-
-
-def test_an_old_generated_config_is_migrated_with_a_backup(home):
-    cfg = write_config(home, OLD_CONFIG)
-    cfg.chmod(0o640)
-    result = migrate_cfg(home)
-    assert result.returncode == 0, result.stdout + result.stderr
-    data = parsed(cfg)
-    assert data["ds4"]["host"] == "127.0.0.1"
-    assert data["omlx"]["env"]["OMLX_PEER_EVICT_URLS"] == "http://127.0.0.1:8001"
-    # the backup is the untouched original, written before the edit
-    (backup,) = backups(home)
-    assert (home / backup).read_text() == OLD_CONFIG
-    # every other key, comment and the file mode survive
-    assert data["ds4"]["ctx"] == 65536 and data["omlx"]["env"]["OMLX_NAX"] == "1"
-    new = cfg.read_text()
-    assert "# my own note: keep this file tidy" in new and "# Launcher (OpenAI-compatible" in new
-    assert stat.S_IMODE(cfg.stat().st_mode) == 0o640
-    removed = [line for line in OLD_CONFIG.splitlines() if line not in new.splitlines()]
-    assert removed == ['host = "0.0.0.0"']
-    # the peer URL sits inside [omlx.env], before [ds4]
-    assert new.index("OMLX_PEER_EVICT_URLS") < new.index("[ds4]")
-    # every change is logged
-    assert 'host "0.0.0.0" -> "127.0.0.1"' in result.stdout and "OMLX_PEER_EVICT_URLS" in result.stdout
-    assert str(home / backup) in result.stdout
-
-
-@pytest.mark.parametrize(
-    "marker",
-    ["# keep-lan", "# KEEP-LAN: the iPad reads this", "lan = true"],
-)
-def test_a_deliberate_lan_config_is_left_on_the_lan(home, marker):
-    text = OLD_CONFIG.replace('host = "0.0.0.0"', f'host = "0.0.0.0"\n{marker}' if marker.startswith("lan") else f'{marker}\nhost = "0.0.0.0"')
-    cfg = write_config(home, text)
-    result = migrate_cfg(home)
-    assert result.returncode == 0, result.stdout + result.stderr
-    data = parsed(cfg)
-    assert data["ds4"]["host"] == "0.0.0.0"
-    assert "opt-out marker" in result.stdout
-    # the opt-out only covers the host; the missing peer URL is still added
-    assert data["omlx"]["env"]["OMLX_PEER_EVICT_URLS"] == "http://127.0.0.1:8001"
-    assert 'host "0.0.0.0" -> ' not in result.stdout
-    (backup,) = backups(home)
-    assert (home / backup).read_text() == text
-
-
-def test_a_custom_host_is_never_touched(home):
-    text = OLD_CONFIG.replace('host = "0.0.0.0"', 'host = "192.168.3.78"')
-    cfg = write_config(home, text)
-    assert migrate_cfg(home).returncode == 0
-    assert parsed(cfg)["ds4"]["host"] == "192.168.3.78"
-
-
-def test_a_second_run_changes_nothing(home):
-    cfg = write_config(home, OLD_CONFIG)
-    assert migrate_cfg(home).returncode == 0
-    first, first_backups = cfg.read_bytes(), backups(home)
-    assert len(first_backups) == 1
-    result = migrate_cfg(home)
-    assert result.returncode == 0, result.stderr
-    assert cfg.read_bytes() == first and backups(home) == first_backups
-    assert "up to date" in result.stdout
-
-
-def test_a_current_config_gets_no_backup(home):
-    cfg = write_config(home, (ENGINES / "engines.default.toml").read_text())
-    before = cfg.read_bytes()
-    result = migrate_cfg(home)
-    assert result.returncode == 0 and "up to date" in result.stdout
-    assert cfg.read_bytes() == before and backups(home) == []
-
-
-def test_a_config_without_omlx_env_gets_the_section_even_without_a_final_newline(home):
-    text = '[ds4]\nhost = "0.0.0.0"  # lan\nctx = 1'
-    cfg = write_config(home, text)
-    assert migrate_cfg(home).returncode == 0
-    data = parsed(cfg)
-    assert data["ds4"]["host"] == "127.0.0.1" and data["ds4"]["ctx"] == 1
-    assert data["omlx"]["env"] == {"OMLX_PEER_EVICT_URLS": "http://127.0.0.1:8001"}
-    assert 'host = "127.0.0.1"  # lan' in cfg.read_text()
-
-
-def test_an_existing_peer_url_is_kept(home):
-    text = OLD_CONFIG.replace('OMLX_SUPERVISED = "launchd"', 'OMLX_SUPERVISED = "launchd"\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:9001"')
-    cfg = write_config(home, text)
-    assert migrate_cfg(home).returncode == 0
-    assert parsed(cfg)["omlx"]["env"]["OMLX_PEER_EVICT_URLS"] == "http://127.0.0.1:9001"
-    assert cfg.read_text().count("OMLX_PEER_EVICT_URLS") == 1
-
-
-def test_an_invalid_config_is_left_alone(home):
-    cfg = write_config(home, "[ds4\nhost = oops\n")
-    result = migrate_cfg(home)
-    assert result.returncode == 0 and "not valid TOML" in result.stdout
-    assert cfg.read_text() == "[ds4\nhost = oops\n" and backups(home) == []
-
-
-def test_a_missing_config_is_not_created_by_the_migration(home):
-    result = migrate_cfg(home)
-    assert result.returncode == 0 and "nothing to migrate" in result.stdout
-    assert not (home / "engines.toml").exists()
-
-
-def test_the_build_script_migrates_through_its_flag(home):
-    cfg = write_config(home, OLD_CONFIG)
-    result = run(["bash", str(SCRIPTS / "build-engines-mac.sh"), "--migrate-config"], {"UNSLOTH_ENGINES_HOME": str(home)})
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert parsed(cfg)["ds4"]["host"] == "127.0.0.1" and len(backups(home)) == 1
-
-
-def test_update_migrates_the_config_and_dry_run_does_not(rig):
-    cfg = write_config(rig.home, OLD_CONFIG)
-    dry = rig.update("--dry-run")
-    assert dry.returncode == 0, dry.stdout + dry.stderr
-    assert cfg.read_text() == OLD_CONFIG and backups(rig.home) == []
-    result = rig.update()
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert parsed(cfg)["ds4"]["host"] == "127.0.0.1" and len(backups(rig.home)) == 1
-    assert "migrated" in result.stdout
-
 
 def code_lines(path: Path) -> str:
     return "\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("#"))
@@ -1600,7 +1221,7 @@ def test_install_in_with_app_mode_finds_the_helpers_already_down_after_the_app_q
         assert result.returncode == 0, result.stdout + result.stderr
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
         # nothing to stop, nothing owed, nothing registered: the app does that at its next launch
-        assert helpers_touched(rig) == []
+        assert helpers_touched(rig) == ["engine-helpers unregister"]
         assert not any(rig.loaded(label) for label in rig.labels)
     finally:
         rig.close()
@@ -1644,5 +1265,197 @@ def test_the_install_does_not_quit_an_app_that_is_not_running(tmp_path, home):
             rig.fork_env(),
         )
         assert result.returncode == 0 and "osascript" not in result.stdout and "done" in result.stdout, result.stdout + result.stderr
+    finally:
+        rig.close()
+
+
+def test_bash_backoff_schedule_matches_python(home):
+    waits = []
+    for _ in range(8):
+        result = run(
+            ["bash", "-c", 'sleep() { echo "SLEEP $1"; }; . "$1"; engines_fail omlx "boom"', "_", str(ENGINES / "engines-common.sh")],
+            {"ENGINES_HOME": str(home)},
+        )
+        assert result.returncode == 78
+        waits.append(int(result.stdout.split("SLEEP ")[1].split()[0]))
+    assert waits == [10, 20, 40, 80, 160, 300, 300, 300]
+    assert read_fail(home, "omlx")["count"] == 8
+
+
+
+def test_swap_replaces_the_venv_keeps_old_and_records_the_marker_after(home):
+    make_venv(home / "omlx", "old")
+    (home / ".provisioned").write_text("omlx=old-key\nomlx_kernels=1\n")
+    make_venv(home / "omlx.new", "new", ["omlx", "new-key", "omlx_kernels=0"])
+    result = build_fn(home, 'venv_in_use() { return 1; }; swap_venv "$ENGINES_HOME/omlx"')
+    assert result.returncode == 0, result.stderr
+    assert (home / "omlx" / "VERSION").read_text() == "new"
+    assert (home / "omlx.old" / "VERSION").read_text() == "old"
+    assert not (home / "omlx.new").exists() and not (home / "omlx" / ".staged").exists()
+    assert marker(home) == {"omlx": "new-key", "omlx_kernels": "0"}
+    # the entry point and pyvenv.cfg now name the live path, not omlx.new
+    assert (home / "omlx" / "bin" / "omlx").read_text().startswith(f"#!{home}/omlx/bin/python")
+    assert f"{home}/omlx.new" not in (home / "omlx" / "pyvenv.cfg").read_text()
+
+
+
+def test_pin_check_fails_on_a_dirty_submodule(repo_with_submodules, home):
+    (repo_with_submodules / "studio" / "engines" / "omlx" / "f").write_text("dirty")
+    result = pins(repo_with_submodules, home)
+    assert result.returncode != 0 and "local changes" in result.stderr
+
+
+# Legacy engines.toml migration and bundle hygiene.
+def config_migrate(home, text):
+    config = home / "engines.toml"
+    config.write_text(text)
+    result = build_fn(home, "migrate_config")
+    return config, result
+
+
+def test_generated_config_has_only_omlx():
+    import tomllib
+    config = tomllib.loads((ENGINES / "engines.default.toml").read_text())
+    assert set(config) == {"omlx"}
+    assert "OMLX_PEER_EVICT_URLS" not in config["omlx"]["env"]
+
+
+def test_peer_url_removal_preserves_config_and_backs_up_once(home):
+    import tomllib
+    original = '# saved\n[omlx]\nport = 9000\n[omlx.env]\nOMLX_NAX = "1"\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"\n[ds4]\nhost = "0.0.0.0"\n'
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    backups = list(home.glob("engines.toml.bak-*"))
+    assert len(backups) == 1 and backups[0].read_text() == original
+    data = tomllib.loads(config.read_text())
+    assert data["omlx"]["port"] == 9000
+    assert data["omlx"]["env"] == {"OMLX_NAX": "1"}
+    assert data["ds4"] == {"host": "0.0.0.0"}
+    before = config.stat().st_mtime_ns
+    assert build_fn(home, "migrate_config").returncode == 0
+    assert config.stat().st_mtime_ns == before
+    assert list(home.glob("engines.toml.bak-*")) == backups
+
+
+@pytest.mark.parametrize("text", [
+    '[omlx]\nport = 9000\n',
+    '[omlx.env]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:9999"\n',
+    '[other]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"\n',
+    '[omlx.env\ninvalid TOML',
+])
+def test_config_noop_never_writes_or_backs_up(home, text):
+    config = home / "engines.toml"
+    config.write_text(text)
+    before = config.stat().st_mtime_ns
+    assert build_fn(home, "migrate_config").returncode == 0
+    assert config.read_text() == text and config.stat().st_mtime_ns == before
+    assert not list(home.glob("engines.toml.bak-*"))
+
+
+def test_staging_removes_previous_engine_resources(home):
+    staging = home / "staging"
+    staging.mkdir()
+    (staging / "obsolete-resource").write_text("old")
+    result = build_fn(home, 'STAGING="$ENGINES_HOME/staging"; stage_wrappers')
+    assert result.returncode == 0, result.stderr
+    assert {p.name for p in staging.iterdir()} == {"omlx-launch", "engines-common.sh", "engines_launch.py"}
+
+
+def test_install_unregisters_using_old_bundle_before_swap():
+    text = (SCRIPTS / "build-fork-mac.sh").read_text()
+    stop = text.index('HELPER_APP="$INSTALLED_APP" helpers_stop')
+    swap = text.index('run mv "$INSTALLED_APP" "$APP_PREV"')
+    assert stop < swap
+
+
+def test_helper_cleanup_with_no_current_label_calls_old_cli(home, tmp_path):
+    # No HTTP server or launchctl: a stand-in old app records the unregister attempt.
+    binary = tmp_path / "Old.app" / "Contents" / "MacOS" / "unsloth-studio"
+    binary.parent.mkdir(parents=True)
+    binary.write_text('#!/bin/sh\n# --engine-helpers\nif [ "$2" = status ]; then echo \'{"helpers":[]}\'; else echo "$2" >>"$UNSLOTH_ENGINES_HOME/cli-calls"; fi\n')
+    binary.chmod(0o755)
+    result = run(["bash", "-c", f'log() {{ :; }}; warn() {{ :; }}; die() {{ exit 1; }}; run() {{ "$@"; }}; DRY=0; . "{SCRIPTS}/engines-lib.sh"; helper_loaded() {{ return 1; }}; helpers_stop; echo "owed=${{#STOPPED_HELPERS[@]}}"'], env_for(home, HELPER_APP=str(tmp_path / "Old.app")))
+    assert result.returncode == 0, result.stderr
+    assert (home / "cli-calls").read_text() == "unregister\n"
+    assert "owed=0" in result.stdout
+    assert not (home / "desktop.json").exists()
+
+
+def test_update_refuses_while_an_engine_is_busy_and_stages_nothing(rig):
+    (rig.home / "omlx-busy").write_text("1")
+    result = rig.update(STAGE_VERSION="new")
+    assert result.returncode != 0 and "oMLX is busy" in result.stderr
+    assert not any(c.startswith("fake stage") for c in rig.calls()) and helpers_touched(rig) == []
+    assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+
+
+
+def test_a_failed_unregister_still_restarts_the_helper_that_was_stopped(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        # The helper stopped before unregister reported failure; rollback must restart it.
+        result = install_app_rig(tmp_path, rig, {"FAKE_UNREGISTER_FAIL_AFTER": "omlx"})
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert not any(c.startswith("mv ") for c in rig.calls())
+        assert rig.cli_calls()[0] == "engine-helpers unregister"
+        assert "engine-helpers register" in rig.cli_calls()
+        assert_no_launchd_start(rig)
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
+
+def test_a_port_gate_timeout_restarts_the_stopped_helpers(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen()
+            port = held.getsockname()[1]
+            result = install_app_rig(
+                tmp_path, rig, {"ENGINE_PORTS": f"{rig.omlx_port} {port}", "PORT_GATE_TIMEOUT": "2"}
+            )
+        assert result.returncode != 0 and "ports still held" in result.stderr, result.stdout + result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+        assert all(rig.loaded(label) for label in rig.labels)
+    finally:
+        rig.close()
+
+
+
+def test_a_busy_engine_blocks_the_app_swap_and_leaves_the_app_alone(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
+        make_app(tmp_path / "Apps" / "Unsloth.app", "old", cli="cli")
+        (home / "omlx-busy").write_text("1")
+        result = fork_fn(tmp_path, "codesign() { :; }; DRY=0; install_app", rig.fork_env())
+        assert result.returncode != 0 and "oMLX is busy" in result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert helpers_touched(rig) == []
+    finally:
+        rig.close()
+
+
+
+def test_a_port_gate_timeout_after_the_backend_swap_restores_everything(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        with socket.socket() as held:
+            held.bind(("127.0.0.1", 0))
+            held.listen()
+            result = txn(
+                tmp_path,
+                rig,
+                extra_env={
+                    "ENGINE_PORTS": f"{rig.omlx_port} {held.getsockname()[1]}",
+                    "PORT_GATE_TIMEOUT": "2",
+                },
+            )
+        assert "ports still held" in result.stderr, result.stdout + result.stderr
+        assert_rolled_back(tmp_path, rig, result)
     finally:
         rig.close()

@@ -42,7 +42,7 @@ export function useNow(active: boolean, intervalMs = 1000): number {
   return now;
 }
 
-/** The prompt cap in force for the selected oMLX or DwarfStar model, or null for any other model. */
+/** The prompt cap in force for the selected oMLX model, or null for any other model. */
 export function useActiveAttachedContext(): number | null {
   const active = useActiveAttached();
   const status = useAttachedEnginesStore((s) => s.status);

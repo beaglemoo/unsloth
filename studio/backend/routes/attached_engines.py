@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Owner-only management routes for attached engines (oMLX, DwarfStar/ds4): live status, model residency, and seeding the saved provider rows that put them in the chat picker. Every route except ``/sync`` answers 404 while the ``attached_engines`` flag is off; ``/sync`` stays reachable so turning the flag off can remove the rows it seeded. Model ids travel in JSON bodies only, never in the path, because oMLX ids carry a colon (``swift-1.5-27b:fast``)."""
+"""Owner-only management routes for the attached oMLX engine."""
 
 import asyncio
 import hashlib
@@ -14,12 +14,10 @@ from pydantic import BaseModel, Field
 from auth import policy
 from auth.authentication import get_current_subject
 from core.inference.attached import (
-    ATTACHED_DS4_ID,
     ATTACHED_OMLX_ID,
     AttachedEngineError,
 )
 from core.inference.attached import arbiter
-from core.inference.attached.ds4_client import Ds4Client
 from core.inference.attached.omlx_client import OmlxClient, OmlxContext
 from loggers import get_logger
 from routes.provider_credentials import provider_config_guard
@@ -39,10 +37,6 @@ _gated = APIRouter(dependencies = [Depends(_require_enabled)])
 
 MIN_CONTEXT = 4096
 
-# Strong references: the loop keeps only weak ones to running tasks.
-_background: set[asyncio.Task] = set()
-
-
 class OmlxModelRequest(BaseModel):
     model_id: str = Field(min_length = 1, max_length = 512)
 
@@ -53,25 +47,17 @@ class OmlxContextRequest(BaseModel):
     max_context_window: Optional[int] = Field(default = None, ge = MIN_CONTEXT)
 
 
-class Ds4ContextRequest(BaseModel):
-    ctx: int = Field(ge = MIN_CONTEXT)
-
-
 class PrepareRequest(BaseModel):
-    provider: Literal["omlx", "dwarfstar"]
+    provider: Literal["omlx"]
 
 
 def _omlx(config: AttachedEnginesConfig) -> OmlxClient:
     return OmlxClient(config.omlx_url)
 
 
-def _ds4(config: AttachedEnginesConfig) -> Ds4Client:
-    return Ds4Client(config.ds4_url)
-
-
-def _models_hash(omlx_ids: list[str], ds4_ids: list[str]) -> str:
+def _models_hash(omlx_ids: list[str]) -> str:
     digest = hashlib.sha256()
-    for engine, ids in (("omlx", omlx_ids), ("ds4", ds4_ids)):
+    for engine, ids in (("omlx", omlx_ids),):
         digest.update(engine.encode())
         for model_id in sorted(ids):
             digest.update(b"\0" + model_id.encode())
@@ -89,52 +75,21 @@ def _engine_failure(name: str):
     return read_failure(name)
 
 
-def _start_ds4_in_background(client: Ds4Client) -> None:
-    async def run() -> None:
-        try:
-            status = await client.start()
-            if status.error:
-                logger.warning("DwarfStar start failed: %s", status.error)
-        except Exception:  # noqa: BLE001 -- a detached task has no caller to raise to
-            logger.exception("DwarfStar start crashed")
-
-    task = asyncio.get_running_loop().create_task(run())
-    _background.add(task)
-    task.add_done_callback(_background.discard)
-
-
-async def _kick_ds4_start(config: AttachedEnginesConfig) -> dict:
-    client = _ds4(config)
-    status = await client.status()
-    if not status.reachable:
-        return {"starting": False, "loaded": False, "reachable": False}
-    if status.loaded or status.starting:
-        return {"starting": status.starting, "loaded": status.loaded, "reachable": True}
-    _start_ds4_in_background(client)
-    return {"starting": True, "loaded": False, "reachable": True}
-
-
 @_gated.get("/status")
 async def attached_status(since: float = 0):
     config = get_config()
-    omlx_client, ds4_client = _omlx(config), _ds4(config)
-    omlx_status, ds4_status, ds4_ids = await asyncio.gather(
-        omlx_client.status(), ds4_client.status(), ds4_client.model_ids()
-    )
+    omlx_client = _omlx(config)
+    omlx_status = await omlx_client.status()
     omlx_ids = (
         await omlx_client.chat_model_ids(status = omlx_status) if omlx_status.reachable else None
     ) or []
-    ds4_ids = ds4_ids or []
     omlx = asdict(omlx_status)
     omlx["chat_model_ids"] = omlx_ids
     omlx["failure"] = _engine_failure("omlx")
-    ds4 = asdict(ds4_status)
-    ds4["failure"] = _engine_failure("ds4")
     return {
         "enabled": True,
         "omlx": omlx,
-        "ds4": ds4,
-        "models_hash": _models_hash(omlx_ids, ds4_ids),
+        "models_hash": _models_hash(omlx_ids),
         "notices": arbiter.recent_notices(since),
     }
 
@@ -189,7 +144,7 @@ async def _upsert_row(
 def _delete_rows() -> list[str]:
     return [
         row_id
-        for row_id in (ATTACHED_OMLX_ID, ATTACHED_DS4_ID)
+        for row_id in (ATTACHED_OMLX_ID, "attachedds400001")
         if providers_db.delete_provider(row_id)
     ]
 
@@ -200,16 +155,15 @@ async def attached_sync():
     if not config.enabled:
         deleted = await asyncio.to_thread(_delete_rows)
         return {"enabled": False, "deleted": deleted}
-    omlx_client, ds4_client = _omlx(config), _ds4(config)
-    omlx_status, ds4_status = await asyncio.gather(omlx_client.status(), ds4_client.status())
+    await asyncio.to_thread(providers_db.delete_provider, "attachedds400001")
+    omlx_client = _omlx(config)
+    omlx_status = await omlx_client.status()
     omlx_ids = (
         await omlx_client.chat_model_ids(status = omlx_status) if omlx_status.reachable else None
     )
-    ds4_ids = await ds4_client.model_ids() if ds4_status.reachable else None
     result = {}
     for row_id, ptype, name, url, ids in (
         (ATTACHED_OMLX_ID, "omlx", "oMLX", config.omlx_url, omlx_ids),
-        (ATTACHED_DS4_ID, "dwarfstar", "DwarfStar", config.ds4_url, ds4_ids),
     ):
         result[ptype] = await _upsert_row(
             row_id,
@@ -222,7 +176,7 @@ async def attached_sync():
     return {
         "enabled": True,
         "rows": result,
-        "models_hash": _models_hash(omlx_ids or [], ds4_ids or []),
+        "models_hash": _models_hash(omlx_ids or []),
     }
 
 
@@ -241,8 +195,6 @@ async def _admit_omlx_use():
     try:
         result.require_clear()
     except AttachedEngineError as exc:
-        if result.lease is not None:
-            await result.lease.release()
         raise HTTPException(
             status_code = 503,
             detail = str(exc),
@@ -250,10 +202,6 @@ async def _admit_omlx_use():
         ) from exc
     return result
 
-
-async def _release_omlx_admission(result) -> None:
-    if result.lease is not None:
-        await result.lease.release()
 
 
 @_gated.post("/omlx/load")
@@ -266,8 +214,6 @@ async def omlx_load(body: OmlxModelRequest):
         await client.load(dir_id)
     except AttachedEngineError as exc:
         raise HTTPException(status_code = 502, detail = str(exc)) from exc
-    finally:
-        await _release_omlx_admission(notice)
     return {"loaded": dir_id, "actions": list(notice.actions)}
 
 
@@ -291,8 +237,6 @@ async def omlx_context_get(body: OmlxModelRequest):
         return _context_body(body.model_id, await client.context(dir_id))
     except AttachedEngineError as exc:
         raise HTTPException(status_code = 502, detail = str(exc)) from exc
-    finally:
-        await _release_omlx_admission(notice)
 
 
 @_gated.post("/omlx/context")
@@ -315,32 +259,7 @@ async def omlx_context_set(body: OmlxContextRequest):
         updated = await client.context(dir_id)
     except AttachedEngineError as exc:
         raise HTTPException(status_code = 502, detail = str(exc)) from exc
-    finally:
-        await _release_omlx_admission(notice)
     return {**_context_body(body.model_id, updated), "requires_reload": requires_reload}
-
-
-@_gated.get("/ds4/context")
-async def ds4_context_get():
-    try:
-        return await _ds4(get_config()).config()
-    except AttachedEngineError as exc:
-        raise HTTPException(status_code = 502, detail = str(exc)) from exc
-
-
-@_gated.post("/ds4/context")
-async def ds4_context_set(body: Ds4ContextRequest):
-    client = _ds4(get_config())
-    try:
-        current = await client.config()
-        low, high = current.get("ctx_min"), current.get("ctx_max")
-        if isinstance(high, int) and body.ctx > high:
-            raise HTTPException(status_code = 422, detail = f"ctx exceeds the engine maximum ({high}).")
-        if isinstance(low, int) and body.ctx < low:
-            raise HTTPException(status_code = 422, detail = f"ctx is below the engine minimum ({low}).")
-        return await client.set_ctx(body.ctx)
-    except AttachedEngineError as exc:
-        raise HTTPException(status_code = 502, detail = str(exc)) from exc
 
 
 @_gated.post("/omlx/unload")
@@ -359,32 +278,15 @@ async def omlx_unload_all():
     return {"unloaded": await _omlx(get_config()).unload_all()}
 
 
-@_gated.post("/ds4/start")
-async def ds4_start():
-    return await _kick_ds4_start(get_config())
-
-
-@_gated.post("/ds4/stop")
-async def ds4_stop():
-    return asdict(await _ds4(get_config()).stop())
-
-
 @_gated.post("/prepare")
 async def prepare(body: PrepareRequest):
-    config = get_config()
-    if body.provider == "omlx":
-        result = await _admit_omlx_use()
-        try:
-            return {
-                "provider": "omlx",
-                "actions": list(result.actions),
-                "in_flight_killed": result.in_flight_killed,
-            }
-        finally:
-            await _release_omlx_admission(result)
-    if not config.prewarm_ds4_on_select:
-        return {"provider": "dwarfstar", "starting": False, "prewarm": False}
-    return {"provider": "dwarfstar", "prewarm": True, **await _kick_ds4_start(config)}
+    result = await _admit_omlx_use()
+    return {
+        "provider": body.provider,
+        "actions": list(result.actions),
+        "in_flight_killed": result.in_flight_killed,
+    }
+
 
 
 router.include_router(_gated)

@@ -385,18 +385,16 @@ export const CUSTOM_PROVIDER_PRESETS = [
   },
 ] as const;
 
-/** Saved provider rows owned by the attached-engines sync (oMLX, DwarfStar). Ids mirror
+/** Saved provider rows owned by the attached-engines sync. Ids mirror
  *  core/inference/attached/__init__.py. */
 export const ATTACHED_PROVIDER_IDS = {
   omlx: "attachedomlx0001",
-  dwarfstar: "attachedds400001",
 } as const;
 
 export type AttachedProviderKind = keyof typeof ATTACHED_PROVIDER_IDS;
 
 const ATTACHED_PROVIDER_LABELS: Record<AttachedProviderKind, string> = {
   omlx: "oMLX",
-  dwarfstar: "DwarfStar",
 };
 
 /** Which attached engine a connection is, by its saved id or, failing that, its type. */

@@ -11,7 +11,6 @@ import type {
 
 const STATUS: AttachedStatus = {
   omlx: null,
-  ds4: null,
   modelsHash: "h",
   notices: [],
 };

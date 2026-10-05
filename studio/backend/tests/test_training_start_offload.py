@@ -68,20 +68,6 @@ class _HookBackend(_FakeBackend):
         return self._result
 
 
-class _Lease:
-    def __init__(self):
-        self.released = 0
-        self.watched = 0
-        self.active_when_watched = None
-
-    async def release(self):
-        self.released += 1
-
-    async def watch_until(self, predicate):
-        self.watched += 1
-        self.active_when_watched = predicate()
-
-
 def _route_setup(monkeypatch, backend):
     monkeypatch.setattr(tr, "get_training_backend", lambda: backend)
     monkeypatch.setattr(tr, "_diffusion_training_active", lambda: False)
@@ -129,52 +115,27 @@ def test_start_route_offloads_blocking_start(monkeypatch):
     assert fake.start_thread is not loop_thread
 
 
-def test_training_hold_watches_until_training_is_no_longer_active(monkeypatch):
+@pytest.mark.parametrize("spawned,expected", [(True, "queued"), (False, "error")])
+def test_training_admission_proceeds_without_peer_holds(monkeypatch, spawned, expected):
     from core.inference.attached import arbiter
 
-    backend = _HookBackend()
-    lease = _Lease()
+    backend = _HookBackend(result = spawned)
     _route_setup(monkeypatch, backend)
-    monkeypatch.setattr(
-        arbiter,
-        "free_for_local_from_thread",
-        lambda *_args: SimpleNamespace(require_clear = lambda: None, lease = lease),
-    )
+    calls = []
 
-    async def _run():
-        response = await tr.start_training(
-            request = _request(), current_subject = "test-user", via_api_key = False
-        )
-        await asyncio.sleep(0)
-        return response
+    def admit(reason, loop):
+        # Admission runs before the training worker begins using memory.
+        assert backend.active is False
+        calls.append(reason)
+        return arbiter.ArbiterResult(acted = True, actions = ("Unloaded oMLX",))
 
-    response = asyncio.run(_run())
-
-    assert response.status == "queued"
-    assert lease.released == 0
-    assert lease.watched == 1
-    assert lease.active_when_watched is True
-
-
-def test_training_hold_releases_when_spawn_fails(monkeypatch):
-    from core.inference.attached import arbiter
-
-    backend = _HookBackend(result = False)
-    lease = _Lease()
-    _route_setup(monkeypatch, backend)
-    monkeypatch.setattr(
-        arbiter,
-        "free_for_local_from_thread",
-        lambda *_args: SimpleNamespace(require_clear = lambda: None, lease = lease),
-    )
-
-    response = asyncio.run(
-        tr.start_training(request = _request(), current_subject = "test-user", via_api_key = False)
-    )
-
-    assert response.status == "error"
-    assert lease.released == 1
-    assert lease.watched == 0
+    monkeypatch.setattr(arbiter, "free_for_local_from_thread", admit)
+    response = asyncio.run(tr.start_training(
+        request = _request(), current_subject = "test-user", via_api_key = False
+    ))
+    assert response.status == expected
+    assert calls == ["training"]
+    assert backend.active is spawned
 
 
 def test_training_admission_failure_returns_retryable_clear_message(monkeypatch):
@@ -188,9 +149,8 @@ def test_training_admission_failure_returns_retryable_clear_message(monkeypatch)
         "free_for_local_from_thread",
         lambda *_args: SimpleNamespace(
             require_clear = lambda: (_ for _ in ()).throw(
-                AttachedAdmissionError("DwarfStar is still starting")
+                AttachedAdmissionError("oMLX is still loading")
             ),
-            lease = None,
         ),
     )
 

@@ -2,14 +2,13 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 // Which context-length controls the Attached engines page shows: one per oMLX chat model (the
-// prompt cap is per model) and one for DwarfStar (a single value for the whole engine).
+// prompt cap is per model).
 
 import { groupOmlxModels } from "./omlx-groups.ts";
 import type { AttachedProvider, AttachedStatus } from "./types.ts";
 
 export type EngineContextTarget = {
   kind: AttachedProvider;
-  /** What the control loads; DwarfStar ignores it, the id only keys the React element. */
   modelId: string;
   label: string;
 };
@@ -24,9 +23,6 @@ export function engineContextTargets(
       if (group.kind !== "chat") continue;
       targets.push({ kind: "omlx", modelId: group.id, label: group.id });
     }
-  }
-  if (status.ds4?.reachable) {
-    targets.push({ kind: "dwarfstar", modelId: "dwarfstar", label: "DwarfStar" });
   }
   return targets;
 }
