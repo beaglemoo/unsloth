@@ -541,7 +541,7 @@ export const en = {
       connections: "Connections",
       data: "Data",
       apiKeys: "API",
-      attachedEngines: "Attached engines",
+      attachedEngines: "oMLX",
       remoteLan: "Remote & LAN",
       agents: "Agents",
       keyboardShortcuts: "Shortcuts",

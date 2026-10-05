@@ -496,7 +496,7 @@ export const hi = {
       chat: "चैट",
       connections: "कनेक्शन",
       apiKeys: "API",
-      attachedEngines: "Attached engines",
+      attachedEngines: "oMLX",
       remoteLan: "रिमोट और LAN",
       about: "परिचय",
       data: "डेटा",

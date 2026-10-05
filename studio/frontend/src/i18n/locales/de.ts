@@ -497,7 +497,7 @@ export const de = {
       chat: "Chat",
       connections: "Verbindungen",
       apiKeys: "API",
-      attachedEngines: "Attached engines",
+      attachedEngines: "oMLX",
       remoteLan: "Remote & LAN",
       about: "Info",
       data: "Daten",
