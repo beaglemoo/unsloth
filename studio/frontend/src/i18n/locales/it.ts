@@ -1248,7 +1248,7 @@ export const it = {
       data: "Dati",
       knowledge: "Conoscenza",
       apiKeys: "API",
-      attachedEngines: "Attached engines",
+      attachedEngines: "oMLX",
       remoteLan: "Remoto e LAN",
       agents: "Agenti",
       debugging: "Log",
