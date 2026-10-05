@@ -141,11 +141,21 @@ async def _upsert_row(
         return "updated"
 
 
-def _delete_rows() -> list[str]:
+LEGACY_DS4_ROW_ID = "attachedds400001"
+
+
+async def _delete_row(row_id: str) -> bool:
+    # Same guard as _upsert_row and the provider edit routes, so a delete cannot
+    # interleave with another write to the same row.
+    async with provider_config_guard(row_id):
+        return bool(await asyncio.to_thread(providers_db.delete_provider, row_id))
+
+
+async def _delete_rows() -> list[str]:
     return [
         row_id
-        for row_id in (ATTACHED_OMLX_ID, "attachedds400001")
-        if providers_db.delete_provider(row_id)
+        for row_id in (ATTACHED_OMLX_ID, LEGACY_DS4_ROW_ID)
+        if await _delete_row(row_id)
     ]
 
 
@@ -153,9 +163,9 @@ def _delete_rows() -> list[str]:
 async def attached_sync():
     config = get_config()
     if not config.enabled:
-        deleted = await asyncio.to_thread(_delete_rows)
+        deleted = await _delete_rows()
         return {"enabled": False, "deleted": deleted}
-    await asyncio.to_thread(providers_db.delete_provider, "attachedds400001")
+    await _delete_row(LEGACY_DS4_ROW_ID)
     omlx_client = _omlx(config)
     omlx_status = await omlx_client.status()
     omlx_ids = (
