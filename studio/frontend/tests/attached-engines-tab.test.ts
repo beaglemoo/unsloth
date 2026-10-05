@@ -12,7 +12,6 @@ import {
 } from "../src/features/settings/settings-tab-visibility.ts";
 import { SETTINGS_TABS } from "../src/features/settings/stores/settings-dialog-store.ts";
 import type {
-  AttachedDs4Status,
   AttachedOmlxModel,
   AttachedStatus,
 } from "../src/features/attached-engines/types.ts";
@@ -40,31 +39,8 @@ function row(patch: Partial<AttachedOmlxModel>): AttachedOmlxModel {
   };
 }
 
-function ds4(patch: Partial<AttachedDs4Status> = {}): AttachedDs4Status {
-  return {
-    reachable: true,
-    loaded: false,
-    starting: false,
-    pid: null,
-    uptimeS: null,
-    inFlight: 0,
-    idleRemainingS: null,
-    liveTps: null,
-    lastGenTps: null,
-    lastTtftMs: null,
-    startTimeoutS: 120,
-    ctx: null,
-    ctxActive: null,
-    pendingRestart: false,
-    error: null,
-    failure: null,
-    ...patch,
-  };
-}
-
 function status(
   rows: AttachedOmlxModel[],
-  engine: AttachedDs4Status | null,
   omlxReachable = true,
   chatModelIds: string[] = rows.map((r) => r.id),
 ): AttachedStatus {
@@ -78,7 +54,6 @@ function status(
       chatModelIds,
       failure: null,
     },
-    ds4: engine,
     modelsHash: "",
     notices: [],
     receivedAt: 1,
@@ -136,36 +111,7 @@ test("the chat settings Provider section keeps its own context control", () => {
   assert.match(sheet, /AttachedContextControl/);
 });
 
-test("context targets: one per oMLX chat model, plus DwarfStar", () => {
-  const targets = engineContextTargets(
-    status(
-      [
-        row({ id: "Swift", modelPath: "/m/Swift" }),
-        row({ id: "swift:fast", modelPath: "/m/Swift" }),
-        row({ id: "Gemma", modelPath: "/m/Gemma" }),
-        row({ id: "Embed", modelPath: "/m/Embed", engineType: "embedding" }),
-      ],
-      ds4(),
-      true,
-      ["Swift", "swift:fast", "Gemma"],
-    ),
-  );
-  assert.deepEqual(
-    targets.map((t) => [t.kind, t.label]),
-    [
-      ["omlx", "Swift"],
-      ["omlx", "Gemma"],
-      ["dwarfstar", "DwarfStar"],
-    ],
-  );
-});
-
-test("context targets skip an engine that cannot be read", () => {
-  assert.deepEqual(engineContextTargets(null), []);
-  assert.deepEqual(
-    engineContextTargets(status([row({})], ds4({ reachable: false }), false)),
-    [],
-  );
-  const onlyDs4 = engineContextTargets(status([row({})], ds4(), false));
-  assert.deepEqual(onlyDs4.map((t) => t.kind), ["dwarfstar"]);
+test("context targets: one per oMLX chat model", () => {
+  const targets = engineContextTargets(status([row({ id: "Swift" }), row({ id: "Embed", engineType: "embedding" })]));
+  assert.deepEqual(targets.map((t) => [t.kind, t.label]), [["omlx", "Swift"]]);
 });

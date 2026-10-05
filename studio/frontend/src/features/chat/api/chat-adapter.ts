@@ -6494,7 +6494,7 @@ export function createOpenAIStreamAdapter(
                 ? { top_p: params.topP }
                 : {}),
               // Floor at the provider's documented min (Kimi thinking needs >=16k); clamp at the per-model max.
-              // oMLX and DwarfStar then bound it by their own ceiling, here and not in the saved params.
+              // oMLX then bounds it by its own ceiling, here and not in the saved params.
               max_tokens: capMaxTokensForAttached(
                 Math.min(
                   Math.max(

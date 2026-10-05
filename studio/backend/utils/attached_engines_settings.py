@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Persisted settings for attached external engines (oMLX, DwarfStar/ds4), all off by default so Studio behaves exactly as upstream unless the owner opts in. ``enabled`` gates every attached-engine code path: the supervisor routes, the memory arbiter hooks and the provider sync. ``omlx_url`` / ``ds4_url`` name the engines' local servers and must be loopback, stored without a trailing ``/v1``. ``scan_denylist`` is a list of directories the model scanner must never surface or accept as a scan folder, and stays active even with ``enabled`` off. ``arbitrate_local_loads`` frees both engines' memory before a local GGUF load or a training run, and ``prewarm_ds4_on_select`` starts ds4 when its provider is picked in the chat. Environment overrides ``UNSLOTH_ATTACHED_ENGINES``, ``UNSLOTH_OMLX_URL``, ``UNSLOTH_DS4_URL`` and ``UNSLOTH_SCAN_DENYLIST`` (``os.pathsep`` separated) win over stored values, for headless deploys. Reads are cached for a short window because the deny-list and flag are on hot paths; writes invalidate the cache."""
+"""Persisted settings for the attached oMLX engine."""
 
 from __future__ import annotations
 
@@ -22,15 +22,12 @@ ATTACHED_ENGINES_SETTING_KEY = "attached_engines"
 
 ENABLED_ENV_VAR = "UNSLOTH_ATTACHED_ENGINES"
 OMLX_URL_ENV_VAR = "UNSLOTH_OMLX_URL"
-DS4_URL_ENV_VAR = "UNSLOTH_DS4_URL"
 SCAN_DENYLIST_ENV_VAR = "UNSLOTH_SCAN_DENYLIST"
 
 DEFAULT_ENABLED = False
 DEFAULT_OMLX_URL = "http://127.0.0.1:8843"
-DEFAULT_DS4_URL = "http://127.0.0.1:8001"
-DEFAULT_SCAN_DENYLIST = ("~/Homelab/dwarfstar/gguf",)
+DEFAULT_SCAN_DENYLIST: tuple[str, ...] = ()
 DEFAULT_ARBITRATE_LOCAL_LOADS = True
-DEFAULT_PREWARM_DS4_ON_SELECT = True
 
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _CACHE_TTL_S = 2.0
@@ -42,19 +39,15 @@ _cache: dict[str, tuple[float, "AttachedEnginesConfig"]] = {}
 class AttachedEnginesConfig:
     enabled: bool
     omlx_url: str
-    ds4_url: str
     scan_denylist: tuple[str, ...]
     arbitrate_local_loads: bool
-    prewarm_ds4_on_select: bool
 
 
 DEFAULT_CONFIG = AttachedEnginesConfig(
     enabled = DEFAULT_ENABLED,
     omlx_url = DEFAULT_OMLX_URL,
-    ds4_url = DEFAULT_DS4_URL,
     scan_denylist = DEFAULT_SCAN_DENYLIST,
     arbitrate_local_loads = DEFAULT_ARBITRATE_LOCAL_LOADS,
-    prewarm_ds4_on_select = DEFAULT_PREWARM_DS4_ON_SELECT,
 )
 
 
@@ -125,12 +118,12 @@ def _stored_config() -> AttachedEnginesConfig:
     if not isinstance(stored, dict):
         return config
     # Field by field: one hand-edited bad value must not discard the rest.
-    for key in ("enabled", "arbitrate_local_loads", "prewarm_ds4_on_select"):
+    for key in ("enabled", "arbitrate_local_loads"):
         if key in stored:
             parsed = _coerce_bool(stored[key])
             if parsed is not None:
                 config = replace(config, **{key: parsed})
-    for key in ("omlx_url", "ds4_url"):
+    for key in ("omlx_url",):
         if key in stored:
             try:
                 config = replace(config, **{key: normalize_loopback_url(stored[key])})
@@ -161,7 +154,7 @@ def _apply_env(config: AttachedEnginesConfig) -> AttachedEnginesConfig:
             _env_warn_once(ENABLED_ENV_VAR)
         else:
             config = replace(config, enabled = parsed)
-    for var, field in ((OMLX_URL_ENV_VAR, "omlx_url"), (DS4_URL_ENV_VAR, "ds4_url")):
+    for var, field in ((OMLX_URL_ENV_VAR, "omlx_url"),):
         raw = os.environ.get(var)
         if raw is not None and raw.strip():
             try:
@@ -202,12 +195,12 @@ def set_config(**changes: Any) -> AttachedEnginesConfig:
     for key, value in changes.items():
         if value is None:
             continue
-        if key in ("enabled", "arbitrate_local_loads", "prewarm_ds4_on_select"):
+        if key in ("enabled", "arbitrate_local_loads"):
             parsed = _coerce_bool(value)
             if parsed is None or isinstance(value, str):
                 raise ValueError(f"{key} must be true or false.")
             updates[key] = parsed
-        elif key in ("omlx_url", "ds4_url"):
+        elif key in ("omlx_url",):
             updates[key] = normalize_loopback_url(value)
         elif key == "scan_denylist":
             updates[key] = list(_clean_denylist(value))

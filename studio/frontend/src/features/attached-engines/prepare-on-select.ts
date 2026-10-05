@@ -7,8 +7,8 @@ import type { AttachedProvider } from "./types";
 import { refreshAttachedStatus } from "./use-attached-engines";
 
 /**
- * Picking an attached engine's row tells the backend so it can free memory (oMLX) or start
- * DwarfStar early. Fire and forget: a failure here must never block the selection, and with the
+ * Picking an attached engine's row tells the backend so it can free oMLX memory. Fire and forget:
+ * a failure here must never block the selection, and with the
  * flag off nothing is sent.
  */
 export function prepareAttachedEngineOnSelect(provider: AttachedProvider): void {

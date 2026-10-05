@@ -1,11 +1,10 @@
-# Unsloth attached engines (oMLX and DwarfStar/ds4).
+# Unsloth attached engine (oMLX).
 #
-# Read by the omlx-launch and ds4-ondemand-launch wrappers, and by the Studio
+# Read by the omlx-launch wrapper and by the Studio
 # desktop tray. Written by studio/scripts/build-engines-mac.sh only when it is
-# missing, so edit freely. build-engines-mac.sh and update-engines-mac.sh do
-# migrate an old generated file (backup: engines.toml.bak-<timestamp>): ds4
-# host "0.0.0.0" becomes "127.0.0.1" and OMLX_PEER_EVICT_URLS is added. "~" is
-# expanded in every path.
+# missing, so edit freely. build-engines-mac.sh and update-engines-mac.sh remove
+# the retired OMLX_PEER_EVICT_URLS setting from old generated files (backup:
+# engines.toml.bak-<timestamp>). "~" is expanded in every path.
 #
 # Per-run overrides (used for testing on alternate ports):
 #   UNSLOTH_ENGINES_CONFIG=<other toml>  UNSLOTH_ENGINES_HOME=<dir>
@@ -15,7 +14,7 @@ base_path = "~/.omlx-tuned"
 port = 8843
 # Memory ceiling: memory.memory_guard_tier in <base_path>/settings.json must be "safe"
 # (51.2 GiB on a 64 GB Mac, under the 56 GB Metal wired limit). Never "custom": it
-# disables peer eviction, so oMLX could no longer ask ds4 to unload.
+# disables conservative memory management.
 # host = "127.0.0.1"   # unset: oMLX uses the host from <base_path>/settings.json
 # extra_args = []
 
@@ -25,34 +24,3 @@ OMLX_NAX = "1"
 OMLX_QWEN35_QMM_NAX_VARIANT = "0"
 MallocSpaceEfficient = "1"
 OMLX_SUPERVISED = "launchd"
-# When oMLX needs memory it asks the ds4 launcher to unload (idle only; busy gets a 503).
-# Comma-separated base URLs; keep it equal to ds4 host:launcher_port below.
-OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"
-
-[ds4]
-# The symlink the existing launcher uses (points at the active GGUF).
-model = "~/Homelab/dwarfstar/ds4flash.gguf"
-# Model ids listed on :8001 are <alias>, <alias>-chat and <alias>-reasoner. The
-# alias is derived from the GGUF the symlink resolves to (realpath, minus .gguf
-# and the quant tag, lowercased), e.g. swift1.5-qwen3.8-flash-next. Override:
-# alias = "my-model"
-# The legacy qwen3.8-flash-next{,-chat,-reasoner} ids stay accepted, unlisted.
-# Used only if the file exists, as before.
-vision = "~/Homelab/dwarfstar/gguf/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf"
-# Launcher (OpenAI-compatible, on demand) and the internal ds4-server port. Loopback only:
-# /admin/* is loopback-only anyway, and nothing on the LAN needs the launcher. Set
-# host = "0.0.0.0" to serve other machines (the admin API then still answers 127.0.0.1 only).
-# A deliberate LAN host is kept by the migration only with a "# keep-lan" comment (or
-# `lan = true`) in this section.
-host = "127.0.0.1"
-launcher_port = 8001
-server_port = 8000
-ctx = 131072
-prefill_chunk = 1024
-start_timeout = 120
-idle_seconds = 300
-# The launcher asks oMLX to unload its models before ds4-server starts.
-omlx_url = "http://127.0.0.1:8843"
-# binary = ""    # default: <engines dir>/ds4/ds4-server shipped with the app
-# workdir = ""   # default: <engines dir>/ds4 (holds metal/)
-# log_dir = ""   # default: ~/Library/Logs/Unsloth/engines

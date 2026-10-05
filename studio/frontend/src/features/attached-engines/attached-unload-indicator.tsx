@@ -8,7 +8,7 @@ import { useAttachedEnginesStore } from "./attached-engines-store";
 import { useActiveAttached, useNow } from "./use-active-attached";
 import { refreshAttachedStatus } from "./use-attached-engines";
 
-/** Shown above the composer while an oMLX or DwarfStar model is selected: when the engine will
+/** Shown above the composer while an oMLX model is selected: when the engine will
  *  unload it ("Unloads in 4:12"), or that it is loading or not loaded. The countdown ticks every
  *  second and is resynced by each 5 s poll; a poll is also forced when a reply ends, because the
  *  engine restarts the idle clock then. Renders nothing for any other model. */
@@ -27,8 +27,6 @@ export function AttachedUnloadIndicator() {
 
   const state = unloadStateFor(status, active);
   const now = useNow(state?.kind === "countdown");
-  // DwarfStar's cold start has its own, longer message.
-  if (state?.kind === "loading" && active?.kind === "dwarfstar") return null;
   const text = describeUnload(state, status?.receivedAt, now);
   if (!text) return null;
   return (

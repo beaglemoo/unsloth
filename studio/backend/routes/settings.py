@@ -948,29 +948,23 @@ class AttachedEnginesPayload(BaseModel):
     # None leaves the stored value untouched (partial updates can't clobber it).
     enabled: Optional[bool] = None
     omlx_url: Optional[str] = Field(default = None, max_length = 256)
-    ds4_url: Optional[str] = Field(default = None, max_length = 256)
     scan_denylist: Optional[list[str]] = Field(default = None, max_length = 64)
     arbitrate_local_loads: Optional[bool] = None
-    prewarm_ds4_on_select: Optional[bool] = None
 
 
 class AttachedEnginesResponse(BaseModel):
     enabled: bool
     omlx_url: str
-    ds4_url: str
     scan_denylist: list[str]
     arbitrate_local_loads: bool
-    prewarm_ds4_on_select: bool
 
 
 def _attached_engines_response(config: AttachedEnginesConfig) -> AttachedEnginesResponse:
     return AttachedEnginesResponse(
         enabled = config.enabled,
         omlx_url = config.omlx_url,
-        ds4_url = config.ds4_url,
         scan_denylist = list(config.scan_denylist),
         arbitrate_local_loads = config.arbitrate_local_loads,
-        prewarm_ds4_on_select = config.prewarm_ds4_on_select,
     )
 
 

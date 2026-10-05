@@ -13,7 +13,6 @@ import {
 } from "../src/features/attached-engines/attached-active.ts";
 import { groupOmlxModels } from "../src/features/attached-engines/omlx-groups.ts";
 import type {
-  AttachedDs4Status,
   AttachedOmlxModel,
   AttachedStatus,
 } from "../src/features/attached-engines/types.ts";
@@ -40,31 +39,8 @@ function model(patch: Partial<AttachedOmlxModel>): AttachedOmlxModel {
   };
 }
 
-function ds4(patch: Partial<AttachedDs4Status>): AttachedDs4Status {
-  return {
-    reachable: true,
-    loaded: false,
-    starting: false,
-    pid: null,
-    uptimeS: null,
-    inFlight: 0,
-    idleRemainingS: null,
-    liveTps: null,
-    lastGenTps: null,
-    lastTtftMs: null,
-    startTimeoutS: 120,
-    ctx: null,
-    ctxActive: null,
-    pendingRestart: false,
-    error: null,
-    failure: null,
-    ...patch,
-  };
-}
-
 function status(
   rows: AttachedOmlxModel[],
-  engine: AttachedDs4Status | null = null,
   receivedAt = 1_000,
 ): AttachedStatus {
   return {
@@ -77,7 +53,6 @@ function status(
       chatModelIds: [],
       failure: null,
     },
-    ds4: engine,
     modelsHash: "",
     notices: [],
     receivedAt,
@@ -85,7 +60,6 @@ function status(
 }
 
 const omlx = (modelId: string) => ({ kind: "omlx" as const, modelId });
-const star = { kind: "dwarfstar" as const, modelId: "qwen" };
 
 test("context window prefers the resolved cap and falls back to the native length", () => {
   const capped = status([
@@ -97,13 +71,6 @@ test("context window prefers the resolved cap and falls back to the native lengt
   const native = status([model({ modelContextLength: 40960 })]);
   assert.equal(activeContextWindow(native, omlx("Swift")), 40960);
   assert.equal(activeContextWindow(native, omlx("missing")), null);
-});
-
-test("DwarfStar context is the running value, else the configured one", () => {
-  assert.equal(activeContextWindow(status([], ds4({ ctx: 100000, ctxActive: 90000 })), star), 90000);
-  assert.equal(activeContextWindow(status([], ds4({ ctx: 100000 })), star), 100000);
-  assert.equal(activeContextWindow(status([], ds4({ reachable: false, ctx: 5 })), star), null);
-  assert.equal(activeContextWindow(null, star), null);
 });
 
 test("oMLX unload states", () => {
@@ -124,16 +91,6 @@ test("oMLX unload states", () => {
     ),
     { kind: "countdown", remainingS: 90 },
   );
-});
-
-test("DwarfStar unload states", () => {
-  const at = (patch: Partial<AttachedDs4Status>) => unloadStateFor(status([], ds4(patch)), star);
-  assert.deepEqual(at({ reachable: false }), { kind: "offline" });
-  assert.deepEqual(at({ starting: true }), { kind: "loading" });
-  assert.deepEqual(at({}), { kind: "not-loaded" });
-  assert.deepEqual(at({ loaded: true, inFlight: 1 }), { kind: "busy" });
-  assert.deepEqual(at({ loaded: true }), { kind: "untimed" });
-  assert.deepEqual(at({ loaded: true, idleRemainingS: 180 }), { kind: "countdown", remainingS: 180 });
 });
 
 test("the countdown runs down from the poll and never goes negative", () => {
@@ -173,34 +130,20 @@ test("a group carries the smallest idle countdown of its loaded rows", () => {
   assert.equal(groups[0].idleRemainingS, 100);
 });
 
-test("output ceiling: oMLX's max_tokens, DwarfStar's context", async () => {
-  const { attachedMaxOutputTokens } = await import(
-    "../src/features/attached-engines/attached-active.ts"
-  );
-  const withTokens = status([model({ maxTokens: 8192 })]);
-  assert.equal(attachedMaxOutputTokens(withTokens, omlx("Swift")), 8192);
+test("oMLX output ceiling follows the model max_tokens", async () => {
+  const { attachedMaxOutputTokens } = await import("../src/features/attached-engines/attached-active.ts");
+  assert.equal(attachedMaxOutputTokens(status([model({ maxTokens: 8192 })]), omlx("Swift")), 8192);
   assert.equal(attachedMaxOutputTokens(status([model({})]), omlx("Swift")), null);
-  assert.equal(
-    attachedMaxOutputTokens(status([], ds4({ ctx: 100000, ctxActive: 65536 })), star),
-    65536,
-  );
-  assert.equal(attachedMaxOutputTokens(status([], ds4({ reachable: false })), star), null);
-  assert.equal(attachedMaxOutputTokens(null, star), null);
+  assert.equal(attachedMaxOutputTokens(null, omlx("Swift")), null);
 });
 
-test("the output ceiling bounds the request, never the saved value", async () => {
-  const { capMaxTokensForAttached } = await import(
-    "../src/features/attached-engines/attached-active.ts"
-  );
-  const small = status([], ds4({ ctx: 100000, ctxActive: 16384 }));
+test("the oMLX output ceiling bounds the request and preserves saved max tokens", async () => {
+  const { capMaxTokensForAttached } = await import("../src/features/attached-engines/attached-active.ts");
+  const small = status([model({ maxTokens: 16384 })]);
   const saved = 65536;
-  assert.equal(capMaxTokensForAttached(saved, small, star), 16384);
-  // the caller's value is a plain number: nothing was written back
+  assert.equal(capMaxTokensForAttached(saved, small, omlx("Swift")), 16384);
   assert.equal(saved, 65536);
-  // unknown ceiling, offline engine, no attached selection: pass through
-  assert.equal(capMaxTokensForAttached(saved, status([], ds4({ reachable: false })), star), saved);
-  assert.equal(capMaxTokensForAttached(saved, null, star), saved);
+  assert.equal(capMaxTokensForAttached(saved, null, omlx("Swift")), saved);
   assert.equal(capMaxTokensForAttached(saved, small, null), saved);
-  // already within the ceiling
-  assert.equal(capMaxTokensForAttached(4096, small, star), 4096);
+  assert.equal(capMaxTokensForAttached(4096, small, omlx("Swift")), 4096);
 });

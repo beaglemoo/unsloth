@@ -42,7 +42,7 @@ from models.providers import (
 # self-hosted vLLM or llama.cpp registers without its preset. Unknown endpoint means assume a template applies:
 # sweeping a hosted API costs a space in delimiter-like text, not sweeping a local one costs a forged turn.
 _TEMPLATE_APPLYING_PROVIDERS = frozenset(
-    {"vllm", "llama_cpp", "ollama", "custom", "lemonade", "omlx", "dwarfstar"}
+    {"vllm", "llama_cpp", "ollama", "custom", "lemonade", "omlx"}
 )
 
 # The subset documenting "continue_final_message" + "add_generation_prompt" on /v1/chat/completions.
@@ -52,7 +52,7 @@ _CONTINUATION_FLAG_PROVIDERS = frozenset({"vllm", "llama_cpp"})
 # chat context bar without prompt_tokens and, where no llama.cpp timings arrive, the monitor without a speed. Same
 # caution as the flag above: "custom" is any user-supplied base_url and a strict endpoint 400s on an unknown field.
 # "openai" is absent because it routes to /v1/responses, which reports usage on its own.
-_USAGE_STREAM_OPTION_PROVIDERS = frozenset({"vllm", "llama_cpp", "openrouter", "kimi", "lemonade", "omlx", "dwarfstar"})
+_USAGE_STREAM_OPTION_PROVIDERS = frozenset({"vllm", "llama_cpp", "openrouter", "kimi", "lemonade", "omlx"})
 
 # llama-server reads repeat_penalty, not repetition_penalty (as routes/inference does).
 _REPETITION_PENALTY_BODY_KEY = {"llama_cpp": "repeat_penalty"}
