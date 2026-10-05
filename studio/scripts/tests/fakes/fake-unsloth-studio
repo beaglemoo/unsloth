@@ -19,8 +19,11 @@
 #   FAKE_UNREGISTER_FAIL_AFTER=<suffix> unregister stops that helper, then reports failure
 #   FAKE_RESTART_FAIL=1        restart exits 1 and changes nothing
 #   FAKE_STATUS_FAIL=1         status exits 1
+#   FAKE_LEGACY_DS4_STICKY=<n> migration tests: a legacy ds4 job (registered.ai.unsloth.studio.ds4, started
+#                              by the test, never by register) survives the first <n> unregister calls
 fakes="__FAKES__"
 LABELS=(ai.unsloth.studio.omlx)
+LEGACY=ai.unsloth.studio.ds4
 [ "${1:-}" = "--engine-helpers" ] || { echo "gui-started" >>"$FAKE_LC/calls.log"; exit 0; }
 echo "engine-helpers ${2:-}" >>"$FAKE_LC/calls.log"
 
@@ -60,7 +63,17 @@ do_register() {
   report ""
 }
 do_unregister() {
-  local label failed=""
+  local label failed="" count=0
+  # the legacy ds4 job of a pre-removal app: unregistered with the others unless it is sticky
+  if registered "$LEGACY"; then
+    [ ! -f "$FAKE_LC/ds4-unregister-count" ] || count="$(cat "$FAKE_LC/ds4-unregister-count")"
+    count=$((count + 1))
+    echo "$count" >"$FAKE_LC/ds4-unregister-count"
+    if [ "$count" -gt "${FAKE_LEGACY_DS4_STICKY:-0}" ]; then
+      rm -f "$FAKE_LC/registered.$LEGACY"
+      stop "$LEGACY"
+    fi
+  fi
   for label in "${LABELS[@]}"; do
     if [ -n "${FAKE_UNREGISTER_FAIL:-}" ] && [ "${label##*.}" = "$FAKE_UNREGISTER_FAIL" ]; then
       failed="$failed ${label##*.}"
