@@ -3,7 +3,7 @@
 
 """Read the crash-loop marker the engine launch wrappers leave behind.
 
-The bundled wrappers (``omlx-launch``, ``ds4-ondemand-launch``, ``engines_launch.py``) write
+The bundled wrappers write
 ``<engines home>/<name>.fail`` when a precondition stops an engine from starting (missing venv,
 config or model, port in use) and remove it right before the engine is exec'd. The file is JSON:
 ``{"reason": str, "ts": epoch seconds, "count": consecutive failures}``. Stdlib only.

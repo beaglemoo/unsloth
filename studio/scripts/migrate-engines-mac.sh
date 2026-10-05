@@ -1,6 +1,6 @@
 #!/bin/bash
-# Live cutover from the old oMLX / EngineBar / ds4 launchd setup to the fork's Unsloth.app,
-# which bundles both engines as SMAppService helpers. Also the matching rollback.
+# Live cutover from the old oMLX / EngineBar launchd setup to the fork's Unsloth.app,
+# which bundles oMLX as an SMAppService helper. Also the matching rollback.
 #
 #   migrate-engines-mac.sh [--dry-run] [--yes]                      cutover
 #   migrate-engines-mac.sh --rollback [<state dir>] [--dry-run] [--yes]
@@ -9,18 +9,17 @@
 #   1. preflight: dist/Unsloth.app passes codesign, ~/.unsloth/engines/.provisioned exists,
 #      the oMLX roster (/v1/models ids) is recorded
 #   2. back up ~/.unsloth/studio (ditto, size reported first) and the old plists
-#   3. unload every loaded oMLX model, stop ds4 (POST :8001/admin/stop, up to 135 s)
+#   3. unload every loaded oMLX model
 #      -- asks for confirmation first unless --yes
-#   4. bootout dev.sillymoo.{omlx-tuned,enginebar,ds4-ondemand} (and ds4-menubar if present),
+#   4. bootout dev.sillymoo.{omlx-tuned,enginebar},
 #      move their plists to *.retired
 #   5. quit oMLX.app and EngineBar.app via osascript (never killed)
-#   6. port-free gate: :8843, :8001, :8000 must stop listening (120 s)
+#   6. port-free gate: :8843 must stop listening (120 s)
 #   7. build-fork-mac.sh --install
 #   8. open /Applications/Unsloth.app; the user enables Settings > Attached engines > Background
 #      engines and approves the Login Items prompt (the app is not notarized); poll up to
-#      10 minutes for :8843 and :8001
-#   9. verify: roster matches the pre-migration ids, ds4 runs the bundled binary, both
-#      ai.unsloth.studio.* agents are running
+#      10 minutes for :8843
+#   9. verify: roster matches the pre-migration ids and the oMLX agent is running
 #
 # --rollback restores the old setup from the state dir (default: the latest). Engines are
 # unloaded and stopped first so no process holding weights is ever killed, then the helpers
@@ -65,11 +64,8 @@ LA_DIR="$HOME/Library/LaunchAgents"
 RUNTIME_PY="$HOME/Homelab/omlx-stack/scripts/omlx_tuned_runtime.py"
 DOMAIN="gui/$(id -u)"
 OMLX_URL="http://127.0.0.1:8843"
-DS4_URL="http://127.0.0.1:8001"
-OLD_LABELS=(dev.sillymoo.omlx-tuned dev.sillymoo.enginebar dev.sillymoo.ds4-ondemand)
-OPTIONAL_LABEL="dev.sillymoo.ds4-menubar"
+OLD_LABELS=(dev.sillymoo.omlx-tuned dev.sillymoo.enginebar)
 NEW_OMLX="ai.unsloth.studio.omlx"
-NEW_DS4="ai.unsloth.studio.ds4"
 STUDIO_BUNDLE_ID="ai.unsloth.studio"
 GATE_TIMEOUT=120
 BOOT_TIMEOUT=600
@@ -142,15 +138,7 @@ print(int(s.get("active_requests", 0)) + int(s.get("waiting_requests", 0)) + int
 print("\n".join(s.get("loaded_models", [])))'
 }
 
-# stdin: ds4 launcher /admin/status JSON; stdout: <loaded 0|1> <in_flight>
-ds4_status_summary() {
-  python3 -c '
-import json, sys
-s = json.load(sys.stdin)
-print(int(bool(s.get("loaded"))), int(s.get("in_flight") or 0))'
-}
-
-# Unload every loaded oMLX model and stop ds4. Quiescence is the hard gate; a model that stays
+# Unload every loaded oMLX model. Quiescence is the hard gate; a model that stays
 # loaded (for example a pinned one) is only a warning because the engines are then stopped
 # gracefully, never killed.
 stop_engines() {
@@ -194,34 +182,16 @@ stop_engines() {
     log "oMLX: $OMLX_URL not reachable, nothing to unload"
   fi
 
-  local ds4
-  if ds4="$(curl -fsS -m 5 "$DS4_URL/admin/status" 2>/dev/null)"; then
-    local loaded_flag in_flight
-    read -r loaded_flag in_flight <<<"$(printf '%s' "$ds4" | ds4_status_summary)"
-    [ "$in_flight" = 0 ] || die "ds4 has $in_flight request(s) in flight; wait for it to go idle"
-    if [ "$loaded_flag" = 1 ]; then
-      log "ds4: stopping (POST /admin/stop, may block up to 135 s)"
-      post "$DS4_URL/admin/stop" 150
-      case "$POST_CODE" in
-        200|202|204) log "ds4: stopped" ;;
-        *) die "ds4 /admin/stop failed with HTTP $POST_CODE" ;;
-      esac
-    else
-      log "ds4: not loaded, nothing to stop"
-    fi
-  else
-    log "ds4: $DS4_URL not reachable, nothing to stop"
-  fi
 }
 
-port_owners() { lsof -nP -iTCP:8843 -iTCP:8001 -iTCP:8000 -sTCP:LISTEN 2>/dev/null || true; }
+port_owners() { lsof -nP -iTCP:8843 -sTCP:LISTEN 2>/dev/null || true; }
 
 port_gate() {
-  log "port-free gate: :8843, :8001 and :8000 must stop listening (${GATE_TIMEOUT} s)"
+  log "port-free gate: :8843 must stop listening (${GATE_TIMEOUT} s)"
   if [ "$DRY" = 1 ]; then
-    printf '[dry-run] poll lsof -nP -iTCP:8843 -iTCP:8001 -iTCP:8000 -sTCP:LISTEN every 2 s until empty (timeout %s s)\n' "$GATE_TIMEOUT"
+    printf '[dry-run] poll lsof -nP -iTCP:8843 -sTCP:LISTEN every 2 s until empty (timeout %s s)\n' "$GATE_TIMEOUT"
     local owners; owners="$(port_owners)"
-    if [ -n "$owners" ]; then log "dry-run: current listeners:"; printf '%s\n' "$owners" | sed 's/^/    /'; else log "dry-run: all three ports are free"; fi
+    if [ -n "$owners" ]; then log "dry-run: current listeners:"; printf '%s\n' "$owners" | sed 's/^/    /'; else log "dry-run: the oMLX port is free"; fi
     return 0
   fi
   local start=$SECONDS owners
@@ -259,18 +229,17 @@ bundle_id() { # <app path> <fallback>
 }
 
 wait_for_endpoints() { # <timeout s>
-  local start=$SECONDS last=-15 omlx_ok ds4_ok
+  local start=$SECONDS last=-15 omlx_ok
   while :; do
-    omlx_ok=0; ds4_ok=0
+    omlx_ok=0
     curl -fsS -m 3 -o /dev/null "$OMLX_URL/v1/models" 2>/dev/null && omlx_ok=1
-    curl -fsS -m 3 -o /dev/null "$DS4_URL/admin/status" 2>/dev/null && ds4_ok=1
-    [ "$omlx_ok" = 1 ] && [ "$ds4_ok" = 1 ] && return 0
+    [ "$omlx_ok" = 1 ] && return 0
     if [ $((SECONDS - start)) -ge "$1" ]; then
       return 1
     fi
     if [ $((SECONDS - last - start)) -ge 15 ]; then
       last=$((SECONDS - start))
-      log "waiting ($last s): :8843 /v1/models $([ "$omlx_ok" = 1 ] && echo up || echo down), :8001 /admin/status $([ "$ds4_ok" = 1 ] && echo up || echo down)"
+      log "waiting ($last s): :8843 /v1/models $([ "$omlx_ok" = 1 ] && echo up || echo down)"
     fi
     sleep 3
   done
@@ -323,24 +292,24 @@ cutover() {
     warn "$STUDIO_DIR does not exist; nothing to back up"
   fi
   local label plist
-  for label in "${OLD_LABELS[@]}" "$OPTIONAL_LABEL"; do
+  for label in "${OLD_LABELS[@]}"; do
     plist="$LA_DIR/$label.plist"
     if [ -f "$plist" ]; then
       run cp -p "$plist" "$STATE/$label.plist"
-    elif [ "$label" != "$OPTIONAL_LABEL" ]; then
+    else
       warn "$plist not found"
     fi
   done
 
   # 3/9 stop engines -----------------------------------------------------------------------
-  log "3/9 unload oMLX models and stop ds4"
-  confirm "This unloads all oMLX models and stops DwarfStar (ds4), then replaces the old engine agents. Continue?"
+  log "3/9 unload oMLX models"
+  confirm "This unloads all oMLX models, then replaces the old engine agents. Continue?"
   HINT="to roll back: $rollback_cmd $STATE"
   stop_engines
 
   # 4/9 bootout old agents -----------------------------------------------------------------
   log "4/9 bootout the old agents and retire their plists"
-  for label in "${OLD_LABELS[@]}" "$OPTIONAL_LABEL"; do
+  for label in "${OLD_LABELS[@]}"; do
     plist="$LA_DIR/$label.plist"
     if label_loaded "$label"; then
       log "bootout $label"
@@ -377,18 +346,17 @@ cutover() {
   log "ACTION NEEDED in System Settings > General > Login Items: approve the Unsloth items"
   log "(the app is not notarized, so macOS asks for approval)."
   if [ "$DRY" = 1 ]; then
-    log "dry-run: would poll $OMLX_URL/v1/models and $DS4_URL/admin/status for up to ${BOOT_TIMEOUT} s"
+    log "dry-run: would poll $OMLX_URL/v1/models for up to ${BOOT_TIMEOUT} s"
   else
-    wait_for_endpoints "$BOOT_TIMEOUT" || die "engines did not answer within ${BOOT_TIMEOUT} s (:8843 /v1/models, :8001 /admin/status)"
-    log "both endpoints answer"
+    wait_for_endpoints "$BOOT_TIMEOUT" || die "oMLX did not answer within ${BOOT_TIMEOUT} s (:8843 /v1/models)"
+    log "oMLX endpoint answers"
   fi
 
   # 9/9 verify -----------------------------------------------------------------------------
   log "9/9 verify"
   if [ "$DRY" = 1 ]; then
     log "dry-run: would compare the /v1/models ids with $STATE/pre-roster.txt and print the diff"
-    log "dry-run: would check /admin/status config.ds4_binary is under $INSTALLED_APP/Contents/Resources/engines/ds4/"
-    log "dry-run: would check launchctl print $DOMAIN/$NEW_OMLX and $DOMAIN/$NEW_DS4 show state = running"
+    log "dry-run: would check launchctl print $DOMAIN/$NEW_OMLX shows state = running"
     log "dry-run complete"
     return 0
   fi
@@ -400,12 +368,7 @@ cutover() {
   else
     die "roster differs from the pre-migration ids (diff above)"
   fi
-  local binary expected
-  expected="$INSTALLED_APP/Contents/Resources/engines/ds4/"
-  binary="$(curl -fsS -m 5 "$DS4_URL/admin/status" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("config", {}).get("ds4_binary", ""))')"
-  log "ds4 binary: $binary"
-  case "$binary" in "$expected"*) ;; *) die "ds4 binary is not the bundled one (expected under $expected)" ;; esac
-  for label in "$NEW_OMLX" "$NEW_DS4"; do
+  for label in "$NEW_OMLX"; do
     launchctl print "$DOMAIN/$label" | grep -E 'state =|pid =' | sed 's/^/    /' || true
     label_running "$label" || die "$label is not running"
   done
@@ -461,7 +424,7 @@ rollback() {
   HINT="re-run: $0 --rollback $STATE (every step skips what is already done)"
 
   # 0 quiesce: bootout and the helper toggle SIGTERM then SIGKILL after ExitTimeOut -------
-  log "0/7 unload oMLX models and stop ds4 first, so nothing holding weights is killed"
+  log "0/7 unload oMLX models first, so nothing holding weights is killed"
   stop_engines
 
   # 1 disable helpers ---------------------------------------------------------------------
@@ -469,11 +432,11 @@ rollback() {
   if app_running unsloth-studio; then
     log "ACTION NEEDED in Unsloth: Settings > Attached engines > Engines enabled: turn it off."
     if [ "$DRY" = 1 ]; then
-      log "dry-run: would wait up to 180 s for $NEW_OMLX and $NEW_DS4 to leave launchd, then fall back to bootout"
+      log "dry-run: would wait up to 180 s for $NEW_OMLX to leave launchd, then fall back to bootout"
     else
       local i
       for i in $(seq 1 60); do
-        label_loaded "$NEW_OMLX" || label_loaded "$NEW_DS4" || break
+        label_loaded "$NEW_OMLX" || break
         [ $((i % 5)) -ne 1 ] || log "waiting for the helpers to be disabled ($((i * 3)) s)"
         sleep 3
       done
@@ -482,7 +445,7 @@ rollback() {
     log "Unsloth is not running, so the toggle is not reachable; using launchctl bootout"
   fi
   local label
-  for label in "$NEW_OMLX" "$NEW_DS4"; do
+  for label in "$NEW_OMLX"; do
     if label_loaded "$label"; then
       warn "$label is still loaded; booting it out. SMAppService may re-register it while the app is installed;"
       warn "remove it for good in System Settings > General > Login Items if it comes back."
@@ -529,7 +492,7 @@ rollback() {
   restore_retired_apps
   local plist saved
   local -a restored=()
-  for label in dev.sillymoo.ds4-ondemand dev.sillymoo.omlx-tuned dev.sillymoo.enginebar "$OPTIONAL_LABEL"; do
+  for label in dev.sillymoo.omlx-tuned dev.sillymoo.enginebar; do
     plist="$LA_DIR/$label.plist"
     saved="$STATE/$label.plist"
     if [ -f "$plist" ]; then
@@ -539,7 +502,7 @@ rollback() {
     elif [ -f "$saved" ]; then
       run cp -p "$saved" "$plist"
     else
-      [ "$label" = "$OPTIONAL_LABEL" ] || warn "no plist to restore for $label"
+      warn "no plist to restore for $label"
       continue
     fi
     if [ -f "$saved" ] && [ -f "$plist" ] && ! cmp -s "$saved" "$plist"; then
@@ -582,13 +545,13 @@ print(0 if s.get("api", {}).get("reachable") and s.get("metadata_state") == "act
   fi
 
   # 7 verify ------------------------------------------------------------------------------
-  log "7/7 verify :8843 and :8001"
+  log "7/7 verify :8843"
   if [ "$DRY" = 1 ]; then
-    log "dry-run: would poll $OMLX_URL/v1/models and $DS4_URL/admin/status for up to 180 s"
+    log "dry-run: would poll $OMLX_URL/v1/models for up to 180 s"
     log "dry-run complete"
     return 0
   fi
-  wait_for_endpoints 180 || die "the old engines did not answer on :8843 / :8001; check launchctl print $DOMAIN/dev.sillymoo.ds4-ondemand and the oMLX runtime status"
+  wait_for_endpoints 180 || die "oMLX did not answer on :8843; check its launchctl status and runtime status"
   fetch_roster | sed 's/^/    /'
   HINT=""
   log "rollback complete. The fork's Studio copy is kept next to ~/.unsloth for inspection."

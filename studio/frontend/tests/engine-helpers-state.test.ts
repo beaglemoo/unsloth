@@ -70,7 +70,6 @@ test("bundled but unregistered helpers offer the enable switch, not a missing-bu
     status("not_registered", {
       helpers: [
         { name: "omlx", plist: "ai.unsloth.studio.omlx.plist", state: "not_registered" },
-        { name: "ds4", plist: "ai.unsloth.studio.ds4.plist", state: "not_registered" },
       ],
     }),
   );
