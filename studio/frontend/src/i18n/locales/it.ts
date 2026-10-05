@@ -1142,7 +1142,7 @@ export const it = {
       connections: "Connessioni",
       data: "Dati",
       apiKeys: "API",
-      attachedEngines: "Attached engines",
+      attachedEngines: "oMLX",
       remoteLan: "Remoto e LAN",
       agents: "Agenti",
       debugging: "Log",
