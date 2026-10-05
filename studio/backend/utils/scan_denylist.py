@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Owner-configured model-scan deny-list. A directory named here (the default is the DwarfStar GGUF folder, which belongs to the ds4 launcher and must not appear as a loadable local model) is never listed, never accepted as a scan folder, and never walked as part of one. Unlike every other attached-engines feature this is active even with the ``attached_engines`` flag off. Matching is by resolved path prefix, so a symlink into a denied folder is denied too."""
+"""Owner-configured model-scan deny-list."""
 
 from __future__ import annotations
 

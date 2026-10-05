@@ -1,19 +1,37 @@
-//! Registration of the bundled oMLX and ds4 helper agents with SMAppService.
+//! Registration of the bundled oMLX helper agent with SMAppService.
 //!
-//! The agents ship as `Contents/Library/LaunchAgents/ai.unsloth.studio.{omlx,ds4}.plist` and
+//! The agents ship as `Contents/Library/LaunchAgents/ai.unsloth.studio.omlx.plist` and
 //! point (BundleProgram) at the wrappers in `Contents/Resources/engines`. They are
 //! registered when the user turns on "Engines enabled" (the old "Background engines" switch).
 //! What happens at quit follows the engine lifetime (`engine_lifetime`): `always` leaves them
 //! running because other clients (pi, Claude Code, OpenCode) use the engines, so nothing in the
 //! quit, update or repair paths may call `disable` then; `with_app` (the default) is the one
-//! exception, where the real quit path (`engine_quit`) unloads the models, stops ds4 and calls
+//! exception, where the real quit path (`engine_quit`) unloads the models and calls
 //! `disable` once the engines are idle.
 
 use serde::Serialize;
 
 pub(crate) const OMLX_PLIST: &str = "ai.unsloth.studio.omlx.plist";
-pub(crate) const DS4_PLIST: &str = "ai.unsloth.studio.ds4.plist";
-const HELPERS: [(&str, &str); 2] = [("omlx", OMLX_PLIST), ("ds4", DS4_PLIST)];
+const HELPERS: [(&str, &str); 1] = [("omlx", OMLX_PLIST)];
+
+// Legacy-unregister migration: Apple requires a plist in the calling bundle.
+// --install unregisters through the OLD app before replacing it. Also attempt
+// cleanup once per launch/CLI process here, ignoring NotFound and other errors.
+const LEGACY_PLIST: &str = "ai.unsloth.studio.ds4.plist";
+
+fn unregister_legacy_once_with(
+    once: &std::sync::Once,
+    unregister: impl FnOnce(&str) -> Result<(), String>,
+) {
+    once.call_once(|| {
+        let _ = unregister(LEGACY_PLIST);
+    });
+}
+
+pub(crate) fn unregister_legacy_helper_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    unregister_legacy_once_with(&ONCE, sm::unregister);
+}
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -138,7 +156,7 @@ fn snapshot(error: Option<String>) -> EngineHelpersStatus {
 }
 
 /// Register every helper. A failure on one is reported but does not stop the others, so the
-/// toggle never leaves the pair half-registered because of a single error.
+/// toggle reports any registration failure.
 pub(crate) fn enable() -> EngineHelpersStatus {
     let mut errors = Vec::new();
     for (name, plist) in HELPERS {
@@ -150,6 +168,7 @@ pub(crate) fn enable() -> EngineHelpersStatus {
 }
 
 pub(crate) fn disable() -> EngineHelpersStatus {
+    unregister_legacy_helper_once();
     let mut errors = Vec::new();
     for (name, plist) in HELPERS {
         if let Err(error) = sm::unregister(plist) {
@@ -227,7 +246,7 @@ pub(crate) async fn engine_lifetime_set(lifetime: String) -> Result<EngineHelper
 
 pub(crate) const CLI_FLAG: &str = "--engine-helpers";
 
-/// How long `restart` waits for launchd to drop both labels: 60 polls, 500 ms apart.
+/// How long `restart` waits for launchd to drop the helper label: 60 polls, 500 ms apart.
 const RESTART_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 const RESTART_MAX_POLLS: u32 = 60;
 
@@ -262,7 +281,9 @@ pub(crate) fn parse_cli_args(args: &[String]) -> CliParse {
         Some(other) => CliParse::Usage(format!(
             "unknown command {other:?}; use status, register, unregister or restart"
         )),
-        None => CliParse::Usage("missing command; use status, register, unregister or restart".into()),
+        None => {
+            CliParse::Usage("missing command; use status, register, unregister or restart".into())
+        }
     }
 }
 
@@ -458,8 +479,24 @@ mod tests {
     use super::*;
 
     const OMLX: &str = include_str!("../launch-agents/ai.unsloth.studio.omlx.plist");
-    const DS4: &str = include_str!("../launch-agents/ai.unsloth.studio.ds4.plist");
     const FORK_CONF: &str = include_str!("../tauri.fork.conf.json");
+
+    #[test]
+    fn legacy_unregister_attempts_once_and_ignores_failure() {
+        let once = std::sync::Once::new();
+        let calls = std::cell::Cell::new(0);
+        unregister_legacy_once_with(&once, |plist| {
+            assert_eq!(plist, LEGACY_PLIST);
+            calls.set(calls.get() + 1);
+            Err("NotFound".into())
+        });
+        unregister_legacy_once_with(&once, |_| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(HELPERS, [("omlx", OMLX_PLIST)]);
+    }
 
     #[test]
     fn aggregate_orders_states() {
@@ -517,7 +554,7 @@ mod tests {
         let exe = root.join("Contents/MacOS/unsloth-studio");
         let exists = |plist| bundled_plist_path(&exe, plist).is_some_and(|p| p.is_file());
         assert!(exists(OMLX_PLIST));
-        assert!(!exists(DS4_PLIST));
+        assert!(!exists("missing.plist"));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -529,10 +566,7 @@ mod tests {
 
     #[test]
     fn plists_match_their_names_and_wrappers() {
-        for (plist_name, text, wrapper) in [
-            (OMLX_PLIST, OMLX, "omlx-launch"),
-            (DS4_PLIST, DS4, "ds4-ondemand-launch"),
-        ] {
+        for (plist_name, text, wrapper) in [(OMLX_PLIST, OMLX, "omlx-launch")] {
             let label = plist_name.trim_end_matches(".plist");
             assert!(
                 text.contains(&format!("<string>{label}</string>")),
@@ -572,16 +606,16 @@ mod tests {
     }
 
     #[test]
-    fn fork_config_bundles_both_plists_and_the_engines_dir() {
+    fn fork_config_bundles_only_the_active_plist_and_engines_dir() {
         let conf: serde_json::Value = serde_json::from_str(FORK_CONF).unwrap();
         let files = &conf["bundle"]["macOS"]["files"];
-        for plist in [OMLX_PLIST, DS4_PLIST] {
+        assert_eq!(files.as_object().unwrap().len(), 1);
+        for plist in [OMLX_PLIST] {
             let key = format!("Library/LaunchAgents/{plist}");
             assert_eq!(files[key.as_str()], format!("launch-agents/{plist}"));
         }
         assert_eq!(conf["bundle"]["resources"]["engines-staging/"], "engines/");
     }
-
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|a| a.to_string()).collect()
@@ -592,7 +626,10 @@ mod tests {
         assert_eq!(parse_cli_args(&args(&[])), CliParse::NotCli);
         assert_eq!(parse_cli_args(&args(&["--hidden"])), CliParse::NotCli);
         // an ordinary launch that merely mentions the flag later is not the CLI
-        assert_eq!(parse_cli_args(&args(&["--hidden", CLI_FLAG, "status"])), CliParse::NotCli);
+        assert_eq!(
+            parse_cli_args(&args(&["--hidden", CLI_FLAG, "status"])),
+            CliParse::NotCli
+        );
         for (word, command) in [
             ("status", CliCommand::Status),
             ("register", CliCommand::Register),
@@ -608,7 +645,9 @@ mod tests {
 
     #[test]
     fn cli_args_reject_a_missing_or_unknown_command() {
-        assert!(matches!(parse_cli_args(&args(&[CLI_FLAG])), CliParse::Usage(m) if m.contains("missing")));
+        assert!(
+            matches!(parse_cli_args(&args(&[CLI_FLAG])), CliParse::Usage(m) if m.contains("missing"))
+        );
         assert!(matches!(
             parse_cli_args(&args(&[CLI_FLAG, "bootstrap"])),
             CliParse::Usage(m) if m.contains("bootstrap")
@@ -620,14 +659,11 @@ mod tests {
 
     #[test]
     fn helper_labels_follow_the_plist_names() {
-        assert_eq!(
-            helper_labels(),
-            vec!["ai.unsloth.studio.omlx".to_string(), "ai.unsloth.studio.ds4".to_string()]
-        );
+        assert_eq!(helper_labels(), vec!["ai.unsloth.studio.omlx".to_string()]);
     }
 
     #[test]
-    fn the_wait_returns_as_soon_as_launchd_drops_both_labels() {
+    fn the_wait_returns_as_soon_as_launchd_drops_the_helper_label() {
         use std::cell::Cell;
         let labels = helper_labels();
         let checks = Cell::new(0u32);
@@ -646,7 +682,12 @@ mod tests {
     fn the_wait_is_immediate_when_nothing_is_loaded() {
         use std::cell::Cell;
         let sleeps = Cell::new(0u32);
-        assert!(wait_labels_gone(&helper_labels(), &|_| false, &|| sleeps.set(sleeps.get() + 1), 60));
+        assert!(wait_labels_gone(
+            &helper_labels(),
+            &|_| false,
+            &|| sleeps.set(sleeps.get() + 1),
+            60
+        ));
         assert_eq!(sleeps.get(), 0);
     }
 
@@ -655,8 +696,13 @@ mod tests {
         use std::cell::Cell;
         let sleeps = Cell::new(0u32);
         // one label never leaves
-        let stuck = |label: &str| label.ends_with(".ds4");
-        assert!(!wait_labels_gone(&helper_labels(), &stuck, &|| sleeps.set(sleeps.get() + 1), 5));
+        let stuck = |label: &str| label.ends_with(".omlx");
+        assert!(!wait_labels_gone(
+            &helper_labels(),
+            &stuck,
+            &|| sleeps.set(sleeps.get() + 1),
+            5
+        ));
         assert_eq!(sleeps.get(), 4);
     }
 
@@ -676,9 +722,15 @@ mod tests {
             engine_lifetime: crate::engine_lifetime::EngineLifetime::WithApp,
         };
         assert_eq!(exit_code(&ok), 0);
-        let failed = EngineHelpersStatus { error: Some("boom".into()), ..ok.clone() };
+        let failed = EngineHelpersStatus {
+            error: Some("boom".into()),
+            ..ok.clone()
+        };
         assert_eq!(exit_code(&failed), 1);
-        let unsupported = EngineHelpersStatus { supported: false, ..ok };
+        let unsupported = EngineHelpersStatus {
+            supported: false,
+            ..ok
+        };
         assert_eq!(exit_code(&unsupported), 1);
     }
 
@@ -687,10 +739,13 @@ mod tests {
         let json = serde_json::to_value(snapshot(None)).unwrap();
         assert!(json["supported"].is_boolean());
         assert!(json["state"].is_string());
-        assert_eq!(json["helpers"].as_array().unwrap().len(), 2);
+        assert_eq!(json["helpers"].as_array().unwrap().len(), 1);
         assert!(json["error"].is_null());
         assert!(json["engines_enabled"].is_boolean());
-        assert!(matches!(json["engine_lifetime"].as_str(), Some("with_app" | "always")));
+        assert!(matches!(
+            json["engine_lifetime"].as_str(),
+            Some("with_app" | "always")
+        ));
     }
 
     #[cfg(not(target_os = "macos"))]

@@ -964,7 +964,7 @@ export function ModelSelector({
   // Remote model settings live on its connection, not ModelConfigPage's local load settings.
   function handleConfigureConnection(providerId: string) {
     setOpen(false);
-    // oMLX and DwarfStar are not listed in Connections; their page is Attached engines.
+    // oMLX is not listed in Connections; its page is Attached engines.
     if (
       settingsTabForConnection(
         useExternalProvidersStore.getState().providers,

@@ -8,7 +8,7 @@ import {
 } from "@/features/attached-engines";
 import { useT } from "@/i18n";
 
-/** oMLX and DwarfStar in one place: toggles and URLs, live state, load and unload, context length.
+/** oMLX in one place: toggles and URL, live state, load and unload, context length.
  *  Owner-only (see settings-tab-visibility). While the feature flag is off only the enable toggle shows. */
 export function AttachedEnginesTab() {
   const t = useT();
@@ -23,7 +23,7 @@ export function AttachedEnginesTab() {
           {t("settings.tabs.attachedEngines")}
         </h1>
         <p className="text-xs text-muted-foreground">
-          oMLX and DwarfStar run beside Studio. Their models appear in the chat
+          oMLX runs beside Studio. Its models appear in the chat
           model picker; they are managed here rather than in Connections.
         </p>
       </header>

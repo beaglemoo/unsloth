@@ -84,13 +84,13 @@ def test_attach_to_sse_line():
 
 
 def test_attach_to_bare_json_non_stream():
-    out = attach_timings(json.dumps(_chunk()), "dwarfstar")
+    out = attach_timings(json.dumps(_chunk()), "omlx")
     assert json.loads(out)["timings"]["cache_n"] == 1000
 
 
 def test_existing_timings_pass_through_untouched():
     line = "data: " + json.dumps(_chunk(timings = {"predicted_per_second": 7.0}))
-    assert attach_timings(line, "dwarfstar") is line
+    assert attach_timings(line, "legacy") is line
 
 
 @pytest.mark.parametrize("provider", ["openai", "custom", None])

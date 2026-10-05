@@ -3,47 +3,29 @@
 
 import { Button } from "@/components/ui/button";
 import { InfoHint } from "@/components/ui/info-hint";
-import {
-  getDs4Context,
-  getOmlxContext,
-  setDs4Context,
-  setOmlxContext,
-} from "@/features/attached-engines/api";
+import { getOmlxContext, setOmlxContext } from "@/features/attached-engines/api";
 import type { ActiveAttached } from "@/features/attached-engines/attached-active";
 import {
   CONTEXT_STEP,
   type ContextRange,
   clampContext,
-  ds4AppliedMessage,
-  ds4ContextRange,
-  ds4PendingNote,
   omlxContextRange,
 } from "@/features/attached-engines/context-control-state";
-import type {
-  Ds4ContextInfo,
-  OmlxContextInfo,
-} from "@/features/attached-engines/types";
+import type { OmlxContextInfo } from "@/features/attached-engines/types";
 import { refreshAttachedStatus } from "@/features/attached-engines/use-attached-engines";
 import { toast } from "@/lib/toast";
 import { useCallback, useEffect, useState } from "react";
 import { ParamSlider } from "../chat-settings-sheet";
 
-type Loaded =
-  | { kind: "omlx"; info: OmlxContextInfo; range: ContextRange | null }
-  | { kind: "dwarfstar"; info: Ds4ContextInfo; range: ContextRange | null };
+type Loaded = { kind: "omlx"; info: OmlxContextInfo; range: ContextRange | null };
 
 async function load(active: ActiveAttached): Promise<Loaded> {
-  if (active.kind === "omlx") {
-    const info = await getOmlxContext(active.modelId);
-    return { kind: "omlx", info, range: omlxContextRange(info) };
-  }
-  const info = await getDs4Context();
-  return { kind: "dwarfstar", info, range: ds4ContextRange(info) };
+  const info = await getOmlxContext(active.modelId);
+  return { kind: "omlx", info, range: omlxContextRange(info) };
 }
 
-/** "Context length" for the selected oMLX or DwarfStar model. oMLX applies a per-model prompt cap
- *  at once; DwarfStar has one value for the engine and may restart. Both wait for Apply: a drag
- *  must not restart a 100 GB model. Renders nothing while the engine cannot be read. */
+/** "Context length" for the selected oMLX model. It applies a per-model prompt cap at once.
+ *  Changes wait for Apply. Renders nothing while the engine cannot be read. */
 export function AttachedContextControl({ active }: { active: ActiveAttached }) {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [draft, setDraft] = useState<number | null>(null);
@@ -81,12 +63,6 @@ export function AttachedContextControl({ active }: { active: ActiveAttached }) {
               ? "Context length reset to the default."
               : `Context length set to ${value.toLocaleString()} tokens.`,
           );
-        } else if (value !== null) {
-          const info = await setDs4Context(value);
-          const range = ds4ContextRange(info);
-          setLoaded({ kind: "dwarfstar", info, range });
-          setDraft(range?.current ?? null);
-          toast.info(ds4AppliedMessage(info.applied, value));
         }
         void refreshAttachedStatus();
       } catch (error) {
@@ -104,20 +80,11 @@ export function AttachedContextControl({ active }: { active: ActiveAttached }) {
   if (!loaded || !range || draft === null) return null;
 
   const dirty = draft !== range.current;
-  const pending =
-    loaded.kind === "dwarfstar" ? ds4PendingNote(loaded.info) : null;
-  const info =
-    loaded.kind === "omlx" ? (
+  const info = (
       <>
         A per-model cap on the prompt, not a memory setting. It applies
         immediately with no reload. This model&apos;s native length is{" "}
         {range.max.toLocaleString()} tokens.
-      </>
-    ) : (
-      <>
-        DwarfStar has one context length for the whole engine. A change applies
-        on the next start, restarts an idle engine at once, or waits for the
-        current reply. Maximum {range.max.toLocaleString()} tokens.
       </>
     );
 
@@ -136,10 +103,10 @@ export function AttachedContextControl({ active }: { active: ActiveAttached }) {
       />
       <div className="flex min-h-7 items-center justify-between gap-3">
         <span className="text-ui-11 text-muted-foreground">
-          {loaded.kind === "omlx" ? "Applies immediately, no reload" : "May restart the model"}
+          Applies immediately, no reload
         </span>
         <div className="flex items-center gap-2">
-          {loaded.kind === "omlx" && range.hasOverride ? (
+          {range.hasOverride ? (
             <Button
               type="button"
               variant="outline"
@@ -160,9 +127,6 @@ export function AttachedContextControl({ active }: { active: ActiveAttached }) {
           </Button>
         </div>
       </div>
-      {pending ? (
-        <p className="text-ui-11 text-amber-500">{pending}</p>
-      ) : null}
     </div>
   );
 }

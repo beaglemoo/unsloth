@@ -9,7 +9,6 @@ import {
 } from "../src/features/attached-engines/attached-engines-poller.ts";
 import {
   isAttachedEngineOffline,
-  isDwarfStarWarming,
 } from "../src/features/attached-engines/attached-state.ts";
 import { noticeMessage } from "../src/features/attached-engines/notice-message.ts";
 import {
@@ -28,11 +27,11 @@ function status(
   modelsHash: string,
   notices: AttachedNotice[] = [],
 ): AttachedStatus {
-  return { omlx: null, ds4: null, modelsHash, notices };
+  return { omlx: null, modelsHash, notices };
 }
 
 function notice(ts: number): AttachedNotice {
-  return { ts, reason: "training", actions: ["Stopped DwarfStar"], inFlightKilled: 0 };
+  return { ts, reason: "training", actions: ["Unloaded oMLX"], inFlightKilled: 0 };
 }
 
 // A scripted world: the poller's timers, requests and sinks, all recorded in order.
@@ -209,24 +208,11 @@ test("offline is only claimed once the engines have been polled", () => {
   const reachable = (reachableFlag: boolean) =>
     ({
       omlx: { reachable: reachableFlag } as AttachedOmlxStatus,
-      ds4: { reachable: true } as never,
       modelsHash: "",
       notices: [],
     }) as AttachedStatus;
   assert.equal(isAttachedEngineOffline("omlx", reachable(false)), true);
   assert.equal(isAttachedEngineOffline("omlx", reachable(true)), false);
-  assert.equal(isAttachedEngineOffline("dwarfstar", reachable(false)), false);
-});
-
-test("DwarfStar warming reads ds4.starting", () => {
-  assert.equal(isDwarfStarWarming(null), false);
-  const warm = {
-    omlx: null,
-    ds4: { starting: true } as never,
-    modelsHash: "",
-    notices: [],
-  } as AttachedStatus;
-  assert.equal(isDwarfStarWarming(warm), true);
 });
 
 test("notice messages name the reason, actions and killed requests", () => {
@@ -234,10 +220,10 @@ test("notice messages name the reason, actions and killed requests", () => {
     noticeMessage({
       ts: 1,
       reason: "omlx_use",
-      actions: ["Stopped DwarfStar"],
+      actions: ["Unloaded oMLX"],
       inFlightKilled: 2,
     }),
-    "Switched to oMLX. Stopped DwarfStar. 2 in-flight requests stopped",
+    "Switched to oMLX. Unloaded oMLX. 2 in-flight requests stopped",
   );
 });
 
