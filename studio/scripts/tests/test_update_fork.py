@@ -331,18 +331,18 @@ def test_the_submodules_are_updated_to_the_pinned_commits(tmp_path):
     pinned = commit(subwork, "engine.txt")
     git(tmp_path, "clone", "-q", "--bare", str(subwork), str(sub))
     # the other clone adds the submodule and pushes
-    git(e.other, "submodule", "add", "-q", str(sub), "studio/engines/ds4")
-    git(e.other, "commit", "-q", "-m", "add the ds4 submodule")
+    git(e.other, "submodule", "add", "-q", str(sub), "studio/engines/omlx")
+    git(e.other, "commit", "-q", "-m", "add the omlx submodule")
     git(e.other, "push", "-q", "origin", BRANCH)
     # a newer submodule commit that the superproject does NOT pin
     commit(subwork, "later.txt")
     git(subwork, "push", "-q", str(sub), "HEAD:main")
     r = e.run("--yes")
     assert r.returncode == 0, out(r)
-    checked_out = git(e.work / "studio/engines/ds4", "rev-parse", "HEAD").stdout.strip()
+    checked_out = git(e.work / "studio/engines/omlx", "rev-parse", "HEAD").stdout.strip()
     assert checked_out == pinned
-    assert (e.work / "studio/engines/ds4/engine.txt").exists()
-    assert not (e.work / "studio/engines/ds4/later.txt").exists()
+    assert (e.work / "studio/engines/omlx/engine.txt").exists()
+    assert not (e.work / "studio/engines/omlx/later.txt").exists()
 
 
 # ---- never the upstream remote -------------------------------------------------------------

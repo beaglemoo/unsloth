@@ -47,7 +47,7 @@ const ERROR_CLASS =
   "max-w-[calc(260px*var(--ui-space-scale,1))] text-right text-xs text-destructive";
 
 /**
- * Owner-only settings for the attached engines (oMLX, DwarfStar), on the Attached engines tab. Always
+ * Owner-only settings for oMLX on the Attached engines tab. Always
  * rendered for the owner, since the enable toggle lives here: everything else, including the
  * Engines enabled switch and the Engine lifetime control, is hidden while the feature is off.
  */
@@ -56,9 +56,7 @@ export function AttachedEnginesSettingsSection() {
   const setSettings = useAttachedEnginesStore((s) => s.setSettings);
   // null follows the saved value; a string is what the owner has typed since.
   const [omlxDraft, setOmlxUrl] = useState<string | null>(null);
-  const [ds4Draft, setDs4Url] = useState<string | null>(null);
   const omlxUrl = omlxDraft ?? settings?.omlxUrl ?? "";
-  const ds4Url = ds4Draft ?? settings?.ds4Url ?? "";
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   // null: not the desktop shell, or a shell built without the engine helpers.
@@ -136,7 +134,6 @@ export function AttachedEnginesSettingsSection() {
       const saved = await updateAttachedEnginesSettings(update);
       setSettings(saved);
       setOmlxUrl(null);
-      setDs4Url(null);
       // Turning the flag off takes the seeded rows out of the picker; a changed URL rewrites
       // their base_url, which the poller's models_hash would never trigger.
       const action = settingsSaveSyncAction(settings, saved, update);
@@ -155,7 +152,7 @@ export function AttachedEnginesSettingsSection() {
 
   const urlsDirty =
     settings !== null &&
-    (omlxUrl.trim() !== settings.omlxUrl || ds4Url.trim() !== settings.ds4Url);
+    omlxUrl.trim() !== settings.omlxUrl;
 
   return (
     <SettingsSection
@@ -164,7 +161,7 @@ export function AttachedEnginesSettingsSection() {
     >
       <SettingsRow
         label="Enable attached engines"
-        description="Show oMLX and DwarfStar in the model picker and free their memory before a local load or training run."
+        description="Show oMLX in the model picker and free its memory before a local load or training run."
         below={error ? <span className={ERROR_CLASS}>{error}</span> : null}
       >
         <Switch
@@ -236,18 +233,6 @@ export function AttachedEnginesSettingsSection() {
               className="h-8 w-64"
             />
           </SettingsRow>
-          <SettingsRow
-            label="DwarfStar URL"
-            description="Loopback address of the DwarfStar on-demand launcher."
-          >
-            <Input
-              value={ds4Url}
-              aria-label="DwarfStar URL"
-              disabled={isSaving}
-              onChange={(event) => setDs4Url(event.target.value)}
-              className="h-8 w-64"
-            />
-          </SettingsRow>
           {urlsDirty ? (
             <SettingsRow label="Apply engine URLs">
               <Button
@@ -257,7 +242,6 @@ export function AttachedEnginesSettingsSection() {
                 onClick={() =>
                   void persist({
                     omlxUrl: omlxUrl.trim(),
-                    ds4Url: ds4Url.trim(),
                   })
                 }
               >
@@ -267,25 +251,13 @@ export function AttachedEnginesSettingsSection() {
           ) : null}
           <SettingsRow
             label="Free engines for local loads"
-            description="Stop DwarfStar and unload oMLX models before Studio loads a local model or starts training."
+            description="Unload oMLX models before Studio loads a local model or starts training."
           >
             <Switch
               checked={settings.arbitrateLocalLoads}
               disabled={isSaving}
               onCheckedChange={(arbitrateLocalLoads) =>
                 void persist({ arbitrateLocalLoads })
-              }
-            />
-          </SettingsRow>
-          <SettingsRow
-            label="Pre-warm DwarfStar on select"
-            description="Start DwarfStar as soon as one of its models is picked, so the first reply does not wait for a cold start."
-          >
-            <Switch
-              checked={settings.prewarmDs4OnSelect}
-              disabled={isSaving}
-              onCheckedChange={(prewarmDs4OnSelect) =>
-                void persist({ prewarmDs4OnSelect })
               }
             />
           </SettingsRow>

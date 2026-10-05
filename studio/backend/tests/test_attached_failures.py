@@ -28,8 +28,8 @@ def test_reads_a_valid_marker(home):
 
 
 def test_ts_may_be_an_integer(home):
-    (home / "ds4.fail").write_text('{"reason": "model missing", "ts": 1760000000, "count": 1}')
-    assert read_failure("ds4") == {"reason": "model missing", "ts": 1760000000.0, "count": 1}
+    (home / "legacy.fail").write_text('{"reason": "model missing", "ts": 1760000000, "count": 1}')
+    assert read_failure("legacy") == {"reason": "model missing", "ts": 1760000000.0, "count": 1}
 
 
 def test_missing_file_is_no_failure(home):

@@ -5,7 +5,6 @@ import { authFetch } from "@/features/auth";
 import { readFastApiError } from "@/lib/format-fastapi-error";
 import { failureFromApi } from "./failure";
 import type {
-  AttachedDs4Status,
   AttachedEnginesSettings,
   AttachedNotice,
   AttachedOmlxModel,
@@ -13,8 +12,6 @@ import type {
   AttachedProvider,
   AttachedSyncResult,
   AttachedStatus,
-  Ds4ApplyResult,
-  Ds4ContextInfo,
   OmlxContextInfo,
 } from "./types";
 
@@ -65,27 +62,6 @@ function omlxFromApi(raw: Obj): AttachedOmlxStatus {
   };
 }
 
-function ds4FromApi(raw: Obj): AttachedDs4Status {
-  return {
-    reachable: raw.reachable === true,
-    loaded: raw.loaded === true,
-    starting: raw.starting === true,
-    pid: numOrNull(raw.pid),
-    uptimeS: numOrNull(raw.uptime_s),
-    inFlight: num(raw.in_flight),
-    idleRemainingS: numOrNull(raw.idle_remaining_s),
-    liveTps: numOrNull(raw.live_tps),
-    lastGenTps: numOrNull(raw.last_gen_tps),
-    lastTtftMs: numOrNull(raw.last_ttft_ms),
-    startTimeoutS: num(raw.start_timeout_s, 120),
-    ctx: numOrNull(raw.ctx),
-    ctxActive: numOrNull(raw.ctx_active),
-    pendingRestart: raw.pending_restart === true,
-    error: strOrNull(raw.error),
-    failure: failureFromApi(raw.failure),
-  };
-}
-
 function noticeFromApi(raw: Obj): AttachedNotice {
   return {
     ts: num(raw.ts),
@@ -109,7 +85,6 @@ export async function fetchAttachedStatus(
   const body = (await res.json()) as Obj;
   return {
     omlx: body.omlx ? omlxFromApi(body.omlx as Obj) : null,
-    ds4: body.ds4 ? ds4FromApi(body.ds4 as Obj) : null,
     modelsHash: typeof body.models_hash === "string" ? body.models_hash : "",
     notices: arr(body.notices).map((row) => noticeFromApi(row as Obj)),
     receivedAt: Date.now(),
@@ -137,7 +112,7 @@ export async function syncAttachedProviders(): Promise<AttachedSyncResult> {
   };
 }
 
-/** Fire-and-forget on selection: frees memory (oMLX) or pre-warms (DwarfStar). */
+/** Fire-and-forget on selection: frees oMLX memory. */
 export async function prepareAttachedProvider(
   provider: AttachedProvider,
 ): Promise<void> {
@@ -166,27 +141,6 @@ function omlxContextFromApi(raw: Obj): OmlxContextInfo {
   };
 }
 
-const APPLIED = new Set<string>([
-  "next_start",
-  "restarted",
-  "after_current_requests",
-  "unchanged",
-]);
-
-function ds4ContextFromApi(raw: Obj): Ds4ContextInfo {
-  return {
-    ctx: num(raw.ctx),
-    ctxActive: numOrNull(raw.ctx_active),
-    ctxMin: num(raw.ctx_min, 4096),
-    ctxMax: num(raw.ctx_max),
-    pendingRestart: raw.pending_restart === true,
-    applied:
-      typeof raw.applied === "string" && APPLIED.has(raw.applied)
-        ? (raw.applied as Ds4ApplyResult)
-        : null,
-  };
-}
-
 export async function getOmlxContext(modelId: string): Promise<OmlxContextInfo> {
   const res = await post(
     "/omlx/context/get",
@@ -209,43 +163,14 @@ export async function setOmlxContext(
   return omlxContextFromApi((await res.json()) as Obj);
 }
 
-export async function getDs4Context(): Promise<Ds4ContextInfo> {
-  const res = await authFetch("/api/engines/attached/ds4/context");
-  if (!res.ok) {
-    throw new Error(
-      await readFastApiError(res, "Failed to read the DwarfStar context length"),
-    );
-  }
-  return ds4ContextFromApi((await res.json()) as Obj);
-}
-
-export async function setDs4Context(ctx: number): Promise<Ds4ContextInfo> {
-  const res = await post(
-    "/ds4/context",
-    { ctx },
-    "Failed to set the DwarfStar context length",
-  );
-  return ds4ContextFromApi((await res.json()) as Obj);
-}
-
-export async function startDs4(): Promise<void> {
-  await post("/ds4/start", undefined, "Failed to start DwarfStar");
-}
-
-export async function stopDs4(): Promise<void> {
-  await post("/ds4/stop", undefined, "Failed to stop DwarfStar");
-}
-
 function settingsFromApi(raw: Obj): AttachedEnginesSettings {
   return {
     enabled: raw.enabled === true,
     omlxUrl: typeof raw.omlx_url === "string" ? raw.omlx_url : "",
-    ds4Url: typeof raw.ds4_url === "string" ? raw.ds4_url : "",
     scanDenylist: arr(raw.scan_denylist).filter(
       (entry): entry is string => typeof entry === "string",
     ),
     arbitrateLocalLoads: raw.arbitrate_local_loads !== false,
-    prewarmDs4OnSelect: raw.prewarm_ds4_on_select !== false,
   };
 }
 
@@ -263,10 +188,8 @@ export async function loadAttachedEnginesSettings(): Promise<AttachedEnginesSett
 const UPDATE_KEYS = {
   enabled: "enabled",
   omlxUrl: "omlx_url",
-  ds4Url: "ds4_url",
   scanDenylist: "scan_denylist",
   arbitrateLocalLoads: "arbitrate_local_loads",
-  prewarmDs4OnSelect: "prewarm_ds4_on_select",
 } as const;
 
 /** A partial write: an omitted field keeps its stored value. */
