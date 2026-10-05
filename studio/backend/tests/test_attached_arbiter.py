@@ -212,3 +212,16 @@ def test_thread_admission_timeout_before_future_exists_is_not_unbound(admission,
     assert result.skipped == "error"
     assert "UnboundLocalError" not in result.error and "referenced before assignment" not in result.error
     assert result.error.startswith("Shared-memory admission failed")
+
+
+@pytest.mark.parametrize("local", [True, False])
+def test_config_failure_is_a_retryable_error_not_an_exception(admission, monkeypatch, local):
+    def broken():
+        raise RuntimeError("settings unreadable")
+
+    monkeypatch.setattr(arbiter, "get_config", broken)
+    result = asyncio.run(arbiter._admit("training", local = local))
+    assert result.skipped == "error"
+    assert "settings unreadable" in result.error
+    with pytest.raises(arbiter.AttachedAdmissionError):
+        result.require_clear()
