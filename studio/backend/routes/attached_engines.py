@@ -15,6 +15,7 @@ from auth import policy
 from auth.authentication import get_current_subject
 from core.inference.attached import (
     ATTACHED_OMLX_ID,
+    AttachedEngineBusy,
     AttachedEngineError,
 )
 from core.inference.attached import arbiter
@@ -278,6 +279,8 @@ async def omlx_unload(body: OmlxModelRequest):
     dir_id = await _resolve_omlx_dir(client, body.model_id)
     try:
         await client.unload(dir_id)
+    except AttachedEngineBusy as exc:
+        raise HTTPException(status_code = 503, detail = str(exc), headers = {"Retry-After": "15"}) from exc
     except AttachedEngineError as exc:
         raise HTTPException(status_code = 502, detail = str(exc)) from exc
     return {"unloaded": dir_id}
@@ -285,7 +288,10 @@ async def omlx_unload(body: OmlxModelRequest):
 
 @_gated.post("/omlx/unload-all")
 async def omlx_unload_all():
-    return {"unloaded": await _omlx(get_config()).unload_all()}
+    try:
+        return {"unloaded": await _omlx(get_config()).unload_all()}
+    except AttachedEngineBusy as exc:
+        raise HTTPException(status_code = 503, detail = str(exc), headers = {"Retry-After": "15"}) from exc
 
 
 @_gated.post("/prepare")
