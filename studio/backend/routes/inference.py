@@ -11724,10 +11724,16 @@ def _attached_local_memory_active() -> bool:
     )
 
 
-async def _admit_attached_local_load():
+async def _admit_attached_local_load(media_hold = None):
+    """``media_hold``: an image or video load passes its arbiter claim, taken under the arbiter lock, so oMLX stays
+    refused from admission until the backend publishes its own loading state."""
     from core.inference.attached.arbiter import free_for_local
 
-    result = await free_for_local("local_load")
+    result = await (
+        free_for_local("local_load", media_hold = media_hold)
+        if media_hold is not None
+        else free_for_local("local_load")
+    )
     if result.error:
         raise HTTPException(status_code = 503, detail = result.error,
                             headers = {"Retry-After": "15"})
@@ -47302,6 +47308,9 @@ async def load_diffusion_model_gated(
     from core.inference import media_load_ids
 
     backend = get_diffusion_backend()
+    from core.inference.attached.arbiter import new_media_hold
+
+    media_hold = new_media_hold("image")
     try:
         # A load an unload already cancelled by its token starts nothing (checked again at admission).
         media_load_ids.refuse_cancelled("diffusion", request.load_token)
@@ -47501,7 +47510,8 @@ async def load_diffusion_model_gated(
         raise_if_load_cancelled(_DIFFUSION_LOAD_CANCELLED)
         preflight = preparing_load_token()
         # Last refusal point, before the engine switch tears anything down: unload oMLX and free ComfyUI when attached-engine arbitration is enabled.
-        await _admit_attached_local_load()
+        # The hold keeps oMLX out until begin_load has published the backend's loading state (released in the finally below).
+        await _admit_attached_local_load(media_hold)
         if off_torch is not None and pending_name == ENGINE_SD_CPP:
             # Checked under the preflight lock, so a cancelled load never unloads the video model.
             await asyncio.to_thread(
@@ -47748,6 +47758,8 @@ async def load_diffusion_model_gated(
     except RuntimeError as exc:
         # A load is already in progress.
         raise HTTPException(status_code = 409, detail = str(exc))
+    finally:
+        media_hold.release()
 
 
 def _live_preview_kwarg(generate: Any, requested: Optional[bool]) -> dict:

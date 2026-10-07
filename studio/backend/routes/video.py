@@ -360,6 +360,9 @@ async def load_video_model_gated(
     from core.inference import media_load_ids
 
     backend = get_video_backend()
+    from core.inference.attached.arbiter import new_media_hold
+
+    media_hold = new_media_hold("video")
     try:
         # A load an unload already cancelled by its token starts nothing (checked again at admission).
         media_load_ids.refuse_cancelled("video", request.load_token)
@@ -478,7 +481,8 @@ async def load_video_model_gated(
         # Last refusal point, before anything is torn down: unload oMLX and free ComfyUI when attached-engine arbitration is enabled.
         from routes.inference import _admit_attached_local_load
 
-        await _admit_attached_local_load()
+        # The hold keeps oMLX out until begin_load has published the backend's loading state (released in the finally below).
+        await _admit_attached_local_load(media_hold)
         from core.inference.sd_cpp_args import forces_cpu_backend
         from core.inference.video_minimax_h3 import is_h3_native
         from utils.multi_model_settings import get_multi_model_mode
@@ -598,6 +602,8 @@ async def load_video_model_gated(
     except RuntimeError as exc:
         # A video load is already in progress.
         raise HTTPException(status_code = 409, detail = str(exc))
+    finally:
+        media_hold.release()
 
 
 @router.get("/video/load-progress", response_model = VideoLoadProgressResponse)
