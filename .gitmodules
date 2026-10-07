@@ -2,3 +2,8 @@
 	path = studio/engines/omlx
 	url = https://github.com/beaglemoo/omlx.git
 	branch = chore/merge-upstream-2026-10-07
+[submodule "studio/engines/comfyui"]
+	path = studio/engines/comfyui
+	url = https://github.com/Comfy-Org/ComfyUI.git
+	branch = master
+	shallow = true
