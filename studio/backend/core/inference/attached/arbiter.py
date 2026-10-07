@@ -185,6 +185,47 @@ def _media_held() -> Optional[str]:
     return "is loading a video model" if kinds == {"video"} else "is loading an image model"
 
 
+class ComfyJobHold:
+    """Studio's claim on a ComfyUI job from admission until ComfyUI is confirmed done with it.
+
+    ``before_comfyui_job`` returns before the websocket is open and the prompt is submitted, so for that
+    gap (and for the time a cancel or timeout needs to take effect) ComfyUI's queue says nothing. The
+    claim is registered under the arbiter lock on admission, so an oMLX or local-load admission either ran
+    first (the job then unloaded or refused it) or sees the claim and is refused. ``release`` is
+    idempotent; the job runner calls it in a ``finally`` and from its reaper.
+    """
+
+    __slots__ = ("active",)
+
+    def __init__(self):
+        self.active = False
+
+    def release(self) -> None:
+        with _comfyui_holds_lock:
+            self.active = False
+            _comfyui_holds.discard(self)
+
+
+_comfyui_holds: set[ComfyJobHold] = set()
+_comfyui_holds_lock = threading.Lock()
+
+
+def new_comfyui_hold() -> ComfyJobHold:
+    """An unregistered claim for a Studio ComfyUI job; ``before_comfyui_job`` registers it on admission."""
+    return ComfyJobHold()
+
+
+def _register_comfyui_hold(hold: ComfyJobHold) -> None:
+    with _comfyui_holds_lock:
+        hold.active = True
+        _comfyui_holds.add(hold)
+
+
+def _comfyui_held() -> bool:
+    with _comfyui_holds_lock:
+        return bool(_comfyui_holds)
+
+
 def _studio_media_resident() -> Optional[str]:
     """Which Studio image or video model is resident, loading, or about to load, if any.
     Reads loaded modules only: nothing is imported or constructed."""
@@ -296,11 +337,17 @@ async def _admit(reason: str, *, local: bool, media_hold: Optional[MediaHold] = 
                 if media:
                     raise AttachedAdmissionError(f"Studio {media}; unload it to use oMLX.")
             if not local and config.arbitrate_comfyui:
+                if _comfyui_held():
+                    raise AttachedAdmissionError("Studio has a ComfyUI job starting; retry shortly to use oMLX.")
                 refusal = await _comfyui_refusal(config, "to use oMLX", cached = True)
                 if refusal:
                     raise AttachedAdmissionError(refusal)
             if local:
                 if config.arbitrate_comfyui:
+                    if _comfyui_held():
+                        raise AttachedAdmissionError(
+                            "Studio has a ComfyUI job starting; wait for it to finish before loading a local model."
+                        )
                     refusal = await _comfyui_refusal(config, "before loading a local model")
                     if refusal:
                         raise AttachedAdmissionError(refusal)
@@ -380,8 +427,11 @@ async def before_omlx_load() -> ArbiterResult:
     return replace(result, acted = True, actions = actions)
 
 
-async def before_comfyui_job() -> ArbiterResult:
-    """Admit a Studio-submitted ComfyUI job: refuse next to training or any resident Studio model or a busy peer, then make room by unloading oMLX and freeing idle peers."""
+async def before_comfyui_job(hold: Optional[ComfyJobHold] = None) -> ArbiterResult:
+    """Admit a Studio-submitted ComfyUI job: refuse next to training or any resident Studio model or a busy peer, then make room by unloading oMLX and freeing idle peers.
+
+    On success ``hold`` (when given) is registered under the arbiter lock, so oMLX and local-load admission
+    refuse from this moment until the caller releases it. Nothing is registered on a refusal or an error."""
     try:
         config = get_config()
         if not config.enabled:
@@ -411,6 +461,8 @@ async def before_comfyui_job() -> ArbiterResult:
                 actions.append(_freed_action(freed))
             if actions:
                 _record("comfyui_job", actions)
+            if hold is not None:
+                _register_comfyui_hold(hold)
             return ArbiterResult(acted = bool(actions), actions = tuple(actions))
     except Exception as exc:
         message = f"Cannot free shared memory for a ComfyUI job: {exc}"
@@ -444,7 +496,7 @@ async def _idle_free_after(seconds: int) -> None:
                 queue = await ComfyuiClient(own).queue()
                 if queue.state == "down":
                     return
-                if queue.busy:
+                if queue.busy or _comfyui_held():
                     continue
                 if await _free_urls([own]):
                     _record("comfyui_idle", [f"Freed ComfyUI memory after {seconds} s idle"])
