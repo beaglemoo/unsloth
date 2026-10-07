@@ -1,7 +1,7 @@
 [submodule "studio/engines/omlx"]
 	path = studio/engines/omlx
 	url = https://github.com/beaglemoo/omlx.git
-	branch = chore/merge-upstream-2026-10-07
+	branch = fix/unload-409-while-busy
 [submodule "studio/engines/comfyui"]
 	path = studio/engines/comfyui
 	url = https://github.com/Comfy-Org/ComfyUI.git
