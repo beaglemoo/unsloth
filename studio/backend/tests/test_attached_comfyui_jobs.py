@@ -805,3 +805,87 @@ def test_cancel_before_submission_cancels_right_after_it(world):
 
     go(scenario())
     assert world.fake.submitted == [], "a cancel before submission never reaches ComfyUI's queue"
+
+
+# --------------------- timeout and task cancellation stop pending prompts too
+
+
+async def _until(predicate, seconds = 3.0):
+    for _ in range(int(seconds / 0.01)):
+        if predicate():
+            return True
+        await asyncio.sleep(0.01)
+    return False
+
+
+@pytest.mark.parametrize("endpoint", [False, True])
+def test_a_queued_job_that_times_out_is_removed_from_comfyuis_queue(world, endpoint):
+    world.fake.has_cancel_endpoint = endpoint
+    _queue_behind_a_foreign_job(world)
+    r = runner(FakeConnect(FakeWS([])))
+    with pytest.raises(jobs.ComfyTimeout) as caught:
+        go(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client(), timeout_s = 0.05))
+    assert "was cancelled" in str(caught.value) and "interrupted" not in str(caught.value)
+    assert world.fake.pending == [], "the pending prompt must not survive to run later with no collector"
+    assert world.fake.running == ["foreign"], "someone else's job is never touched"
+    assert world.fake.interrupts == []  # a pending prompt is deleted, never /interrupt-ed
+    assert not r.is_running() and world.scheduled == 1
+
+
+def test_a_running_job_that_times_out_is_interrupted_with_its_own_id(world):
+    r = runner(FakeConnect(FakeWS([msg("execution_start")])))
+    with pytest.raises(jobs.ComfyTimeout, match = "was cancelled"):
+        go(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client(), timeout_s = 0.05))
+    assert world.fake.interrupts == [{"prompt_id": PID}] and world.fake.running == []
+
+
+def test_a_timeout_that_cannot_be_confirmed_says_so_and_the_runner_stays_busy_until_it_is(world):
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([msg("execution_start")])))
+        r.cancel_wait = 0.05
+        real = world.fake.interrupt_running
+        world.fake.interrupt_running = lambda pid: False
+        with pytest.raises(jobs.ComfyTimeout, match = "may still be running"):
+            await r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client(), timeout_s = 0.05)
+        assert r.is_running() and r.progress()["active"], "ComfyUI still holds the prompt, so Studio still owns it"
+        assert world.scheduled == 0
+        with pytest.raises(jobs.ComfyBusyError):
+            await r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client())
+        world.fake.interrupt_running = real  # ComfyUI finally lets go
+        assert await _until(lambda: not r.is_running())
+        assert world.scheduled == 1
+
+    go(scenario())
+
+
+def test_the_reaper_gives_up_after_reap_wait(world):
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([msg("execution_start")])))
+        r.cancel_wait, r.reap_wait = 0.02, 0.1
+        world.fake.interrupt_running = lambda pid: False
+        with pytest.raises(jobs.ComfyTimeout):
+            await r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client(), timeout_s = 0.05)
+        assert await _until(lambda: not r.is_running())
+
+    go(scenario())
+
+
+@pytest.mark.parametrize("pending", [True, False])
+def test_task_cancellation_stops_the_remote_prompt_whether_pending_or_running(world, pending):
+    if pending:
+        _queue_behind_a_foreign_job(world)
+
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([])))
+        task = await _start(r, world.fake)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not r.is_running()
+
+    go(scenario())
+    assert world.fake.pending == [] and PID not in world.fake.running
+    if pending:
+        assert world.fake.running == ["foreign"] and world.fake.interrupts == []
+    else:
+        assert world.fake.interrupts == [{"prompt_id": PID}]
