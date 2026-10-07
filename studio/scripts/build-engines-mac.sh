@@ -263,7 +263,8 @@ stage_omlx() {
 validate_comfyui() { # <venv dir>
   "$1/bin/python" -c "import torch, torchvision, safetensors, aiohttp; assert torch.backends.mps.is_available(), 'MPS unavailable'; print('torch', torch.__version__)"
   mkdir -p "$BUILD_ROOT/comfyui-smoke"
-  python3 - "$1" "$BUILD_ROOT/comfyui-smoke" <<'PY'
+  local rc=0
+  python3 - "$1" "$BUILD_ROOT/comfyui-smoke" <<'PY' || rc=$?
 import subprocess, sys
 venv, smoke = sys.argv[1:3]
 try:
@@ -279,6 +280,9 @@ if run.returncode != 0:
     print((run.stdout + run.stderr)[-3000:], file=sys.stderr)
     sys.exit(1)
 PY
+  # the scratch data dir (db, temp, user) is only for this check
+  rm -rf "$BUILD_ROOT/comfyui-smoke"
+  return "$rc"
 }
 
 # The swap unit is the whole <ENGINES_HOME>/comfyui dir: the venv AND src/ (an exported copy of the
