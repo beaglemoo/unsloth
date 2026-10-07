@@ -4031,6 +4031,12 @@ class _ToolLoopTimingTransport:
         self._timings: dict[str, float] = {}
         self._last_timings: dict[str, Any] = {}
 
+    def __getattr__(self, name: str) -> Any:
+        # Only reached for names this wrapper lacks; the loop and its tests see the wrapped transport.
+        if name == "_inner":
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
     @staticmethod
     def _payload(line: Any) -> Optional[dict]:
         if not isinstance(line, str) or not line.startswith("data:"):
