@@ -202,7 +202,7 @@ def world(tmp_path, monkeypatch):
 
     spy.on_admit = None
 
-    async def admit():
+    async def admit(hold = None):
         spy.admissions += 1
         if spy.on_admit is not None:
             await spy.on_admit()
@@ -889,3 +889,236 @@ def test_task_cancellation_stops_the_remote_prompt_whether_pending_or_running(wo
         assert world.fake.running == ["foreign"] and world.fake.interrupts == []
     else:
         assert world.fake.interrupts == [{"prompt_id": PID}]
+
+
+# ------------------------------------------- the memory reservation (real arbiter)
+
+
+@pytest.fixture
+def real(monkeypatch, tmp_path):
+    """The real arbiter admission, with ComfyUI faked; Studio and oMLX are idle."""
+    monkeypatch.setenv("UNSLOTH_STUDIO_HOME", str(tmp_path / "studio"))
+    fake = FakeComfy()
+    own = "http://127.0.0.1:18845"
+    config = replace(DEFAULT_CONFIG, enabled = True, comfyui_url = own, comfyui_peer_urls = (), comfyui_idle_free_s = 0)
+    monkeypatch.setattr(arbiter, "get_config", lambda: config)
+    monkeypatch.setattr(jobs, "get_config", lambda: config)
+    monkeypatch.setenv("STUDIO_COMFYUI_URL", own)
+    monkeypatch.setattr(arbiter, "ComfyuiClient", lambda url, transport = None: ComfyuiClient(url, transport = fake.transport))
+    monkeypatch.setattr(arbiter, "_local_workload", lambda: None)
+
+    async def no_media():
+        return None
+
+    async def no_omlx(_config):
+        return []
+
+    monkeypatch.setattr(arbiter, "_media_resident_async", no_media)
+    monkeypatch.setattr(arbiter, "_unload_omlx", no_omlx)
+    arbiter._comfyui_holds.clear()
+    fake.client_for_run = fake.client
+    yield fake
+    arbiter._comfyui_holds.clear()
+
+
+def finish_on_submit(fake):
+    """The fake job completes the moment it is submitted (its websocket frames drive the rest)."""
+    original = fake.handle
+
+    def handle(request):
+        response = original(request)
+        if request.url.path == "/prompt":
+            fake.finish()
+        return response
+
+    fake.handle = handle
+
+
+class GatedConnect(FakeConnect):
+    """A websocket connect that does not complete until ``gate`` is set."""
+
+    def __init__(self, ws, gate):
+        super().__init__(ws)
+        self.gate = gate
+
+    def __call__(self, url, **kwargs):
+        outer = self
+
+        class Ctx:
+            async def __aenter__(self):
+                await outer.gate.wait()
+                return outer.ws
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return Ctx()
+
+
+def test_oMLX_and_local_admission_are_refused_while_the_websocket_is_connecting(real):
+    async def scenario():
+        gate = asyncio.Event()
+        finish_on_submit(real)
+        r = jobs.ComfyJobRunner(connect = GatedConnect(FakeWS([msg("execution_success")]), gate), sleep = _no_sleep)
+        task = asyncio.create_task(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = real.client()))
+        assert await _until(lambda: arbiter._comfyui_held())
+        assert real.submitted == [], "the prompt has not been submitted yet: ComfyUI's queue is still empty"
+        for admit in (arbiter.before_omlx_use, arbiter.before_omlx_load, lambda: arbiter.free_for_local("local_load"),
+                      lambda: arbiter.free_for_local("training")):
+            refused = await admit()
+            assert refused.error and "ComfyUI job starting" in refused.error
+            with pytest.raises(AttachedAdmissionError):
+                refused.require_clear()
+        media = arbiter.new_media_hold("video")
+        assert (await arbiter.free_for_local("local_load", media_hold = media)).error and not media.active
+        gate.set()
+        await task
+        assert not arbiter._comfyui_held()
+        assert (await arbiter.before_omlx_use()).error is None
+        assert (await arbiter.free_for_local("local_load")).error is None
+
+    go(scenario())
+
+
+def test_the_reservation_spans_the_whole_remote_job(real):
+    async def scenario():
+        gate = asyncio.Event()
+
+        class GateWS(FakeWS):
+            async def recv(self):
+                await gate.wait()
+                return await super().recv()
+
+        r = jobs.ComfyJobRunner(connect = FakeConnect(GateWS([msg("execution_success")])), sleep = _no_sleep)
+        finish_on_submit(real)
+        task = asyncio.create_task(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = real.client()))
+        assert await _until(lambda: r.progress()["prompt_id"])
+        assert arbiter._comfyui_held() and (await arbiter.before_omlx_use()).error
+        gate.set()
+        await task
+        assert not arbiter._comfyui_held()
+
+    go(scenario())
+
+
+def _exit_paths():
+    def success(real):
+        finish_on_submit(real)
+        return FakeWS([msg("execution_success")]), None, {}
+
+    def execution_error(real):
+        return FakeWS([msg("execution_error", exception_message = "boom")]), jobs.ComfyJobError, {}
+
+    def interrupted(real):
+        return FakeWS([msg("execution_interrupted")]), jobs.ComfyCancelled, {}
+
+    def graph_rejected(real):
+        real.submit_status, real.submit_body = 400, {"error": {"message": "bad graph"}}
+        return FakeWS([]), ComfyGraphError, {}
+
+    def timeout(real):
+        return FakeWS([msg("execution_start")]), jobs.ComfyTimeout, {"timeout_s": 0.05}
+
+    def comfyui_vanishes(real):
+        original = real.handle
+
+        def handle(request):
+            response = original(request)
+            if request.url.path == "/prompt":
+                real.running = []
+            return response
+
+        real.handle = handle
+        return FakeWS([]), jobs.ComfyJobError, {}
+
+    def no_images(real):
+        real.images = []
+        finish_on_submit(real)
+        return FakeWS([msg("execution_success")]), jobs.ComfyJobError, {}
+
+    return [success, execution_error, interrupted, graph_rejected, timeout, comfyui_vanishes, no_images]
+
+
+@pytest.mark.parametrize("path", _exit_paths(), ids = lambda f: f.__name__)
+def test_the_reservation_is_released_on_every_exit_path(real, path):
+    ws, expected, kwargs = path(real)
+    r = jobs.ComfyJobRunner(connect = FakeConnect(ws), sleep = _no_sleep)
+    r.poll_interval = r.ws_safety_poll = 0.0
+
+    async def scenario():
+        try:
+            await r.run("qwen-image-2.1-t2i", dict(PARAMS), client = real.client(), **kwargs)
+        except Exception as exc:
+            assert expected is not None and isinstance(exc, expected), repr(exc)
+        else:
+            assert expected is None
+
+    go(scenario())
+    assert not arbiter._comfyui_held() and not r.is_running()
+
+
+def test_the_reservation_is_released_when_the_task_is_cancelled_at_every_stage(real):
+    async def at_admission():
+        gate = asyncio.Event()
+        r = jobs.ComfyJobRunner(connect = GatedConnect(FakeWS([]), gate), sleep = _no_sleep)
+        task = asyncio.create_task(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = real.client()))
+        assert await _until(lambda: arbiter._comfyui_held())  # admitted, stuck connecting
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not arbiter._comfyui_held() and not r.is_running()
+
+    async def while_running():
+        r = jobs.ComfyJobRunner(connect = FakeConnect(FakeWS([msg("execution_start")])), sleep = _no_sleep)
+        task = await _start(r, real)
+        assert arbiter._comfyui_held()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not arbiter._comfyui_held() and not r.is_running() and real.running == []
+
+    go(at_admission())
+    go(while_running())
+
+
+def test_a_user_cancel_releases_the_reservation_only_once_comfyui_has_let_go(real):
+    async def scenario():
+        r = jobs.ComfyJobRunner(connect = FakeConnect(FakeWS([msg("execution_start")])), sleep = _no_sleep)
+        r.cancel_wait = 0.05
+        real_interrupt = real.interrupt_running
+        real.interrupt_running = lambda pid: False
+        task = await _start(r, real)
+        assert await r.cancel() is False
+        assert arbiter._comfyui_held() and (await arbiter.before_omlx_use()).error
+        real.interrupt_running = real_interrupt
+        assert await r.cancel() is True
+        with pytest.raises(jobs.ComfyCancelled):
+            await task
+        assert not arbiter._comfyui_held()
+
+    go(scenario())
+
+
+def test_a_timeout_that_could_not_be_confirmed_keeps_the_reservation_until_the_reaper_finishes(real):
+    async def scenario():
+        r = jobs.ComfyJobRunner(connect = FakeConnect(FakeWS([msg("execution_start")])), sleep = _no_sleep)
+        r.cancel_wait = 0.05
+        real_interrupt = real.interrupt_running
+        real.interrupt_running = lambda pid: False
+        with pytest.raises(jobs.ComfyTimeout, match = "may still be running"):
+            await r.run("qwen-image-2.1-t2i", dict(PARAMS), client = real.client(), timeout_s = 0.05)
+        assert arbiter._comfyui_held(), "ComfyUI may still be running the prompt: the memory stays reserved"
+        assert (await arbiter.free_for_local("local_load")).error
+        real.interrupt_running = real_interrupt
+        assert await _until(lambda: not arbiter._comfyui_held())
+        assert not r.is_running()
+
+    go(scenario())
+
+
+def test_a_refusal_before_admission_never_reserves(real):
+    real.models["vae"] = []
+    r = jobs.ComfyJobRunner(connect = FakeConnect(FakeWS([])), sleep = _no_sleep)
+    with pytest.raises(jobs.ComfyModelsMissing):
+        go(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = real.client()))
+    assert not arbiter._comfyui_held()

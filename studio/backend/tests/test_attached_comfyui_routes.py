@@ -78,7 +78,7 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setenv("UNSLOTH_COMFYUI_TEMPLATES_DIR", str(tmp_path / "templates"))
     monkeypatch.setenv("UNSLOTH_ENGINES_HOME", str(tmp_path / "engines"))
 
-    async def admit():
+    async def admit(hold = None):
         state.admissions += 1
         return state.admission
 

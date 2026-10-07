@@ -90,6 +90,7 @@ def world(monkeypatch, tmp_path):
     arbiter._busy_cache.clear()
     arbiter._media_probe_future = None
     arbiter._media_holds.clear()
+    arbiter._comfyui_holds.clear()
 
     def make_comfy(url, *, transport = None):
         return ComfyuiClient(url, transport = transport or httpx.MockTransport(w.handler(url.rstrip("/"))))
@@ -549,6 +550,97 @@ def test_comfyui_job_with_arbitration_off_or_disabled_is_skipped(world):
 def test_comfyui_job_does_not_refuse_for_its_own_busy_queue(world):
     world.comfy[OWN]["running"] = 1
     run(arbiter.before_comfyui_job()).require_clear()
+
+
+# --- the ComfyUI job reservation ---------------------------------------------------------------
+
+
+def _admit_job(world):
+    hold = arbiter.new_comfyui_hold()
+    run(arbiter.before_comfyui_job(hold)).require_clear()
+    assert hold.active
+    return hold
+
+
+def test_an_admitted_job_holds_the_memory_until_released(world):
+    hold = _admit_job(world)
+
+    async def attempts():
+        return (
+            await arbiter.before_omlx_use(),
+            await arbiter.before_omlx_load(),
+            await arbiter.free_for_local("local_load"),
+            await arbiter.free_for_local("training"),
+        )
+
+    results = run(attempts())
+    assert all("ComfyUI job starting" in r.error for r in results), [r.error for r in results]
+    assert "retry shortly to use oMLX" in results[0].error
+    assert "before loading a local model" in results[2].error
+    hold.release()
+    hold.release()  # idempotent
+    assert not arbiter._comfyui_held()
+    assert all(r.error is None for r in run(attempts()))
+
+
+def test_a_refused_media_load_does_not_leave_its_own_claim_behind(world):
+    _admit_job(world)
+    media = arbiter.new_media_hold("image")
+    assert run(arbiter.free_for_local("local_load", media_hold = media)).error
+    assert not media.active and arbiter._media_held() is None
+
+
+def test_a_refused_or_skipped_job_registers_nothing(world):
+    world.comfy[PEER]["running"] = 1
+    hold = arbiter.new_comfyui_hold()
+    assert run(arbiter.before_comfyui_job(hold)).error and not hold.active and not arbiter._comfyui_held()
+    world.comfy[PEER]["running"] = 0
+    world.training = True
+    assert run(arbiter.before_comfyui_job(hold)).error and not hold.active
+    world.training = False
+    world.omlx_error = AttachedEngineBusy("busy")
+    assert run(arbiter.before_comfyui_job(hold)).error and not hold.active
+    world.omlx_error = None
+    set_config(world, arbitrate_comfyui = False)
+    assert run(arbiter.before_comfyui_job(hold)).skipped == "arbitration_off" and not hold.active
+
+
+def test_the_reservation_only_binds_while_comfyui_arbitration_is_on(world):
+    hold = _admit_job(world)
+    set_config(world, arbitrate_comfyui = False)
+    assert run(arbiter.before_omlx_use()).error is None
+    assert run(arbiter.free_for_local("local_load")).error is None
+    hold.release()
+
+
+def test_concurrent_admissions_serialise_with_the_job_admission(world):
+    async def race():
+        hold = arbiter.new_comfyui_hold()
+        job, chat = await asyncio.gather(arbiter.before_comfyui_job(hold), arbiter.before_omlx_use())
+        return job, chat
+
+    job, chat = run(race())
+    job.require_clear()
+    # The chat request ran first (oMLX admitted, then unloaded by the job) or saw the claim: never both unaware.
+    assert chat.error is None or "ComfyUI job starting" in chat.error
+
+
+def test_idle_free_does_not_fire_while_a_job_is_reserved(idle):
+    async def go():
+        idle.gate["release"] = asyncio.Event()
+        hold = arbiter.new_comfyui_hold()
+        (await arbiter.before_comfyui_job(hold)).require_clear()
+        assert arbiter.schedule_comfyui_idle_free()
+        await _settle()
+        idle.gate["release"].set()
+        await _settle()
+        assert idle.posts(OWN) == [] and len(idle.sleeps) == 2
+        hold.release()
+        idle.gate["release"].set()
+        await _settle()
+        assert len(idle.posts(OWN)) == 1
+
+    run(go())
 
 
 # --- Studio media residency probe -------------------------------------------------------------
