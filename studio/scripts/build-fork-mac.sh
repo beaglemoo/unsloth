@@ -357,7 +357,7 @@ rollback_install() {
     # Each engine's gate is soft and separate: one stuck engine (its unregister failed and it keeps
     # its port) must not keep the previous app and the other engine from being restored. Nothing is killed.
     local gate_label
-    for gate_label in "${HELPER_LABELS[@]}"; do
+    for gate_label in ${STOPPED_HELPERS[@]+"${STOPPED_HELPERS[@]}"}; do
       ports_free_wait "$gate_label" || warn "the ${gate_label##*.} helper still holds port $(label_port "$gate_label"); it is left running and the previous app is restored over it"
     done
     if rm -rf "$INSTALLED_APP"; then APP_NEW_IN_PLACE=0; else warn "could not remove the new app at $INSTALLED_APP"; fi
@@ -420,7 +420,8 @@ install_app() {
   HELPER_APP="$INSTALLED_APP" helpers_stop
   # One-time migration over a pre-removal app: no legacy ds4 job may survive into the new bundle.
   HELPER_APP="$INSTALLED_APP" helpers_clear_legacy_ds4
-  wait_ports_free
+  # Only the ports of the helpers this run stopped (plus the legacy ds4 ones when that launcher was seen).
+  wait_ports_free ${STOPPED_HELPERS[@]+"${STOPPED_HELPERS[@]}"}
 
   if [ -e "$INSTALLED_APP" ]; then
     run mkdir -p "$(dirname "$APP_PREV")"
