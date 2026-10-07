@@ -513,6 +513,10 @@ export function ComfyuiCreatePanel({
           </div>
         ) : null}
 
+        {notice ? (
+          <Notice failure={notice} onOpenSettings={openSettings} onUnload={onUnloadStudioModel} />
+        ) : null}
+
         <PanelField label="Prompt">
           <Textarea
             data-type-to-activate="prompt"
@@ -762,9 +766,6 @@ export function ComfyuiCreatePanel({
           </PanelField>
         ) : null}
 
-        {notice ? (
-          <Notice failure={notice} onOpenSettings={openSettings} onUnload={onUnloadStudioModel} />
-        ) : null}
       </>
     );
   }
