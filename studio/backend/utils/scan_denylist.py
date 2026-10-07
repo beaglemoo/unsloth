@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Owner-configured model-scan deny-list."""
+"""Model-scan deny-list: the owner's entries, plus the attached oMLX engine's own model folders while attached engines are enabled."""
 
 from __future__ import annotations
 
@@ -30,12 +30,21 @@ def _comparable(path: str) -> str:
 def _existing_entries() -> list[str]:
     from utils.attached_engines_settings import get_config
 
+    config = get_config()
+    raws = list(config.scan_denylist)
+    if config.enabled:
+        # The attached engine's own folders are served by the engine; listing them again would offer a second, untuned copy.
+        from utils.attached_engine_dirs import auto_denied_dirs
+
+        raws.extend(auto_denied_dirs())
     entries: list[str] = []
-    for raw in get_config().scan_denylist:
+    for raw in raws:
         expanded = os.path.expanduser(raw)
         # An entry that does not exist holds nothing, and no symlink can lead into it.
         if expanded and os.path.lexists(expanded):
-            entries.append(os.path.realpath(expanded))
+            real = os.path.realpath(expanded)
+            if real not in entries:
+                entries.append(real)
     return entries
 
 
