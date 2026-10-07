@@ -2823,7 +2823,14 @@ def test_custom_provider_is_treated_as_template_applying():
     NPU's lemond serves FastFlowLM, which applies the model's own template as well."""
     from core.inference.external_provider import _TEMPLATE_APPLYING_PROVIDERS
 
-    assert _TEMPLATE_APPLYING_PROVIDERS == {"vllm", "llama_cpp", "ollama", "custom", "lemonade"}
+    assert _TEMPLATE_APPLYING_PROVIDERS == {
+        "vllm",
+        "llama_cpp",
+        "ollama",
+        "custom",
+        "lemonade",
+        "omlx",
+    }
     providers = (_REPO_ROOT / "studio" / "backend" / "routes" / "providers.py").read_text(
         encoding = "utf-8"
     )
