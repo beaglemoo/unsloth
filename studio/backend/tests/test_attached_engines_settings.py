@@ -29,6 +29,8 @@ def stored_settings(monkeypatch):
         settings.ENABLED_ENV_VAR,
         settings.OMLX_URL_ENV_VAR,
         settings.SCAN_DENYLIST_ENV_VAR,
+        settings.COMFYUI_URL_ENV_VAR,
+        settings.COMFYUI_PEER_URLS_ENV_VAR,
     ):
         monkeypatch.delenv(var, raising = False)
     settings._invalidate()
@@ -189,3 +191,123 @@ def test_legacy_stored_settings_are_ignored_without_losing_omlx(stored_settings,
     assert config.scan_denylist == ()
     settings.set_config(arbitrate_local_loads = False)
     assert settings.get_config().omlx_url == "http://localhost:9000"
+
+
+def test_comfyui_defaults():
+    config = settings.get_config()
+    assert config.comfyui_url == "http://127.0.0.1:8844"
+    assert config.comfyui_peer_urls == ("http://127.0.0.1:8188",)
+    assert config.arbitrate_comfyui is True
+    assert config.comfyui_idle_free_s == 300
+
+
+def test_comfyui_fields_round_trip_and_keep_others(stored_settings):
+    settings.set_config(enabled = True)
+    config = settings.set_config(
+        comfyui_url = "http://localhost:9844/",
+        comfyui_peer_urls = ["http://127.0.0.1:8188", " http://[::1]:8189 ", "http://127.0.0.1:8188"],
+        arbitrate_comfyui = False,
+        comfyui_idle_free_s = 60,
+    )
+    assert config.enabled is True
+    assert config.comfyui_url == "http://localhost:9844"
+    assert config.comfyui_peer_urls == ("http://127.0.0.1:8188", "http://[::1]:8189")
+    assert config.arbitrate_comfyui is False
+    assert config.comfyui_idle_free_s == 60
+    assert settings.set_config(comfyui_peer_urls = []).comfyui_peer_urls == ()
+    assert settings.set_config(comfyui_idle_free_s = 0).comfyui_idle_free_s == 0
+    stored = stored_settings[settings.ATTACHED_ENGINES_SETTING_KEY]
+    assert stored["comfyui_peer_urls"] == [] and stored["comfyui_url"] == "http://localhost:9844"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"comfyui_url": "http://192.168.2.5:8844"},
+        {"comfyui_peer_urls": ["http://example.com"]},
+        {"comfyui_peer_urls": "http://127.0.0.1:8188"},
+        {"comfyui_peer_urls": [f"http://127.0.0.1:{9000 + i}" for i in range(9)]},
+        {"comfyui_idle_free_s": "soon"},
+        {"comfyui_idle_free_s": True},
+        {"comfyui_idle_free_s": 1.5},
+        {"arbitrate_comfyui": "maybe"},
+    ],
+)
+def test_invalid_comfyui_changes_are_rejected(changes):
+    with pytest.raises(ValueError):
+        settings.set_config(**changes)
+
+
+@pytest.mark.parametrize("value,expected", [(-5, 0), (999999, 86400), (86400, 86400), ("45", 45), (12.0, 12)])
+def test_idle_free_seconds_are_clamped(value, expected):
+    assert settings.set_config(comfyui_idle_free_s = value).comfyui_idle_free_s == expected
+
+
+def test_comfyui_env_overrides_win_over_stored(monkeypatch):
+    settings.set_config(comfyui_url = "http://127.0.0.1:1111", comfyui_peer_urls = ["http://127.0.0.1:1"])
+    monkeypatch.setenv(settings.COMFYUI_URL_ENV_VAR, "http://127.0.0.1:18844/")
+    monkeypatch.setenv(settings.COMFYUI_PEER_URLS_ENV_VAR, "http://127.0.0.1:18845, http://localhost:18846")
+    settings._invalidate()
+    config = settings.get_config()
+    assert config.comfyui_url == "http://127.0.0.1:18844"
+    assert config.comfyui_peer_urls == ("http://127.0.0.1:18845", "http://localhost:18846")
+    monkeypatch.setenv(settings.COMFYUI_PEER_URLS_ENV_VAR, "")
+    settings._invalidate()
+    assert settings.get_config().comfyui_peer_urls == ()
+
+
+def test_invalid_comfyui_env_values_are_ignored(monkeypatch):
+    monkeypatch.setenv(settings.COMFYUI_URL_ENV_VAR, "http://10.0.0.5:8844")
+    monkeypatch.setenv(settings.COMFYUI_PEER_URLS_ENV_VAR, "http://127.0.0.1:1,http://10.0.0.5:2")
+    settings._invalidate()
+    config = settings.get_config()
+    assert config.comfyui_url == settings.DEFAULT_COMFYUI_URL
+    assert config.comfyui_peer_urls == settings.DEFAULT_COMFYUI_PEER_URLS
+
+
+def test_corrupt_stored_comfyui_values_fall_back_per_field(stored_settings):
+    stored_settings[settings.ATTACHED_ENGINES_SETTING_KEY] = {
+        "comfyui_url": "http://evil.example",
+        "comfyui_peer_urls": ["http://127.0.0.1:1", "http://evil.example"],
+        "arbitrate_comfyui": "banana",
+        "comfyui_idle_free_s": "soon",
+    }
+    settings._invalidate()
+    assert settings.get_config() == settings.DEFAULT_CONFIG
+    stored_settings[settings.ATTACHED_ENGINES_SETTING_KEY] = {
+        "comfyui_url": "http://localhost:9",
+        "comfyui_peer_urls": ["http://127.0.0.1:1"],
+        "arbitrate_comfyui": False,
+        "comfyui_idle_free_s": 10**9,
+    }
+    settings._invalidate()
+    config = settings.get_config()
+    assert (config.comfyui_url, config.comfyui_peer_urls) == ("http://localhost:9", ("http://127.0.0.1:1",))
+    assert config.arbitrate_comfyui is False and config.comfyui_idle_free_s == 86400
+
+
+def test_settings_route_carries_the_comfyui_fields():
+    response = routes.update_attached_engines_settings(
+        routes.AttachedEnginesPayload(
+            comfyui_url = "http://127.0.0.1:9844",
+            comfyui_peer_urls = [],
+            arbitrate_comfyui = False,
+            comfyui_idle_free_s = 120,
+        ),
+        current_subject = "owner",
+    )
+    assert response.comfyui_url == "http://127.0.0.1:9844"
+    assert response.comfyui_peer_urls == [] and response.arbitrate_comfyui is False
+    assert response.comfyui_idle_free_s == 120
+    assert routes.get_attached_engines_settings(current_subject = "owner").comfyui_idle_free_s == 120
+
+
+def test_settings_route_rejects_a_non_loopback_comfyui_url_with_400():
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as err:
+        routes.update_attached_engines_settings(
+            routes.AttachedEnginesPayload(comfyui_peer_urls = ["http://192.168.1.2:8188"]),
+            current_subject = "owner",
+        )
+    assert err.value.status_code == 400
