@@ -13,6 +13,7 @@ import weakref
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -126,6 +127,33 @@ async def _admit(reason: str, *, local: bool) -> ArbiterResult:
         message = f"Cannot free shared memory for {reason}: {exc}"
         logger.warning("%s", message)
         return ArbiterResult(skipped = "error", error = message)
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> Optional[tuple[str, str, int]]:
+    try:
+        parts = urlsplit(str(url).strip())
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    if not host or scheme not in _DEFAULT_PORTS:
+        return None
+    host = host.rstrip(".").lower()
+    return scheme, "loopback" if host in _LOOPBACK_HOSTS else host, port or _DEFAULT_PORTS[scheme]
+
+
+def targets_omlx(provider_type: Optional[str], base_url: Optional[str]) -> bool:
+    """True when a provider request reaches the attached oMLX: its type, or a base URL on its origin."""
+    if provider_type == "omlx":
+        return True
+    if not base_url:
+        return False
+    target = _origin(base_url)
+    return target is not None and target == _origin(get_config().omlx_url)
 
 
 async def free_for_local(reason: Reason) -> ArbiterResult:
