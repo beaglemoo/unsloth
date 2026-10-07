@@ -768,6 +768,7 @@ class Rig:
         self.app = tmp_path / "helper-app" / "Unsloth.app"
         make_app(self.app, "helper", cli="cli")
         self.omlx_port = free_port()
+        self.comfyui_port = free_port()
         self.ds4_port = free_port()
         self.labels = ("ai.unsloth.studio.omlx",)
         make_venv(home / "omlx", "old")
@@ -803,7 +804,8 @@ class Rig:
         self.env = {
             "UNSLOTH_ENGINES_HOME": str(home),
             "OMLX_URL": f"http://127.0.0.1:{self.omlx_port}",
-            "ENGINE_PORTS": f"{self.omlx_port}",
+            "COMFYUI_URL": f"http://127.0.0.1:{self.comfyui_port}",
+            "ENGINE_PORTS": f"{self.omlx_port} {self.comfyui_port}",
             "LAUNCHCTL": str(FAKES / "fake-launchctl"),
             "HELPER_APP": str(self.app),
             "PGREP": str(FAKES / "fake-pgrep"),
@@ -815,6 +817,7 @@ class Rig:
             "FAKE_LC": str(self.lc),
             "FAKE_HOME": str(home),
             "FAKE_OMLX_PORT": str(self.omlx_port),
+            "FAKE_COMFYUI_PORT": str(self.comfyui_port),
             "FAKE_PY": sys.executable,
             "STAGE_VERSION": "none",
             "STAGE_COMFYUI_VERSION": "none",
@@ -867,12 +870,23 @@ class Rig:
     def launchctl(self, *args):
         return run([str(FAKES / "fake-launchctl"), *args], self.env)
 
-    def set_desktop(self, lifetime, enabled=True, path=None):
-        """desktop.json as the app writes it: engine_lifetime and engines_enabled (None omits it)."""
+    def set_desktop(self, lifetime, enabled=True, path=None, helpers=None):
+        """desktop.json as the app writes it: engine_lifetime, engines_enabled (None omits it) and the
+        per-engine `helpers` choices (None omits them: oMLX on, ComfyUI off)."""
         body = {"engine_lifetime": lifetime}
         if enabled is not None:
             body["engines_enabled"] = enabled
+        if helpers is not None:
+            body["helpers"] = helpers
         (path or self.home / "desktop.json").write_text(json.dumps(body))
+
+    def enable_comfyui(self):
+        """The user turned ComfyUI on (desktop.json helpers.comfyui) and registered it, like the app."""
+        self.set_desktop("always", helpers={"omlx": True, "comfyui": True})
+        assert run([str(self.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "register", "comfyui"], self.env).returncode == 0
+        self.wait_up()
+        (self.lc / "calls.log").unlink(missing_ok=True)
+        self.labels = ("ai.unsloth.studio.omlx", "ai.unsloth.studio.comfyui")
 
     def set_app_running(self, running):
         flag = self.lc / "app-running"
@@ -891,7 +905,10 @@ class Rig:
         import time
         import urllib.request
 
-        for url in (f"http://127.0.0.1:{self.omlx_port}/api/status",):
+        urls = [f"http://127.0.0.1:{self.omlx_port}/api/status"]
+        if (self.lc / "registered.ai.unsloth.studio.comfyui").exists():
+            urls.append(f"http://127.0.0.1:{self.comfyui_port}/system_stats")
+        for url in urls:
             for _ in range(100):
                 try:
                     urllib.request.urlopen(url, timeout=1).read()
@@ -930,6 +947,7 @@ class Rig:
             deadline = time.time() + 2
             while time.time() < deadline and any(_alive(pid) for pid in pids):
                 time.sleep(0.05)
+        return pids
 
 
 def _alive(pid):
@@ -944,7 +962,9 @@ def _alive(pid):
 def rig(tmp_path, home):
     r = Rig(tmp_path, home)
     yield r
-    r.close()
+    pids = r.close()
+    # the fakes (oMLX, ComfyUI, the legacy launcher) must never outlive the test
+    assert not [pid for pid in pids if _alive(pid)], "a fake engine survived the test"
 
 
 def test_update_swaps_the_venv_with_the_helpers_stopped_for_the_swap_only(rig):
@@ -959,12 +979,12 @@ def test_update_swaps_the_venv_with_the_helpers_stopped_for_the_swap_only(rig):
     order = [
         "fake stage: new",
         "omlx-unload",
-        "engine-helpers unregister",
-        "engine-helpers register",
+        "engine-helpers unregister omlx",
+        "engine-helpers register omlx",
     ]
     positions = [calls.index(item) for item in order]
     assert positions == sorted(positions)
-    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert rig.cli_calls() == ["engine-helpers unregister omlx", "engine-helpers register omlx"]
     assert_no_launchd_start(rig)
     assert all(rig.loaded(label) for label in rig.labels)
     assert not (rig.home / "omlx.new").exists()
@@ -977,7 +997,7 @@ def assert_no_launchd_start(rig):
 
 
 def helpers_touched(rig):
-    return [c for c in rig.calls() if c.startswith("launchctl bootout") or c in ("engine-helpers unregister", "engine-helpers register", "engine-helpers restart")]
+    return [c for c in rig.calls() if c.startswith("launchctl bootout") or c.startswith(("engine-helpers unregister", "engine-helpers register", "engine-helpers restart"))]
 
 
 def test_update_with_nothing_staged_does_not_touch_the_helpers(rig):
@@ -1027,9 +1047,9 @@ def test_update_reports_when_a_helper_cannot_be_restarted(rig):
     result = rig.update(STAGE_VERSION="new", FAKE_REGISTER_FAIL="1", FAKE_RESTART_FAIL="1")
     assert result.returncode != 0
     out = result.stderr + result.stdout
-    assert "did not restart" in out and "Attached engines > Engines enabled" in out
+    assert "did not restart" in out and "Engines > Engines enabled" in out
     # register, then one restart; never launchctl bootstrap or kickstart
-    assert [c for c in rig.cli_calls() if c != "engine-helpers unregister"][:2] == ["engine-helpers register", "engine-helpers restart"]
+    assert [c for c in rig.cli_calls() if c != "engine-helpers unregister omlx"][:2] == ["engine-helpers register omlx", "engine-helpers restart omlx"]
     assert_no_launchd_start(rig)
 
 
@@ -1051,7 +1071,7 @@ def test_helpers_stop_and_start_go_through_the_app_cli(rig):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "owed=ai.unsloth.studio.omlx" in result.stdout
     assert result.stdout.strip().splitlines()[-1] == "owed="
-    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
     assert not any(c.startswith("launchctl bootout") for c in rig.calls())
     assert_no_launchd_start(rig)
     assert all(rig.loaded(label) for label in rig.labels)
@@ -1081,7 +1101,7 @@ def test_an_app_without_the_cli_is_never_run_and_falls_back_to_bootout(rig, tmp_
     # launchctl bootstrap or kickstart
     started = lib_fn(rig, 'STOPPED_HELPERS=(ai.unsloth.studio.omlx); helpers_start', {"HELPER_APP": str(old)})
     assert started.returncode != 0
-    assert "no --engine-helpers" in started.stderr and "Attached engines > Engines enabled" in started.stderr
+    assert "no --engine-helpers" in started.stderr and "Engines > Engines enabled" in started.stderr
     assert_no_launchd_start(rig)
 
 
@@ -1106,7 +1126,7 @@ def test_a_booted_out_helper_keeps_its_registration_so_register_is_followed_by_r
     make_app(old, "old", cli="old")
     started = lib_fn(rig, f'HELPER_APP="{old}" helpers_stop; test -e "$FAKE_LC/registered.ai.unsloth.studio.omlx"; helpers_start')
     assert started.returncode == 0, started.stdout + started.stderr
-    assert rig.cli_calls() == ["engine-helpers register", "engine-helpers restart"]
+    assert rig.cli_calls() == ["engine-helpers register omlx", "engine-helpers restart omlx"]
     assert "trying restart" in started.stderr
     assert_no_launchd_start(rig)
     assert all(rig.loaded(label) for label in rig.labels)
@@ -1115,7 +1135,7 @@ def test_a_booted_out_helper_keeps_its_registration_so_register_is_followed_by_r
 def test_a_register_that_does_nothing_and_a_restart_that_fails_leave_a_clear_warning(rig):
     started = lib_fn(rig, "helpers_stop; helpers_start", {"FAKE_REGISTER_NOOP": "1", "FAKE_RESTART_FAIL": "1", "HELPER_START_WAIT": "1"})
     assert started.returncode != 0
-    assert "did not restart" in started.stderr and "Attached engines > Engines enabled" in started.stderr
+    assert "did not restart" in started.stderr and "Engines > Engines enabled" in started.stderr
     assert not any(rig.loaded(label) for label in rig.labels)
 
 
@@ -1176,7 +1196,7 @@ def test_a_comfyui_only_update_swaps_it_and_never_touches_omlx_or_its_helper(rig
     assert "comfyui-check" in calls and "omlx-unload" not in calls
     assert helpers_touched(rig) == [] and rig.cli_calls() == []
     assert (rig.home / "omlx-loaded").exists() and all(rig.loaded(label) for label in rig.labels)
-    assert "oMLX was not touched" in result.stdout
+    assert "oMLX and its helper were not touched" in result.stdout
 
 
 def test_an_update_of_both_swaps_both_with_one_helper_bounce(rig):
@@ -1186,7 +1206,8 @@ def test_an_update_of_both_swaps_both_with_one_helper_bounce(rig):
     assert (rig.home / "omlx" / "VERSION").read_text() == "new"
     assert (rig.home / "comfyui" / "VERSION").read_text() == "new"
     assert marker(rig.home)["comfyui"] == "new-ckey" and marker(rig.home)["omlx"] == "new-key"
-    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    # both venvs swap, so every helper is stopped: the plain unregister, then the loaded one by name
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
     assert "comfyui-check" in rig.calls()
 
 
@@ -1433,9 +1454,9 @@ def test_the_app_swap_happens_with_the_helpers_out_of_launchd(tmp_path, home):
         # stopped through the OLD app, started through the NEW one: the app moves in between
         stop = calls.index("engine-helpers unregister")
         moves = [i for i, c in enumerate(calls) if c.startswith("mv ")]
-        start = calls.index("engine-helpers register")
+        start = calls.index("engine-helpers register omlx")
         assert len(moves) == 2 and stop < min(moves) and max(moves) < start
-        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
         assert not any(c.startswith("launchctl bootout") for c in calls)
         assert_no_launchd_start(rig)
         assert all(rig.loaded(label) for label in rig.labels)
@@ -1461,7 +1482,7 @@ def test_the_first_install_over_an_app_without_the_cli_boots_out_then_registers_
         assert sum(c.startswith("launchctl bootout") for c in calls) == 1
         # the booted-out helpers keep their registration, so register alone does nothing and the
         # new app's restart is what brings them back
-        assert rig.cli_calls() == ["engine-helpers register", "engine-helpers restart"]
+        assert rig.cli_calls() == ["engine-helpers register omlx", "engine-helpers restart omlx"]
         assert_no_launchd_start(rig)
         assert all(rig.loaded(label) for label in rig.labels)
     finally:
@@ -1816,7 +1837,7 @@ def test_with_app_and_the_app_running_registers_the_helpers_again(rig):
     rig.set_app_running(True)
     result = lib_fn(rig, "helpers_stop; helpers_start")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
     assert all(rig.loaded(label) for label in rig.labels)
 
 
@@ -1831,7 +1852,7 @@ def test_always_registers_the_helpers_again_with_the_app_closed(rig):
     rig.set_desktop("always")
     result = lib_fn(rig, 'helpers_stop; helpers_start; echo "left=$HELPERS_LEFT_STOPPED"')
     assert result.returncode == 0 and result.stdout.strip().endswith("left=0"), result.stdout + result.stderr
-    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
     assert all(rig.loaded(label) for label in rig.labels)
 
 
@@ -1891,7 +1912,7 @@ def test_update_in_with_app_mode_leaves_the_helpers_stopped_while_the_app_is_clo
     result = rig.update(STAGE_VERSION="new")
     assert result.returncode == 0, result.stdout + result.stderr
     assert (rig.home / "omlx" / "VERSION").read_text() == "new"
-    assert rig.cli_calls() == ["engine-helpers unregister"]
+    assert rig.cli_calls() == ["engine-helpers unregister omlx"]
     assert not any(rig.loaded(label) for label in rig.labels)
     assert "leaving the helpers stopped" in result.stdout and "next launch" in result.stdout
     assert_no_launchd_start(rig)
@@ -1902,7 +1923,7 @@ def test_update_in_with_app_mode_registers_the_helpers_while_the_app_runs(rig):
     rig.set_app_running(True)
     result = rig.update(STAGE_VERSION="new")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert rig.cli_calls() == ["engine-helpers unregister omlx", "engine-helpers register omlx"]
     assert all(rig.loaded(label) for label in rig.labels)
 
 
@@ -1960,7 +1981,7 @@ def test_install_in_always_mode_still_brings_the_helpers_back(tmp_path, home):
         rig.set_desktop("always")
         result = txn(tmp_path, rig)
         assert result.returncode == 0, result.stdout + result.stderr
-        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
         assert all(rig.loaded(label) for label in rig.labels)
     finally:
         rig.close()
@@ -2238,7 +2259,7 @@ def test_a_failed_unregister_still_restarts_the_helper_that_was_stopped(tmp_path
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
         assert not any(c.startswith("mv ") for c in rig.calls())
         assert rig.cli_calls()[0] == "engine-helpers unregister"
-        assert "engine-helpers register" in rig.cli_calls()
+        assert "engine-helpers register omlx" in rig.cli_calls()
         assert_no_launchd_start(rig)
         assert all(rig.loaded(label) for label in rig.labels)
     finally:
@@ -2258,7 +2279,7 @@ def test_a_port_gate_timeout_restarts_the_stopped_helpers(tmp_path, home):
             )
         assert result.returncode != 0 and "ports still held" in result.stderr, result.stdout + result.stderr
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
-        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
         assert all(rig.loaded(label) for label in rig.labels)
     finally:
         rig.close()
@@ -2316,7 +2337,7 @@ def test_a_legacy_ds4_job_left_after_the_first_unregister_is_unregistered_again(
         assert "the legacy ai.unsloth.studio.ds4 job is gone" in result.stdout
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
         # unregister twice through the OLD app, then register through the new one
-        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers unregister", "engine-helpers register"]
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers unregister", "engine-helpers register omlx"]
         assert not rig.loaded(LEGACY_LABEL)
         # the launcher was seen idle, so it was asked to stop while idle
         assert "ds4-stop /admin/stop?if_idle=1" in rig.calls()
@@ -2391,3 +2412,324 @@ def test_a_busy_legacy_launcher_is_refused_by_the_update_script_too(rig):
     result = rig.update(STAGE_VERSION="new")
     assert result.returncode != 0 and "legacy DwarfStar launcher" in result.stderr
     assert helpers_touched(rig) == []
+
+
+# --- two helpers: ComfyUI beside oMLX -------------------------------------------------------------
+
+
+COMFYUI_LABEL = "ai.unsloth.studio.comfyui"
+OMLX_LABEL = "ai.unsloth.studio.omlx"
+
+
+def status_json(rig, **env):
+    result = run([str(rig.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "status"], {**rig.env, **env})
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_the_status_lists_both_helpers_with_wanted_and_the_cli_version(rig):
+    status = status_json(rig)
+    assert status["cli"] == 2
+    assert [(h["name"], h["wanted"]) for h in status["helpers"]] == [("omlx", True), ("comfyui", False)]
+    # ComfyUI is off until the user turns it on; the master switch gates both
+    rig.set_desktop("always", helpers={"comfyui": True})
+    assert [h["wanted"] for h in status_json(rig)["helpers"]] == [True, True]
+    rig.set_desktop("always", enabled=False, helpers={"comfyui": True})
+    assert [h["wanted"] for h in status_json(rig)["helpers"]] == [False, False]
+
+
+def test_an_old_app_has_no_cli_field_and_one_helper(rig):
+    status = status_json(rig, FAKE_CLI_V1="1")
+    assert "cli" not in status and [h["name"] for h in status["helpers"]] == ["omlx"]
+    assert lib_fn(rig, 'helper_cli_v2 "$(helper_cli)"').returncode == 0
+    assert lib_fn(rig, 'helper_cli_v2 "$(helper_cli)"', {"FAKE_CLI_V1": "1"}).returncode != 0
+
+
+def test_the_untargeted_register_starts_the_chosen_helpers_only(rig):
+    cli = str(rig.app / "Contents/MacOS/unsloth-studio")
+    assert run([cli, "--engine-helpers", "unregister"], rig.env).returncode == 0
+    assert run([cli, "--engine-helpers", "register"], rig.env).returncode == 0
+    assert rig.loaded(OMLX_LABEL) and not rig.loaded(COMFYUI_LABEL)
+    rig.set_desktop("always", helpers={"omlx": False, "comfyui": True})
+    assert run([cli, "--engine-helpers", "unregister"], rig.env).returncode == 0
+    assert run([cli, "--engine-helpers", "register"], rig.env).returncode == 0
+    assert rig.loaded(COMFYUI_LABEL) and not rig.loaded(OMLX_LABEL)
+    # a target registers that helper whether or not it is chosen
+    assert run([cli, "--engine-helpers", "register", "omlx"], rig.env).returncode == 0
+    assert rig.loaded(OMLX_LABEL)
+    assert run([cli, "--engine-helpers", "register", "plex"], rig.env).returncode == 2
+
+
+def test_an_idle_check_dies_on_a_busy_comfyui(rig):
+    rig.enable_comfyui()
+    (rig.home / "comfyui-busy").write_text("1")
+    result = lib_fn(rig, "engines_require_idle")
+    assert result.returncode != 0
+    assert "ComfyUI has 1 jobs running or queued" in result.stderr and "Settings > Engines" in result.stderr
+    (rig.home / "comfyui-pending").write_text("1")
+    assert "ComfyUI has 2 jobs" in lib_fn(rig, "engines_require_idle").stderr
+    for name in ("comfyui-busy", "comfyui-pending"):
+        (rig.home / name).unlink()
+    assert lib_fn(rig, "engines_require_idle").returncode == 0
+
+
+def test_an_unreadable_comfyui_queue_counts_as_busy(rig):
+    result = lib_fn(rig, 'echo "not json" | comfyui_busy_count; echo "{}" | comfyui_busy_count; echo \'{"queue_running":[],"queue_pending":[]}\' | comfyui_busy_count')
+    assert result.stdout.split() == ["1", "1", "0"]
+
+
+def test_the_quiesce_frees_comfyui_and_unloads_omlx(rig):
+    rig.enable_comfyui()
+    (rig.home / "omlx-loaded").write_text("1")
+    result = lib_fn(rig, "engines_quiesce")
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = rig.calls()
+    assert "omlx-unload" in calls
+    frees = [c for c in calls if c.startswith("comfyui-free")]
+    assert len(frees) == 1
+    assert json.loads(frees[0].split(" ", 1)[1]) == {"unload_models": True, "free_memory": True}
+
+
+def test_the_quiesce_can_be_limited_to_one_engine(rig):
+    rig.enable_comfyui()
+    (rig.home / "omlx-loaded").write_text("1")
+    assert lib_fn(rig, "engines_quiesce comfyui").returncode == 0
+    assert "omlx-unload" not in rig.calls() and any(c.startswith("comfyui-free") for c in rig.calls())
+    (rig.lc / "calls.log").unlink()
+    assert lib_fn(rig, "engines_quiesce omlx").returncode == 0
+    assert "omlx-unload" in rig.calls() and not any(c.startswith("comfyui-free") for c in rig.calls())
+
+
+def test_a_failed_comfyui_free_is_a_warning_not_a_failure(rig):
+    rig.enable_comfyui()
+    (rig.home / "comfyui-free-fail").write_text("1")
+    result = lib_fn(rig, "engines_quiesce")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ComfyUI /free answered HTTP 500" in result.stderr
+
+
+def test_an_absent_comfyui_is_nothing_to_free(rig):
+    result = lib_fn(rig, "engines_quiesce")
+    assert result.returncode == 0 and "ComfyUI: " in result.stdout and "nothing to free" in result.stdout
+    assert not any(c.startswith("comfyui-free") for c in rig.calls())
+
+
+def test_helpers_stop_owes_only_the_loaded_labels(rig):
+    # ComfyUI is not loaded: stopping everything must not make the restart bring it up
+    result = lib_fn(rig, 'helpers_stop; echo "owed=${STOPPED_HELPERS[*]}"; helpers_start')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"owed={OMLX_LABEL}\n" in result.stdout
+    assert f"{COMFYUI_LABEL} is not loaded" in result.stdout
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
+    assert rig.loaded(OMLX_LABEL) and not rig.loaded(COMFYUI_LABEL)
+
+
+def test_both_loaded_helpers_are_stopped_together_and_registered_by_name(rig):
+    rig.enable_comfyui()
+    result = lib_fn(rig, 'helpers_stop; echo "owed=${STOPPED_HELPERS[*]}"; helpers_start')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"owed={OMLX_LABEL} {COMFYUI_LABEL}" in result.stdout
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx", "engine-helpers register comfyui"]
+    assert rig.loaded(OMLX_LABEL) and rig.loaded(COMFYUI_LABEL)
+    assert_no_launchd_start(rig)
+
+
+def test_a_subset_is_stopped_by_name_and_leaves_the_other_helper_running(rig):
+    rig.enable_comfyui()
+    result = lib_fn(rig, f'helpers_stop {COMFYUI_LABEL}; echo "owed=${{STOPPED_HELPERS[*]}}"; helpers_start')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"owed={COMFYUI_LABEL}" in result.stdout
+    assert rig.cli_calls() == ["engine-helpers unregister comfyui", "engine-helpers register comfyui"]
+    assert rig.loaded(OMLX_LABEL) and rig.loaded(COMFYUI_LABEL)
+
+
+def test_a_subset_with_an_old_app_is_booted_out_not_unregistered(rig):
+    # an app without the named-target CLI would unregister every helper: use launchctl bootout
+    result = lib_fn(rig, f"helpers_stop {OMLX_LABEL}", {"FAKE_CLI_V1": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert rig.cli_calls() == []
+    assert any(c.startswith("launchctl bootout") and c.endswith(OMLX_LABEL) for c in rig.calls())
+
+
+def test_an_old_app_gets_the_plain_register_and_never_a_target(rig):
+    result = lib_fn(rig, "helpers_stop; helpers_start", {"FAKE_CLI_V1": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert rig.loaded(OMLX_LABEL)
+
+
+def test_an_old_app_cannot_bring_comfyui_back_and_says_so(rig):
+    result = lib_fn(rig, f"STOPPED_HELPERS=({OMLX_LABEL} {COMFYUI_LABEL}); helpers_start", {"FAKE_CLI_V1": "1"})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"cannot register {COMFYUI_LABEL}" in result.stderr
+    assert rig.cli_calls() == ["engine-helpers register"]
+    assert rig.loaded(OMLX_LABEL) and not rig.loaded(COMFYUI_LABEL)
+
+
+def test_with_app_and_the_app_closed_leaves_both_helpers_stopped(rig):
+    rig.enable_comfyui()
+    rig.set_desktop("with_app", helpers={"omlx": True, "comfyui": True})
+    result = lib_fn(rig, 'helpers_stop; helpers_start; echo "owed=${STOPPED_HELPERS[*]-} left=$HELPERS_LEFT_STOPPED"')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "owed= left=1"
+    assert rig.cli_calls() == ["engine-helpers unregister"]
+    assert not rig.loaded(OMLX_LABEL) and not rig.loaded(COMFYUI_LABEL)
+
+
+def test_the_port_gate_covers_the_comfyui_port_and_follows_the_labels(rig):
+    held = socket.socket()
+    try:
+        held.bind(("127.0.0.1", rig.comfyui_port))
+        held.listen()
+        every = lib_fn(rig, "wait_ports_free", {"PORT_GATE_TIMEOUT": "2"})
+        assert every.returncode != 0 and "ports still held" in every.stderr
+        # the oMLX helper alone is stopped: ComfyUI keeping its port is not a reason to wait
+        assert run([str(rig.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "unregister", "omlx"], rig.env).returncode == 0
+        only_omlx = lib_fn(rig, f"wait_ports_free {OMLX_LABEL}", {"PORT_GATE_TIMEOUT": "2"})
+        assert only_omlx.returncode == 0, only_omlx.stdout + only_omlx.stderr
+        only_comfyui = lib_fn(rig, f"wait_ports_free {COMFYUI_LABEL}", {"PORT_GATE_TIMEOUT": "2"})
+        assert only_comfyui.returncode != 0
+    finally:
+        held.close()
+
+
+def test_the_health_wait_checks_each_expected_engine(rig):
+    rig.enable_comfyui()
+    ok = lib_fn(rig, "wait_engines_healthy 3 1 1")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    (rig.home / "comfyui").mkdir(exist_ok=True)
+    (rig.home / "comfyui" / "VERSION").write_text("bad")
+    assert lib_fn(rig, "wait_engines_healthy 1 1 1").returncode != 0
+    # not expecting ComfyUI: its bad answer does not matter; the two-argument form still works
+    assert lib_fn(rig, "wait_engines_healthy 3 1 0").returncode == 0
+    assert lib_fn(rig, "wait_engines_healthy 3 1").returncode == 0
+
+
+def test_the_dry_run_of_the_helper_cycle_lists_both_helpers(rig):
+    result = lib_fn(rig, "DRY=1; helpers_stop; helpers_start")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--engine-helpers unregister" in result.stdout
+    assert "--engine-helpers register omlx" in result.stdout and "--engine-helpers register comfyui" in result.stdout
+    assert rig.cli_calls() == []
+
+
+def test_the_install_dry_run_lists_both_helpers_and_both_ports(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        make_app(tmp_path / "dist" / "Unsloth.app", "new", cli="cli")
+        make_app(tmp_path / "Apps" / "Unsloth.app", "old", cli="cli")
+        result = fork_fn(tmp_path, "DRY=1; install_app", rig.fork_env())
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "free ComfyUI" in result.stdout and "[dry-run]" in result.stdout
+        assert "--engine-helpers register omlx" in result.stdout and "--engine-helpers register comfyui" in result.stdout
+        assert f"ports {rig.omlx_port} {rig.comfyui_port} must stop listening" in result.stdout
+        assert rig.cli_calls() == []
+    finally:
+        rig.close()
+
+
+def test_an_install_brings_back_only_the_helpers_that_were_running(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.enable_comfyui()
+        result = install_app_rig(tmp_path, rig)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx", "engine-helpers register comfyui"]
+        assert rig.loaded(OMLX_LABEL) and rig.loaded(COMFYUI_LABEL)
+        assert any(c.startswith("comfyui-free") for c in rig.calls())
+    finally:
+        rig.close()
+
+
+def test_an_install_without_comfyui_running_does_not_start_it(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        result = install_app_rig(tmp_path, rig)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
+        assert rig.loaded(OMLX_LABEL) and not rig.loaded(COMFYUI_LABEL)
+    finally:
+        rig.close()
+
+
+def test_a_failed_install_restarts_both_owed_helpers_by_name(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.enable_comfyui()
+        # the unregister stops oMLX and then reports failure: the install dies, and the rollback
+        # brings back every helper it owes, each by name
+        result = install_app_rig(tmp_path, rig, {"FAKE_UNREGISTER_FAIL_AFTER": "omlx"})
+        assert result.returncode != 0
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx", "engine-helpers register comfyui"]
+        assert rig.loaded(OMLX_LABEL) and rig.loaded(COMFYUI_LABEL)
+    finally:
+        rig.close()
+
+
+def test_a_comfyui_only_update_bounces_only_the_comfyui_helper(rig):
+    rig.add_comfyui()
+    rig.enable_comfyui()
+    (rig.home / "omlx-loaded").write_text("1")
+    result = rig.update(STAGE_COMFYUI_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "new"
+    assert rig.cli_calls() == ["engine-helpers unregister comfyui", "engine-helpers register comfyui"]
+    calls = rig.calls()
+    assert "omlx-unload" not in calls and (rig.home / "omlx-loaded").exists()
+    assert any(c.startswith("comfyui-free") for c in calls)
+    assert rig.loaded(OMLX_LABEL) and rig.loaded(COMFYUI_LABEL)
+    assert "oMLX and its helper were not touched" in result.stdout
+    assert_no_launchd_start(rig)
+
+
+def test_an_omlx_only_update_leaves_a_running_comfyui_alone(rig):
+    rig.add_comfyui()
+    rig.enable_comfyui()
+    result = rig.update(STAGE_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert rig.cli_calls() == ["engine-helpers unregister omlx", "engine-helpers register omlx"]
+    assert not any(c.startswith("comfyui-free") for c in rig.calls())
+    assert rig.loaded(COMFYUI_LABEL) and (rig.home / "comfyui" / "VERSION").read_text() == "old"
+    assert "ComfyUI and its helper were not touched" in result.stdout
+
+
+def test_an_unhealthy_comfyui_helper_rolls_the_swap_back(rig):
+    rig.add_comfyui()
+    rig.enable_comfyui()
+    # the smoke test passes, but /system_stats answers 500 while the venv says bad
+    result = rig.update(STAGE_COMFYUI_VERSION="bad", COMFYUI_CHECK="/usr/bin/true")
+    assert result.returncode != 0
+    assert "rolling back" in result.stdout and "rolled back" in result.stdout, result.stdout + result.stderr
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "old"
+    assert (rig.home / "comfyui.failed" / "VERSION").read_text() == "bad"
+    assert rig.loaded(COMFYUI_LABEL) and rig.loaded(OMLX_LABEL)
+    assert rig.cli_calls().count("engine-helpers unregister comfyui") == 2
+
+
+def test_a_hand_started_comfyui_still_blocks_its_swap_but_the_helper_does_not(rig):
+    rig.add_comfyui()
+    rig.enable_comfyui()
+    # the helper runs from the venv's path in its argv in real life; the fake does not, so only the
+    # decision is checked here: with the helper loaded the process guard is skipped
+    result = rig.update(STAGE_COMFYUI_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "outside the helper" not in result.stderr
+
+
+def test_the_update_dry_run_lists_both_helpers(rig):
+    rig.add_comfyui()
+    result = rig.update("--dry-run", STAGE_VERSION="new", STAGE_COMFYUI_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "--engine-helpers unregister" in result.stdout
+    assert "--engine-helpers register omlx" in result.stdout and "--engine-helpers register comfyui" in result.stdout
+    assert rig.cli_calls() == []
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_the_comfyui_smoke_dir_is_removed_after_validation(home, exit_code):
+    venv = home / "venv"
+    fake_python(venv / "bin" / "python", f'[ "$1" = -c ] && exit 0\nexit {exit_code}\n')
+    (venv / "src").mkdir()
+    result = build_fn(home, f'rc=0; validate_comfyui "{venv}" || rc=$?; echo "rc=$rc"; ls "$BUILD_ROOT"')
+    assert f"rc={exit_code}" in result.stdout, result.stdout + result.stderr
+    assert "comfyui-smoke" not in result.stdout

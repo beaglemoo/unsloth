@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """A stand-in for the oMLX HTTP surface the update script talks to.
 
-    fake_engine.py omlx|ds4 <engines home> <port>
+    fake_engine.py omlx|comfyui|ds4 <engines home> <port>
 
 oMLX answers /api/status, /v1/models and POST /v1/models/<id>/unload. It reports 500 on
 /v1/models while <home>/omlx/VERSION says "bad", which is how a test makes a venv unhealthy.
 It models the graceful-unload contract: while <home>/omlx-unload-busy exists a plain unload answers
 409 {"error": {"type": "model_busy"}} with Retry-After 15 and unloads nothing; "?force=1" aborts and
 unloads (200). The calls log gets omlx-unload, omlx-unload-busy or omlx-unload-force.
+comfyui answers GET /queue (one running job while <home>/comfyui-busy exists, one more pending while
+<home>/comfyui-pending exists), GET /system_stats (500 while <home>/comfyui/VERSION says "bad") and
+POST /free, /interrupt and /queue (the calls log gets comfyui-free <body>, comfyui-interrupt or
+comfyui-queue <body>; <home>/comfyui-free-fail makes /free answer 500).
 ds4 stands for the legacy DwarfStar launcher of a pre-removal app (migration tests only): it answers
 /admin/status and POST /admin/stop; <home>/ds4-busy makes it report a request in flight and
 <home>/ds4-starting that it is starting.
@@ -59,6 +63,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(200, {"active_requests": 1 if flag(home / "omlx-busy") else 0, "waiting_requests": 0, "models_loading": 0, "loaded_models": loaded})
             if self.path == "/v1/models":
                 return self.reply(500 if version == "bad" else 200, {"data": [{"id": "m1"}, {"id": "m2"}]})
+        elif kind == "comfyui":
+            version = (home / "comfyui" / "VERSION").read_text().strip() if (home / "comfyui" / "VERSION").exists() else ""
+            if self.path == "/queue":
+                running = [[0, "job-a", {}, {}, []]] if flag(home / "comfyui-busy") else []
+                pending = [[1, "job-b", {}, {}, []]] if flag(home / "comfyui-pending") else []
+                return self.reply(200, {"queue_running": running, "queue_pending": pending})
+            if self.path == "/system_stats":
+                return self.reply(500 if version == "bad" else 200, {"system": {"comfyui_version": version or "0"}})
         elif self.path == "/admin/status":
             return self.reply(
                 200,
@@ -83,6 +95,14 @@ class Handler(BaseHTTPRequestHandler):
                 )
             (home / "omlx-loaded").unlink(missing_ok=True)
             CALLS.open("a").write("omlx-unload-force\n" if force else "omlx-unload\n")
+            return self.reply(200)
+        if kind == "comfyui" and url.path in ("/free", "/interrupt", "/queue"):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length).decode() if length else ""
+            name = url.path.lstrip("/")
+            CALLS.open("a").write(f"comfyui-{name} {body}".rstrip() + "\n")
+            if url.path == "/free" and flag(home / "comfyui-free-fail"):
+                return self.reply(500)
             return self.reply(200)
         if kind == "ds4" and self.path.startswith("/admin/stop"):
             (home / "ds4-loaded").unlink(missing_ok=True)
