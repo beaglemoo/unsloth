@@ -690,12 +690,22 @@ class Rig:
             "#!/bin/bash\n"
             'if [ "$1" = --stage-only ]; then\n'
             '  echo "fake stage: $STAGE_VERSION" >>"$FAKE_LC/calls.log"\n'
-            '  [ "${STAGE_VERSION:-none}" = none ] && exit 0\n'
             '  [ "$STAGE_VERSION" = fail ] && exit 1\n'
-            '  mkdir -p "$UNSLOTH_ENGINES_HOME/omlx.new/bin"\n'
-            f'  cp "{home}/omlx/bin/python" "$UNSLOTH_ENGINES_HOME/omlx.new/bin/python"\n'
-            '  printf %s "$STAGE_VERSION" >"$UNSLOTH_ENGINES_HOME/omlx.new/VERSION"\n'
-            '  printf "omlx\\nnew-key\\nomlx_kernels=0\\n" >"$UNSLOTH_ENGINES_HOME/omlx.new/.staged"\n'
+            '  [ "${STAGE_COMFYUI_VERSION:-none}" = fail ] && exit 1\n'
+            '  if [ "${STAGE_VERSION:-none}" != none ]; then\n'
+            '    mkdir -p "$UNSLOTH_ENGINES_HOME/omlx.new/bin"\n'
+            f'    cp "{home}/omlx/bin/python" "$UNSLOTH_ENGINES_HOME/omlx.new/bin/python"\n'
+            '    printf %s "$STAGE_VERSION" >"$UNSLOTH_ENGINES_HOME/omlx.new/VERSION"\n'
+            '    printf "omlx\\nnew-key\\nomlx_kernels=0\\n" >"$UNSLOTH_ENGINES_HOME/omlx.new/.staged"\n'
+            "  fi\n"
+            '  if [ "${STAGE_COMFYUI_VERSION:-none}" != none ] && [ "${UNSLOTH_BUILD_COMFYUI:-1}" != 0 ]; then\n'
+            '    echo "fake stage comfyui: $STAGE_COMFYUI_VERSION" >>"$FAKE_LC/calls.log"\n'
+            '    mkdir -p "$UNSLOTH_ENGINES_HOME/comfyui.new/bin" "$UNSLOTH_ENGINES_HOME/comfyui.new/src"\n'
+            f'    cp "{home}/omlx/bin/python" "$UNSLOTH_ENGINES_HOME/comfyui.new/bin/python"\n'
+            '    printf %s "$STAGE_COMFYUI_VERSION" >"$UNSLOTH_ENGINES_HOME/comfyui.new/VERSION"\n'
+            '    printf "# %s\\n" "$STAGE_COMFYUI_VERSION" >"$UNSLOTH_ENGINES_HOME/comfyui.new/src/main.py"\n'
+            '    printf "comfyui\\nnew-ckey\\n" >"$UNSLOTH_ENGINES_HOME/comfyui.new/.staged"\n'
+            "  fi\n"
             "  exit 0\n"
             "fi\n"
             f'exec "{SCRIPTS}/build-engines-mac.sh" "$@"\n'
@@ -718,6 +728,7 @@ class Rig:
             "FAKE_OMLX_PORT": str(self.omlx_port),
             "FAKE_PY": sys.executable,
             "STAGE_VERSION": "none",
+            "STAGE_COMFYUI_VERSION": "none",
             # the legacy ds4 launcher of a pre-removal app: absent unless a test starts it
             "LEGACY_DS4_URL": f"http://127.0.0.1:{self.ds4_port}",
             "LEGACY_DS4_PORTS": str(self.ds4_port),
@@ -731,6 +742,14 @@ class Rig:
         assert run([str(self.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "register"], self.env).returncode == 0
         self.wait_up()
         (self.lc / "calls.log").unlink(missing_ok=True)
+
+    def add_comfyui(self):
+        """A live ComfyUI venv (venv + src) with its marker. The updater's smoke test is the fake
+        check, which fails while comfyui/VERSION says bad."""
+        make_comfy_venv(self.home / "comfyui", "old")
+        with (self.home / ".provisioned").open("a") as fh:
+            fh.write("comfyui=old-ckey\n")
+        self.env["COMFYUI_CHECK"] = str(FAKES / "fake-comfyui-check")
 
     def start_legacy_ds4(self, busy=False, starting=False):
         """The ds4 helper a pre-removal app registered: a job in launchd answering /admin/status."""
@@ -1048,6 +1067,108 @@ def test_update_dry_run_changes_nothing(rig):
     assert not (rig.home / "omlx.new").exists() and not (rig.home / "omlx.old").exists()
     assert helpers_touched(rig) == []
     assert all(rig.loaded(label) for label in rig.labels)
+
+
+# --- update-engines-mac.sh and the ComfyUI venv --------------------------------------------------
+
+
+def test_a_comfyui_only_update_swaps_it_and_never_touches_omlx_or_its_helper(rig):
+    rig.add_comfyui()
+    (rig.home / "omlx-loaded").write_text("1")
+    result = rig.update(STAGE_COMFYUI_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "new"
+    assert (rig.home / "comfyui" / "src" / "main.py").read_text() == "# new\n"
+    assert (rig.home / "comfyui.old" / "VERSION").read_text() == "old"
+    assert not (rig.home / "comfyui.new").exists()
+    assert marker(rig.home) == {"omlx": "old-key", "omlx_kernels": "1", "comfyui": "new-ckey"}
+    assert (rig.home / "omlx" / "VERSION").read_text() == "old" and not (rig.home / "omlx.old").exists()
+    calls = rig.calls()
+    assert "comfyui-check" in calls and "omlx-unload" not in calls
+    assert helpers_touched(rig) == [] and rig.cli_calls() == []
+    assert (rig.home / "omlx-loaded").exists() and all(rig.loaded(label) for label in rig.labels)
+    assert "oMLX was not touched" in result.stdout
+
+
+def test_an_update_of_both_swaps_both_with_one_helper_bounce(rig):
+    rig.add_comfyui()
+    result = rig.update(STAGE_VERSION="new", STAGE_COMFYUI_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (rig.home / "omlx" / "VERSION").read_text() == "new"
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "new"
+    assert marker(rig.home)["comfyui"] == "new-ckey" and marker(rig.home)["omlx"] == "new-key"
+    assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register"]
+    assert "comfyui-check" in rig.calls()
+
+
+def test_a_failed_comfyui_smoke_test_rolls_both_venvs_back(rig):
+    rig.add_comfyui()
+    result = rig.update(STAGE_VERSION="new", STAGE_COMFYUI_VERSION="bad")
+    assert result.returncode != 0
+    assert "rolling back" in result.stdout and "rolled back" in result.stdout, result.stdout + result.stderr
+    for name, failed in (("omlx", "new"), ("comfyui", "bad")):
+        assert (rig.home / name / "VERSION").read_text() == "old"
+        assert (rig.home / f"{name}.failed" / "VERSION").read_text() == failed
+        assert not (rig.home / f"{name}.old").exists()
+    assert (rig.home / "comfyui" / "src" / "main.py").read_text() == "# old\n"
+    assert marker(rig.home) == {"omlx": "old-key", "omlx_kernels": "1", "comfyui": "old-ckey"}
+    assert all(rig.loaded(label) for label in rig.labels)
+
+
+def test_an_unhealthy_omlx_rolls_back_the_comfyui_venv_swapped_with_it(rig):
+    rig.add_comfyui()
+    result = rig.update(STAGE_VERSION="bad", STAGE_COMFYUI_VERSION="new")
+    assert result.returncode != 0 and "rolled back" in result.stdout, result.stdout + result.stderr
+    assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "old"
+    assert (rig.home / "comfyui.failed" / "VERSION").read_text() == "new"
+    assert marker(rig.home) == {"omlx": "old-key", "omlx_kernels": "1", "comfyui": "old-ckey"}
+
+
+def test_a_failed_comfyui_smoke_test_alone_rolls_back_without_touching_omlx(rig):
+    rig.add_comfyui()
+    result = rig.update(STAGE_COMFYUI_VERSION="bad")
+    assert result.returncode != 0 and "rolled back" in result.stdout, result.stdout + result.stderr
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "old"
+    assert marker(rig.home)["comfyui"] == "old-ckey"
+    assert helpers_touched(rig) == [] and rig.cli_calls() == []
+
+
+def test_a_running_comfyui_blocks_the_update_before_anything_changes(rig):
+    rig.add_comfyui()
+    stray = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", f"{rig.home}/comfyui/src/main.py"],
+        cwd=rig.home / "comfyui" / "src",
+    )
+    try:
+        result = rig.update(STAGE_VERSION="new", STAGE_COMFYUI_VERSION="new")
+        assert result.returncode != 0 and "ComfyUI is running" in result.stderr, result.stdout + result.stderr
+        assert helpers_touched(rig) == []
+        for name in ("omlx", "comfyui"):
+            assert (rig.home / name / "VERSION").read_text() == "old"
+            assert (rig.home / f"{name}.new").exists() and not (rig.home / f"{name}.old").exists()
+        assert marker(rig.home)["comfyui"] == "old-ckey" and "omlx-unload" not in rig.calls()
+    finally:
+        stray.kill()
+        stray.wait()
+
+
+def test_unsloth_build_comfyui_0_leaves_comfyui_out_of_the_update(rig):
+    rig.add_comfyui()
+    make_comfy_venv(rig.home / "comfyui.new", "staged-before", ["comfyui", "new-ckey"])
+    result = rig.update(STAGE_COMFYUI_VERSION="new", UNSLOTH_BUILD_COMFYUI="0")
+    assert result.returncode == 0 and "nothing to do" in result.stdout, result.stdout + result.stderr
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "old" and (rig.home / "comfyui.new").exists()
+    assert helpers_touched(rig) == []
+
+
+def test_the_update_dry_run_covers_comfyui_too(rig):
+    rig.add_comfyui()
+    result = rig.update("--dry-run", STAGE_VERSION="new", STAGE_COMFYUI_VERSION="new")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "would smoke-test the swapped ComfyUI venv" in result.stdout
+    assert "comfyui-check" not in rig.calls()
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "old" and helpers_touched(rig) == []
 
 
 # --- build-fork-mac.sh --install pieces -------------------------------------------------------
