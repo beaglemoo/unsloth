@@ -1,8 +1,12 @@
 #!/bin/bash
-# Provision the oMLX attached engine for the Unsloth desktop app on macOS.
+# Provision the attached engines (oMLX, ComfyUI) for the Unsloth desktop app on macOS.
 #
-#   1. Create or refresh the user-side venv:
+#   1. Create or refresh the user-side venvs:
 #        omlx/          oMLX installed non-editable from the submodule with its pinned deps
+#        comfyui/       ComfyUI: a venv built from the submodule's requirements.txt and
+#                       studio/engines/comfyui-constraints.txt, plus src/ (an exported copy of the
+#                       submodule tree, run as `bin/python src/main.py`). The venv and src/ are one
+#                       swap unit. ComfyUI is not a pip package, so nothing installs the tree itself.
 #   2. Write ~/.unsloth/engines/engines.toml if it is missing. An existing one is kept, but an
 #      old generated file is migrated (see --migrate-config).
 #
@@ -22,12 +26,13 @@
 #                                             | --migrate-config]
 #   --stage-only       build and validate the venvs in <venv>.new, do not swap
 #   --swap-only        swap the venvs already staged (no build, no submodule checks)
-#   --rollback-venvs   put <venv>.old back (name: omlx)
+#   --rollback-venvs   put <venv>.old back (names: omlx, comfyui; default both)
 #   --migrate-config   only migrate an existing engines.toml (the full and --stage-only runs do it
 #                      too; update-engines-mac.sh calls this explicitly). It removes the legacy
 #                      [omlx.env] OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" line.
 #                      The original is copied to engines.toml.bak-<timestamp> first, every change is
 #                      logged, comments and other keys are preserved, and a second run is a no-op.
+#                      It also appends the default [comfyui] section when the file has none.
 #                      Helpers read the file when they start, so it takes effect at their next restart.
 #
 # Environment:
@@ -37,6 +42,9 @@
 #   OMLX_WITH_CUSTOM_KERNEL  1 (default) builds oMLX's optional Metal custom kernels;
 #                            falls back to a build without them if that fails. 0 skips.
 #   OMLX_PYTHON              python spec for the oMLX venv (default 3.13)
+#   COMFYUI_PYTHON           python spec for the ComfyUI venv (default 3.13)
+#   UNSLOTH_BUILD_COMFYUI    1 (default) builds the ComfyUI venv; 0 skips its submodule checks,
+#                            staging and swap (the wrapper is still staged)
 #   FORCE_REPLACE_RUNNING=1  refresh a venv even while a helper is running from it
 set -euo pipefail
 
@@ -51,7 +59,7 @@ for arg in "$@"; do
     --rollback-venvs) MODE=rollback ;;
     --migrate-config) MODE=migrate ;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
-    omlx)
+    omlx|comfyui)
       [ "$MODE" = rollback ] || { echo "unexpected argument: $arg" >&2; exit 2; }
       ROLLBACK_NAMES+=("$arg") ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
@@ -69,8 +77,15 @@ BUILD_ROOT="$ENGINES_HOME/.build"
 OMLX_PYTHON="${OMLX_PYTHON:-3.13}"
 OMLX_EXTRAS="${OMLX_EXTRAS:-}"
 OMLX_WITH_CUSTOM_KERNEL="${OMLX_WITH_CUSTOM_KERNEL:-1}"
+COMFYUI_PYTHON="${COMFYUI_PYTHON:-3.13}"
+BUILD_COMFYUI="${UNSLOTH_BUILD_COMFYUI:-1}"
+
+# Submodules that are initialised, pin-checked and built. UNSLOTH_BUILD_COMFYUI=0 drops comfyui.
+ENGINE_SUBMODULES=(omlx)
+[ "$BUILD_COMFYUI" = 0 ] || ENGINE_SUBMODULES+=(comfyui)
 
 OMLX_COMMIT=""
+COMFYUI_COMMIT=""
 
 log() { printf '[engines] %s\n' "$*"; }
 die() { printf '[engines] error: %s\n' "$*" >&2; exit 1; }
@@ -88,28 +103,33 @@ marker_set() {
 
 # --- submodules -----------------------------------------------------------
 init_submodules() {
-  local sub
-  for sub in omlx; do
+  local sub depth
+  for sub in "${ENGINE_SUBMODULES[@]}"; do
     if ! [ -f "$ENGINES_SRC/$sub/.git" ] && ! [ -d "$ENGINES_SRC/$sub/.git" ]; then
       log "initialising submodule studio/engines/$sub"
-      git -C "$REPO" submodule update --init "studio/engines/$sub"
+      depth=(); [ "$sub" != comfyui ] || depth=(--depth 1)
+      git -C "$REPO" submodule update --init ${depth[@]+"${depth[@]}"} "studio/engines/$sub"
     fi
   done
   OMLX_COMMIT="$(git -C "$ENGINES_SRC/omlx" rev-parse HEAD)"
+  if [ "$BUILD_COMFYUI" != 0 ]; then
+    COMFYUI_COMMIT="$(git -C "$ENGINES_SRC/comfyui" rev-parse HEAD)"
+  fi
 }
 
 # The engines are built from the submodule checkouts, so those must be exactly what the repo
 # pins and untouched: a '+' (checked out elsewhere), '-' (not initialised) or 'U' prefix in
 # `git submodule status`, or any local change, would provision a venv from a commit nothing records.
 check_submodule_pins() {
-  local line sub dirty
+  local line sub dirty paths=()
+  for sub in "${ENGINE_SUBMODULES[@]}"; do paths+=("studio/engines/$sub"); done
   while IFS= read -r line; do
     case "${line:0:1}" in
       " ") ;;
       *) die "submodule pin mismatch: $line (check out the pinned commit, or commit the submodule bump)" ;;
     esac
-  done < <(git -C "$REPO" submodule status -- studio/engines/omlx)
-  for sub in omlx; do
+  done < <(git -C "$REPO" submodule status -- "${paths[@]}")
+  for sub in "${ENGINE_SUBMODULES[@]}"; do
     dirty="$(git -C "$ENGINES_SRC/$sub" status --porcelain)"
     [ -z "$dirty" ] || die "submodule studio/engines/$sub has local changes; commit or discard them first"
   done
@@ -126,7 +146,8 @@ export_tree() { # <submodule dir> <dest>
 # and a venv python resolves to its base interpreter in the process list.
 venv_in_use() { # <venv dir>
   local pid
-  for pid in $(pgrep -x omlx-server; pgrep -f "$1/bin/python"); do
+  # ComfyUI runs "<venv>/bin/python <venv>/src/main.py", so its source path identifies it too.
+  for pid in $(pgrep -x omlx-server; pgrep -f "$1/bin/python"; pgrep -f "$1/src/main.py"); do
     lsof -p "$pid" -Fn 2>/dev/null | grep "^n$1/" >/dev/null && return 0
   done
   return 1
@@ -171,7 +192,7 @@ stage_wrappers() {
   rm -rf "$STAGING"
   mkdir -p "$STAGING"
   local f
-  for f in omlx-launch engines_launch.py engines-common.sh; do
+  for f in omlx-launch comfyui-launch engines_launch.py engines-common.sh; do
     cmp -s "$WRAPPERS/$f" "$STAGING/$f" || install -m 0755 "$WRAPPERS/$f" "$STAGING/$f"
   done
 }
@@ -235,6 +256,53 @@ stage_omlx() {
   # Record the requested key (not the fallback result) so a fallback does not loop forever.
   record_staged "$new" omlx "$want" "omlx_kernels=$kernels"
   rm -rf "$src"
+}
+
+# Import check, then the smoke test ComfyUI ships for CI: --quick-test-for-ci initialises every
+# node and exits before binding a port. Run from src/ like the helper does, with a scratch data dir.
+validate_comfyui() { # <venv dir>
+  "$1/bin/python" -c "import torch, torchvision, safetensors, aiohttp; assert torch.backends.mps.is_available(), 'MPS unavailable'; print('torch', torch.__version__)"
+  mkdir -p "$BUILD_ROOT/comfyui-smoke"
+  python3 - "$1" "$BUILD_ROOT/comfyui-smoke" <<'PY'
+import subprocess, sys
+venv, smoke = sys.argv[1:3]
+try:
+    run = subprocess.run(
+        [f"{venv}/bin/python", "main.py", "--quick-test-for-ci", "--base-directory", smoke,
+         "--disable-all-custom-nodes", "--cpu"],
+        cwd=f"{venv}/src", timeout=300, capture_output=True, text=True,
+    )
+except subprocess.TimeoutExpired:
+    print("ComfyUI smoke test timed out after 300 s", file=sys.stderr)
+    sys.exit(1)
+if run.returncode != 0:
+    print((run.stdout + run.stderr)[-3000:], file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+# The swap unit is the whole <ENGINES_HOME>/comfyui dir: the venv AND src/ (an exported copy of the
+# submodule tree), so swap, rollback and the in-use check move both together.
+stage_comfyui() {
+  local venv="$ENGINES_HOME/comfyui" new="$ENGINES_HOME/comfyui.new"
+  local constraints="$ENGINES_SRC/comfyui-constraints.txt"
+  local want="$COMFYUI_COMMIT:py$COMFYUI_PYTHON:constraints-$(shasum -a 256 "$constraints" | cut -c1-12)"
+  if [ "$FORCE" = 0 ] && [ "$(marker_get comfyui)" = "$want" ] && [ -x "$venv/bin/python" ]; then
+    log "comfyui venv: up to date ($COMFYUI_COMMIT)"
+    discard_stale_staged "$new"
+    return
+  fi
+  if [ "$FORCE" = 0 ] && staged_ok "$new" "$want"; then
+    log "comfyui venv: already staged ($COMFYUI_COMMIT)"
+    return
+  fi
+  log "comfyui venv: staging $COMFYUI_COMMIT in $new (this installs torch and the pinned stack, about 1.5 GB; it can take several minutes)"
+  make_venv "$new" "$COMFYUI_PYTHON"
+  export_tree "$ENGINES_SRC/comfyui" "$new/src"
+  pip_install "$new" -r "$new/src/requirements.txt" -c "$constraints" >"$BUILD_ROOT/comfyui-install.log" 2>&1 \
+    || { tail -n 30 "$BUILD_ROOT/comfyui-install.log" >&2; die "comfyui install failed (log: $BUILD_ROOT/comfyui-install.log)"; }
+  validate_comfyui "$new"
+  record_staged "$new" comfyui "$want"
 }
 
 # Venv scripts (entry points, activate) embed the path the venv was built at; after the move
@@ -318,13 +386,13 @@ migrate_config() {
     log "engines.toml: not present, nothing to migrate"
     return 0
   fi
-  python3 - "$cfg" "$(date +%Y%m%d-%H%M%S)" <<'PY'
+  python3 - "$cfg" "$(date +%Y%m%d-%H%M%S)" "$WRAPPERS/engines.default.toml" <<'PY'
 import os
 import re
 import shutil
 import sys
 
-cfg, ts = sys.argv[1:3]
+cfg, ts, default_cfg = sys.argv[1:4]
 try:
     import tomllib
 except ImportError:  # python < 3.11: skip the validation, the edit is still conservative
@@ -383,6 +451,35 @@ if env:
             del lines[i]
         changes.append(f"[omlx.env] removed {PEER}")
 
+# A config written before ComfyUI existed gets the default [comfyui] section appended; an existing
+# [comfyui] (or [comfyui.*]) is the user's and is never touched.
+COMFYUI_MARK = "# ComfyUI (bundled helper"
+
+
+def has_comfyui():
+    for line in lines:
+        m = HEADER.match(line.rstrip("\r\n"))
+        if m and re.sub(r"\s+", "", m.group(1)).split(".")[0] == "comfyui":
+            return True
+    return False
+
+
+if not has_comfyui():
+    try:
+        with open(default_cfg, newline="") as fh:
+            default_lines = fh.read().splitlines(keepends=True)
+        block = default_lines[next(i for i, l in enumerate(default_lines) if l.startswith(COMFYUI_MARK)):]
+    except (OSError, StopIteration):
+        block = []
+        say("the default [comfyui] section was not found; not appended")
+    if block:
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            lines[-1] += eol
+        if lines and lines[-1].strip():
+            lines.append(eol)
+        lines.extend(l.rstrip("\r\n") + eol for l in block)
+        changes.append("appended [comfyui] section")
+
 if not changes:
     say("up to date, nothing to migrate")
     sys.exit(0)
@@ -429,6 +526,7 @@ main() {
   case "$MODE" in
     swap)
       swap_venv "$ENGINES_HOME/omlx"
+      if [ "$BUILD_COMFYUI" != 0 ]; then swap_venv "$ENGINES_HOME/comfyui"; fi
       [ "$PENDING_SWAPS" = 0 ] || die "$PENDING_SWAPS staged venv(s) not swapped (an engine is running)"
       log "swap done"
       return 0 ;;
@@ -437,7 +535,7 @@ main() {
       return 0 ;;
     rollback)
       local name
-      [ "${#ROLLBACK_NAMES[@]}" -gt 0 ] || ROLLBACK_NAMES=(omlx)
+      [ "${#ROLLBACK_NAMES[@]}" -gt 0 ] || ROLLBACK_NAMES=(omlx comfyui)
       for name in "${ROLLBACK_NAMES[@]}"; do rollback_venv "$ENGINES_HOME/$name"; done
       log "rollback done"
       return 0 ;;
@@ -447,12 +545,18 @@ main() {
   stage_wrappers
   if [ "$SKIP_VENVS" = 0 ]; then
     stage_omlx
+    if [ "$BUILD_COMFYUI" != 0 ]; then
+      stage_comfyui
+    else
+      log "comfyui: skipped (UNSLOTH_BUILD_COMFYUI=0)"
+    fi
     if [ "$MODE" = full ]; then
       swap_venv "$ENGINES_HOME/omlx"
+      if [ "$BUILD_COMFYUI" != 0 ]; then swap_venv "$ENGINES_HOME/comfyui"; fi
     fi
   fi
   write_default_config
-  log "done (omlx=${OMLX_COMMIT:0:8}); staging: $STAGING"
+  log "done (omlx=${OMLX_COMMIT:0:8} comfyui=${COMFYUI_COMMIT:0:8}); staging: $STAGING"
   [ "$PENDING_SWAPS" = 0 ] || log "$PENDING_SWAPS staged venv(s) are waiting in $ENGINES_HOME/*.new"
 }
 
