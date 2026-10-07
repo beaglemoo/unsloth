@@ -88,6 +88,8 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setattr(arbiter, "get_config", lambda: config["value"])
     arbiter._notices.clear()
     arbiter._busy_cache.clear()
+    arbiter._media_probe_future = None
+    arbiter._media_holds.clear()
 
     def make_comfy(url, *, transport = None):
         return ComfyuiClient(url, transport = transport or httpx.MockTransport(w.handler(url.rstrip("/"))))
@@ -605,15 +607,93 @@ def test_the_media_refusal_follows_the_local_arbitration_setting(world):
 
 def test_a_media_load_replacing_a_media_model_is_not_refused_by_it(world):
     world.media = "has an image model loaded"
-    run(arbiter.free_for_local("local_load", media_hold = arbiter.new_media_hold("image"))).require_clear()
+    hold = arbiter.new_media_hold("image")
+    run(arbiter.free_for_local("local_load", media_hold = hold)).require_clear()
+    hold.release()
 
 
 def test_a_slow_media_probe_is_a_refusal_not_an_admission(world, monkeypatch):
+    import threading
+
+    release = threading.Event()
+    monkeypatch.setattr(arbiter, "_MEDIA_PROBE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(arbiter, "_studio_media_resident", lambda: release.wait(5) and None)
+    try:
+        assert run(arbiter.before_omlx_use()).error
+    finally:
+        release.set()
+        arbiter._media_probe_future.result(timeout = 5)
+
+
+def _probe_threads() -> int:
+    import threading
+
+    return sum(t.name.startswith("arbiter-media-probe") for t in threading.enumerate())
+
+
+def test_a_stuck_backend_lock_never_grows_the_probe_threads(world, backends, monkeypatch):
+    import threading
+
+    lock = threading.Lock()
+    entered = []
+
+    class Stuck:
+        def status(self):
+            return {"loaded": False}
+
+        def loading_repo_ids(self):
+            entered.append(1)
+            with lock:
+                return ()
+
+    backends["core.inference.sd_cpp_backend"]._sd_cpp_backend = Stuck()
+    monkeypatch.setattr(arbiter, "_MEDIA_PROBE_TIMEOUT_S", 0.05)
+    lock.acquire()
+    try:
+        before = _probe_threads()
+        for _ in range(30):
+            result = run(arbiter.before_omlx_use())
+            assert result.error and "busy loading or unloading" in result.error
+        assert len(entered) == 1
+        assert _probe_threads() <= max(before, 1)
+        assert run(arbiter.before_omlx_load()).error and len(entered) == 1
+        assert world.omlx_calls == [] and world.calls == []
+    finally:
+        lock.release()
+    arbiter._media_probe_future.result(timeout = 5)
+    run(arbiter.before_omlx_use()).require_clear()
+    assert len(entered) == 2
+
+
+def test_a_held_media_claim_refuses_with_no_thread_hop(world, backends, monkeypatch):
+    hold = arbiter.new_media_hold("image")
+    run(arbiter.free_for_local("local_load", media_hold = hold)).require_clear()
+
+    def no_hop(*args, **kwargs):
+        raise AssertionError("a held claim must not reach the probe pool")
+
+    monkeypatch.setattr(arbiter._media_probe_pool, "submit", no_hop)
+    for admit in (arbiter.before_omlx_use, arbiter.before_omlx_load, arbiter.before_comfyui_job):
+        assert "is loading an image model" in run(admit()).error
+    hold.release()
+
+
+def test_the_probe_never_holds_admission_longer_than_its_limit(world, backends, monkeypatch):
+    import threading
     import time
 
-    monkeypatch.setattr(arbiter, "_MEDIA_PROBE_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(arbiter, "_studio_media_resident", lambda: time.sleep(0.3))
-    assert run(arbiter.before_omlx_use()).error
+    release = threading.Event()
+    backends["core.inference.video"]._backend = types.SimpleNamespace(
+        status = lambda: {"loaded": False}, loading_repo_ids = lambda: release.wait(5) and ()
+    )
+    monkeypatch.setattr(arbiter, "_MEDIA_PROBE_TIMEOUT_S", 0.2)
+    started = time.monotonic()
+    try:
+        assert run(arbiter.before_omlx_use()).error
+        assert time.monotonic() - started < 1.5
+    finally:
+        release.set()
+        arbiter._media_probe_future.result(timeout = 5)
 
 
 def _backend(loaded, loading = None, *, boom = False):

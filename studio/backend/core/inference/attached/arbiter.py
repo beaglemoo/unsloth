@@ -208,15 +208,32 @@ def _studio_media_resident() -> Optional[str]:
 
 
 _MEDIA_PROBE_TIMEOUT_S = 3.0
+_MEDIA_BUSY = "is busy loading or unloading an image or video model"
+# One worker and one probe in flight: a backend lock held through a long load can strand at most this thread,
+# never one per request, and the default executor the routes share is never used.
+_media_probe_pool = concurrent.futures.ThreadPoolExecutor(max_workers = 1, thread_name_prefix = "arbiter-media-probe")
+_media_probe_future: Optional[concurrent.futures.Future] = None
 
 
 async def _media_resident_async() -> Optional[str]:
-    """``_studio_media_resident`` off the event loop: a backend's loading probe takes its own lock, which a
-    load can hold. A probe that does not answer in time is a refusal, not an admission."""
+    """``_studio_media_resident`` for admission, bounded to ``_MEDIA_PROBE_TIMEOUT_S`` and never queueing threads.
+
+    A held claim answers at once with no thread hop. Otherwise the probe runs on a dedicated single-worker pool
+    (the backends' loading probes take their own lock, which a load can hold). While an earlier probe is still
+    running, or this one does not answer in time, media counts as busy: a retryable refusal, not an admission.
+    """
+    global _media_probe_future
+    held = _media_held()
+    if held:
+        return held
+    pending = _media_probe_future
+    if pending is not None and not pending.done():
+        return _MEDIA_BUSY
+    future = _media_probe_future = _media_probe_pool.submit(_studio_media_resident)
     try:
-        return await asyncio.wait_for(asyncio.to_thread(_studio_media_resident), _MEDIA_PROBE_TIMEOUT_S)
+        return await asyncio.wait_for(asyncio.wrap_future(future), _MEDIA_PROBE_TIMEOUT_S)
     except asyncio.TimeoutError:
-        return "is busy loading or unloading an image or video model"
+        return _MEDIA_BUSY
 
 
 def _training_active() -> bool:
