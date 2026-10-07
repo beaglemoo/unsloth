@@ -87,6 +87,8 @@ studio = [
     "backend/core/data_recipe/oxc-validator/*.json",
     "backend/core/data_recipe/oxc-validator/*.mjs",
     "backend/core/inference/bundled_skills/**/*.md",
+    # ComfyUI graph templates the attached-engines generate route loads; a wheel without them 500s.
+    "backend/core/inference/attached/comfyui_templates/*.json",
     "systemd/*",
 ]
 
