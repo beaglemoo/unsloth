@@ -2270,6 +2270,7 @@ def test_a_failed_unregister_still_restarts_the_helper_that_was_stopped(tmp_path
 def test_a_port_gate_timeout_restarts_the_stopped_helpers(tmp_path, home):
     rig = Rig(tmp_path, home)
     try:
+        rig.enable_comfyui()  # the gate watches only the ports of helpers that were running
         with socket.socket() as held:
             held.bind(("127.0.0.1", 0))
             held.listen()
@@ -2279,11 +2280,10 @@ def test_a_port_gate_timeout_restarts_the_stopped_helpers(tmp_path, home):
             )
         assert result.returncode != 0 and "ports still held" in result.stderr, result.stdout + result.stderr
         assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
-        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx", "engine-helpers register comfyui"]
         assert all(rig.loaded(label) for label in rig.labels)
     finally:
         rig.close()
-
 
 
 def test_a_busy_engine_blocks_the_app_swap_and_leaves_the_app_alone(tmp_path, home):
@@ -2304,6 +2304,7 @@ def test_a_busy_engine_blocks_the_app_swap_and_leaves_the_app_alone(tmp_path, ho
 def test_a_port_gate_timeout_after_the_backend_swap_restores_everything(tmp_path, home):
     rig = Rig(tmp_path, home)
     try:
+        rig.enable_comfyui()
         with socket.socket() as held:
             held.bind(("127.0.0.1", 0))
             held.listen()
@@ -2389,7 +2390,7 @@ def test_the_idle_check_and_the_port_gate_ignore_a_legacy_launcher_that_is_not_t
 def test_the_port_gate_watches_the_legacy_ports_only_when_the_launcher_was_seen(home):
     snippet = (
         'log() { :; }; warn() { :; }; die() { exit 1; }; DRY=0; . "%s/engines-lib.sh"; '
-        'echo "unseen=$(gate_ports)"; LEGACY_DS4_SEEN=1; echo "seen=$(gate_ports)"'
+        'echo "unseen=$(gate_ports ai.unsloth.studio.omlx)"; LEGACY_DS4_SEEN=1; echo "seen=$(gate_ports ai.unsloth.studio.omlx)"'
     ) % SCRIPTS
     result = run(["bash", "-c", snippet], env_for(home, ENGINE_PORTS="1111", LEGACY_DS4_PORTS="2222 3333"))
     assert result.returncode == 0, result.stderr
@@ -2581,8 +2582,11 @@ def test_the_port_gate_covers_the_comfyui_port_and_follows_the_labels(rig):
     try:
         held.bind(("127.0.0.1", rig.comfyui_port))
         held.listen()
-        every = lib_fn(rig, "wait_ports_free", {"PORT_GATE_TIMEOUT": "2"})
+        every = lib_fn(rig, f"wait_ports_free {OMLX_LABEL} {COMFYUI_LABEL}", {"PORT_GATE_TIMEOUT": "2"})
         assert every.returncode != 0 and "ports still held" in every.stderr
+        # no label, no engine port: nothing is waited for
+        none = lib_fn(rig, "wait_ports_free", {"PORT_GATE_TIMEOUT": "2"})
+        assert none.returncode == 0 and "no engine port to wait for" in none.stdout
         # the oMLX helper alone is stopped: ComfyUI keeping its port is not a reason to wait
         assert run([str(rig.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "unregister", "omlx"], rig.env).returncode == 0
         only_omlx = lib_fn(rig, f"wait_ports_free {OMLX_LABEL}", {"PORT_GATE_TIMEOUT": "2"})
@@ -2804,5 +2808,69 @@ def test_a_stuck_comfyui_does_not_strand_the_previous_app_or_omlx_in_an_install_
         assert rig.loaded(COMFYUI_LABEL)
         assert "the comfyui helper still holds port" in result.stderr
         assert "the previous backend was restored" in result.stderr
+    finally:
+        rig.close()
+
+
+def test_an_install_ignores_a_process_on_the_comfyui_port_when_the_helper_was_not_running(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    held = socket.socket()
+    try:
+        # ComfyUI is disabled (no helper), but something unrelated listens where it would
+        held.bind(("127.0.0.1", rig.comfyui_port))
+        held.listen()
+        result = install_app_rig(tmp_path, rig, {"PORT_GATE_TIMEOUT": "3"})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "new"
+        assert f"ports {rig.omlx_port} must stop listening" in result.stdout
+        assert str(rig.comfyui_port) not in result.stdout.split("port-free gate")[1].split("\n")[0]
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx"]
+        assert rig.loaded(OMLX_LABEL)
+    finally:
+        held.close()
+        rig.close()
+
+
+def test_an_install_without_any_running_helper_gates_no_engine_port(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    held = socket.socket()
+    try:
+        rig.set_desktop("with_app")
+        assert run([str(rig.app / "Contents/MacOS/unsloth-studio"), "--engine-helpers", "unregister"], rig.env).returncode == 0
+        held.bind(("127.0.0.1", rig.comfyui_port))
+        held.listen()
+        result = install_app_rig(tmp_path, rig, {"PORT_GATE_TIMEOUT": "3"})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "no engine port to wait for" in result.stdout
+    finally:
+        held.close()
+        rig.close()
+
+
+def test_an_install_stops_and_gates_the_comfyui_helper_when_it_was_running(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.enable_comfyui()
+        result = install_app_rig(tmp_path, rig)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"ports {rig.omlx_port} {rig.comfyui_port} must stop listening" in result.stdout
+        assert rig.cli_calls() == ["engine-helpers unregister", "engine-helpers register omlx", "engine-helpers register comfyui"]
+    finally:
+        rig.close()
+
+
+def test_a_comfyui_that_keeps_its_port_after_the_stop_fails_the_install_and_rolls_back(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.enable_comfyui()
+        # the first unregister (the install's stop) leaves ComfyUI running and holding its port
+        result = install_app_rig(
+            tmp_path,
+            rig,
+            {"FAKE_UNREGISTER_FAIL": "comfyui", "PORT_GATE_TIMEOUT": "3"},
+        )
+        assert result.returncode != 0
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert rig.loaded(OMLX_LABEL) and rig.loaded(COMFYUI_LABEL)
     finally:
         rig.close()
