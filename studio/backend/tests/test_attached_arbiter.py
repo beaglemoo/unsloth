@@ -68,6 +68,25 @@ def test_failed_omlx_eviction_blocks_local_work(admission, monkeypatch, reason):
     assert not result.acted
 
 
+@pytest.mark.parametrize("reason", ["local_load", "training"])
+def test_busy_omlx_blocks_local_work_with_a_clear_detail(admission, monkeypatch, reason):
+    from core.inference.attached import AttachedEngineBusy
+    from core.inference.attached.omlx_client import BUSY_MESSAGE
+
+    class Busy:
+        def __init__(self, url):
+            pass
+
+        async def unload_all(self):
+            raise AttachedEngineBusy(BUSY_MESSAGE)
+
+    monkeypatch.setattr(arbiter, "OmlxClient", Busy)
+    result = asyncio.run(arbiter.free_for_local(reason))
+    with pytest.raises(arbiter.AttachedAdmissionError, match = "busy serving another client"):
+        result.require_clear()
+    assert not result.acted
+
+
 @pytest.mark.parametrize("config,skip", [
     (DEFAULT_CONFIG, "disabled"),
     (replace(DEFAULT_CONFIG, enabled = True, arbitrate_local_loads = False), "arbitration_off"),
