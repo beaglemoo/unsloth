@@ -8,7 +8,12 @@
 //!    id of `/v1/models/status`. `force=1` aborts in-flight requests instead of waiting up to 20 s
 //!    for them (a plain unload answers 409 `model_busy` while a client streams), so a quit stays
 //!    fast;
-//! 2. unregister the helper even if unloading ran out of budget.
+//! 2. ComfyUI, when its helper is registered and it answers: `POST /interrupt` while a job runs,
+//!    `POST /queue {"clear": true}` while jobs are pending (a with_app quit takes down any queued
+//!    job, that is the intended meaning), then `POST /free {"unload_models": true, "free_memory":
+//!    true}` so the weights are released before the helper gets its SIGTERM;
+//! 3. unregister every helper, last and always, even if a step ran out of budget or failed. Every
+//!    failure is logged and never stops the next step.
 //!
 //! It shows no UI, and logs to `tauri.log`. The hook is `cleanup_child_processes` in `main.rs`,
 //! which every real exit path reaches once (tray Quit, Cmd+Q and the app menu's Quit through
@@ -29,26 +34,57 @@ pub(crate) const QUIT_BUDGET: Duration = Duration::from_secs(45);
 /// Per request; the budget bounds the sum.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// `/interrupt`, `/queue` and `/free` only set a flag for ComfyUI's main loop, so they answer fast.
+const COMFYUI_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Which engines the quit talks to: those whose helper is registered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Targets {
+    pub(crate) omlx: bool,
+    pub(crate) comfyui: bool,
+}
+
+impl Targets {
+    /// A helper that is registered may be running; one that is not, or awaits approval, is not ours.
+    pub(crate) fn from_states(states: &[(&'static str, HelperState)]) -> Self {
+        let registered = |name: &str| {
+            states.iter().any(|(n, state)| {
+                *n == name && matches!(state, HelperState::Enabled | HelperState::Partial)
+            })
+        };
+        Self {
+            omlx: registered("omlx"),
+            comfyui: registered("comfyui"),
+        }
+    }
+
+    fn any(self) -> bool {
+        self.omlx || self.comfyui
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct QuitPlan {
     pub(crate) budget: Duration,
+    pub(crate) targets: Targets,
 }
 
 impl Default for QuitPlan {
     fn default() -> Self {
         Self {
             budget: QUIT_BUDGET,
+            targets: Targets {
+                omlx: true,
+                comfyui: true,
+            },
         }
     }
 }
 
-/// Whether a real quit stops the engines: `with_app`, engines enabled, and helpers registered
-/// (an unregistered helper is not ours to stop; one awaiting approval is not running).
-pub(crate) fn stops_on_quit(lifetime: EngineLifetime, enabled: bool, state: HelperState) -> bool {
-    lifetime == EngineLifetime::WithApp
-        && enabled
-        && matches!(state, HelperState::Enabled | HelperState::Partial)
+/// Whether a real quit stops the engines: `with_app`, engines enabled, and at least one helper
+/// registered (an unregistered helper is not ours to stop; one awaiting approval is not running).
+pub(crate) fn stops_on_quit(lifetime: EngineLifetime, enabled: bool, any_registered: bool) -> bool {
+    lifetime == EngineLifetime::WithApp && enabled && any_registered
 }
 
 /// The engines' HTTP surface the sequence needs, so the order and the timeouts are tested
@@ -57,15 +93,18 @@ pub(crate) trait EngineHttp {
     /// Ids of the loaded oMLX models; Err when oMLX does not answer.
     async fn loaded_omlx_ids(&self) -> Result<Vec<String>, String>;
     async fn unload_omlx(&self, id: &str) -> Result<u16, String>;
+    /// ComfyUI's `(running, pending)` job counts from `GET /queue`; Err when it does not answer.
+    async fn comfyui_queue(&self) -> Result<(usize, usize), String>;
+    /// `POST <path>` to ComfyUI with a JSON body; the status code is returned as it is.
+    async fn comfyui_post(&self, path: &str, body: serde_json::Value) -> Result<u16, String>;
 }
 
 fn is_ok(code: u16) -> bool {
     (200..300).contains(&code)
 }
 
-/// Unload oMLX. Failures are logged and never stop the next step: the helpers are
-/// unregistered afterwards either way, and SIGTERM releases whatever stayed loaded.
-pub(crate) async fn stop_engines<E: EngineHttp>(engine: &E) {
+/// Unload every loaded oMLX model. Failures are logged and never stop the next step.
+async fn stop_omlx<E: EngineHttp>(engine: &E) {
     match engine.loaded_omlx_ids().await {
         Err(error) => info!("engine quit: oMLX not reachable ({error}), nothing to unload"),
         Ok(ids) if ids.is_empty() => info!("engine quit: oMLX has no models loaded"),
@@ -81,18 +120,75 @@ pub(crate) async fn stop_engines<E: EngineHttp>(engine: &E) {
     }
 }
 
+async fn comfyui_step<E: EngineHttp>(engine: &E, what: &str, path: &str, body: serde_json::Value) {
+    match engine.comfyui_post(path, body).await {
+        Ok(code) if is_ok(code) => info!("engine quit: ComfyUI {what}"),
+        Ok(code) => warn!("engine quit: ComfyUI {what} answered HTTP {code}"),
+        Err(error) => warn!("engine quit: ComfyUI {what} failed: {error}"),
+    }
+}
+
+/// Take the running and queued jobs out of ComfyUI and free its models and memory. Every failure is
+/// logged and never stops the next step. Shared by the quit and by switching ComfyUI off.
+pub(crate) async fn stop_comfyui<E: EngineHttp>(engine: &E) {
+    match engine.comfyui_queue().await {
+        Err(error) => {
+            info!("engine quit: ComfyUI not reachable ({error}), nothing to free");
+            return;
+        }
+        Ok((running, pending)) => {
+            if running > 0 {
+                comfyui_step(
+                    engine,
+                    "interrupted the running job",
+                    "/interrupt",
+                    serde_json::json!({}),
+                )
+                .await;
+            }
+            if pending > 0 {
+                comfyui_step(
+                    engine,
+                    "cleared the queue",
+                    "/queue",
+                    serde_json::json!({"clear": true}),
+                )
+                .await;
+            }
+        }
+    }
+    comfyui_step(
+        engine,
+        "freed its models and memory",
+        "/free",
+        serde_json::json!({"unload_models": true, "free_memory": true}),
+    )
+    .await;
+}
+
+/// Stop the targeted engines: oMLX models first, then ComfyUI. Failures never skip the next step:
+/// the helpers are unregistered afterwards either way, and SIGTERM releases whatever stayed loaded.
+pub(crate) async fn stop_engines<E: EngineHttp>(engine: &E, targets: Targets) {
+    if targets.omlx {
+        stop_omlx(engine).await;
+    }
+    if targets.comfyui {
+        stop_comfyui(engine).await;
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct QuitOutcome {
     pub(crate) timed_out: bool,
 }
 
-/// The whole sequence: `stop_engines` inside the budget, then `unregister` (always, last).
+/// The whole sequence: `stop_engines` inside the budget, then `unregister` (always, last, for every helper).
 pub(crate) async fn quit_sequence<E: EngineHttp>(
     engine: &E,
     plan: &QuitPlan,
     unregister: impl FnOnce(),
 ) -> QuitOutcome {
-    let timed_out = tokio::time::timeout(plan.budget, stop_engines(engine))
+    let timed_out = tokio::time::timeout(plan.budget, stop_engines(engine, plan.targets))
         .await
         .is_err();
     if timed_out {
@@ -117,6 +213,23 @@ impl HttpEngines {
         let client = loopback_http::client(timeout).map_err(|e| e.to_string())?;
         client
             .post(format!("{base}{path}"))
+            .send()
+            .await
+            .map(|response| response.status().as_u16())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn post_json(
+        &self,
+        base: &str,
+        path: &str,
+        body: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<u16, String> {
+        let client = loopback_http::client(timeout).map_err(|e| e.to_string())?;
+        client
+            .post(format!("{base}{path}"))
+            .json(body)
             .send()
             .await
             .map(|response| response.status().as_u16())
@@ -152,6 +265,24 @@ impl EngineHttp for HttpEngines {
         );
         self.post(&self.urls.omlx, &path, UNLOAD_TIMEOUT).await
     }
+
+    async fn comfyui_queue(&self) -> Result<(usize, usize), String> {
+        let body = self.get_json(&self.urls.comfyui, "/queue").await?;
+        engine_tray::parse_comfyui_queue(&body).ok_or_else(|| "unexpected /queue body".to_string())
+    }
+
+    async fn comfyui_post(&self, path: &str, body: serde_json::Value) -> Result<u16, String> {
+        self.post_json(&self.urls.comfyui, path, &body, COMFYUI_TIMEOUT)
+            .await
+    }
+}
+
+/// Switching ComfyUI off in Settings: interrupt a running job and free the memory first, best effort.
+pub(crate) async fn release_comfyui() {
+    let engines = HttpEngines {
+        urls: engine_tray::load_urls(),
+    };
+    stop_comfyui(&engines).await;
 }
 
 /// The quit hook. Blocks the calling thread for up to `QUIT_BUDGET` plus the unregister. The
@@ -159,19 +290,23 @@ impl EngineHttp for HttpEngines {
 /// `RunEvent::Exit`), none of them a tokio worker, so a private current-thread runtime is safe.
 pub(crate) fn stop_on_quit() {
     let settings = engine_lifetime::load();
-    let state = engine_helpers::current_state();
-    let enabled = engine_lifetime::resolve_enabled(&settings, state);
-    if !stops_on_quit(settings.lifetime, enabled, state) {
+    let states = engine_helpers::helper_states();
+    let enabled =
+        engine_lifetime::resolve_enabled(&settings, engine_helpers::master_state(&states));
+    let targets = Targets::from_states(&states);
+    if !stops_on_quit(settings.lifetime, enabled, targets.any()) {
         info!(
-            "engine quit: leaving the engines running ({} enabled={enabled} helpers={state:?})",
+            "engine quit: leaving the engines running ({} enabled={enabled} helpers={states:?})",
             settings.lifetime.as_str()
         );
         return;
     }
     info!(
-        "engine quit: stopping the engines ({} budget {} s)",
+        "engine quit: stopping the engines ({} budget {} s, oMLX={} ComfyUI={})",
         settings.lifetime.as_str(),
-        QUIT_BUDGET.as_secs()
+        QUIT_BUDGET.as_secs(),
+        targets.omlx,
+        targets.comfyui
     );
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -187,7 +322,11 @@ pub(crate) fn stop_on_quit() {
     let engines = HttpEngines {
         urls: engine_tray::load_urls(),
     };
-    let outcome = runtime.block_on(quit_sequence(&engines, &QuitPlan::default(), || {
+    let plan = QuitPlan {
+        targets,
+        ..QuitPlan::default()
+    };
+    let outcome = runtime.block_on(quit_sequence(&engines, &plan, || {
         log_unregister(engine_helpers::disable())
     }));
     info!("engine quit: done (timed out: {})", outcome.timed_out);
@@ -214,6 +353,10 @@ mod tests {
         omlx: Option<Vec<String>>,
         unload_codes: RefCell<VecDeque<u16>>,
         hang_on_unload: bool,
+        /// (running, pending); None = ComfyUI does not answer
+        comfyui: Option<(usize, usize)>,
+        post_codes: RefCell<VecDeque<u16>>,
+        hang_on_comfyui_post: bool,
     }
     impl Fake {
         fn calls(&self) -> Vec<String> {
@@ -237,11 +380,41 @@ mod tests {
             }
             Ok(self.unload_codes.borrow_mut().pop_front().unwrap_or(200))
         }
+        async fn comfyui_queue(&self) -> Result<(usize, usize), String> {
+            self.log("comfyui queue");
+            self.comfyui.ok_or_else(|| "connection refused".to_string())
+        }
+        async fn comfyui_post(&self, path: &str, body: serde_json::Value) -> Result<u16, String> {
+            self.log(format!("comfyui {path} {body}"));
+            if self.hang_on_comfyui_post {
+                std::future::pending::<()>().await;
+            }
+            Ok(self.post_codes.borrow_mut().pop_front().unwrap_or(200))
+        }
     }
     fn fake(omlx: &[&str]) -> Fake {
         Fake {
             omlx: Some(omlx.iter().map(|s| s.to_string()).collect()),
             ..Fake::default()
+        }
+    }
+    const FREE: &str = r#"comfyui /free {"free_memory":true,"unload_models":true}"#;
+    fn omlx_only() -> QuitPlan {
+        QuitPlan {
+            targets: Targets {
+                omlx: true,
+                comfyui: false,
+            },
+            ..QuitPlan::default()
+        }
+    }
+    fn comfyui_only() -> QuitPlan {
+        QuitPlan {
+            targets: Targets {
+                omlx: false,
+                comfyui: true,
+            },
+            ..QuitPlan::default()
         }
     }
     fn run<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -254,21 +427,33 @@ mod tests {
     #[test]
     fn only_with_app_and_registered_enabled_helpers_stop_on_quit() {
         use EngineLifetime::*;
-        use HelperState::*;
-        assert!(stops_on_quit(WithApp, true, Enabled));
-        assert!(stops_on_quit(WithApp, true, Partial));
-        assert!(!stops_on_quit(Always, true, Enabled));
-        assert!(!stops_on_quit(WithApp, false, Enabled));
-        for state in [NotRegistered, RequiresApproval, NotFound, Unsupported] {
-            assert!(!stops_on_quit(WithApp, true, state));
-        }
+        assert!(stops_on_quit(WithApp, true, true));
+        assert!(!stops_on_quit(Always, true, true));
+        assert!(!stops_on_quit(WithApp, false, true));
+        assert!(!stops_on_quit(WithApp, true, false));
         assert_eq!(QuitPlan::default().budget.as_secs(), 45);
+    }
+    #[test]
+    fn the_targets_are_the_registered_helpers() {
+        use HelperState::*;
+        let of = |omlx, comfyui| Targets::from_states(&[("omlx", omlx), ("comfyui", comfyui)]);
+        let t = |omlx, comfyui| Targets { omlx, comfyui };
+        assert_eq!(of(Enabled, NotRegistered), t(true, false));
+        assert_eq!(of(Enabled, Enabled), t(true, true));
+        assert_eq!(of(NotRegistered, Enabled), t(false, true));
+        assert_eq!(of(Partial, NotFound), t(true, false));
+        // approval pending, unbundled and unsupported helpers are not running
+        for state in [NotRegistered, RequiresApproval, NotFound, Unsupported] {
+            assert_eq!(of(state, state), t(false, false), "{state:?}");
+            assert!(!of(state, state).any());
+        }
+        assert!(of(Enabled, NotRegistered).any());
     }
     #[test]
     fn unloads_every_model_before_unregistering() {
         let engine = fake(&["swift", "embed"]);
         let at_unregister = RefCell::new(Vec::new());
-        let result = run(quit_sequence(&engine, &QuitPlan::default(), || {
+        let result = run(quit_sequence(&engine, &omlx_only(), || {
             *at_unregister.borrow_mut() = engine.calls()
         }));
         assert!(!result.timed_out);
@@ -286,7 +471,8 @@ mod tests {
                 *unregistered.borrow_mut() += 1
             }));
             assert_eq!(*unregistered.borrow(), 1);
-            assert_eq!(engine.calls(), ["omlx status"]);
+            // ComfyUI is asked too and, not answering, gets nothing else
+            assert_eq!(engine.calls(), ["omlx status", "comfyui queue"]);
             assert!(!result.timed_out);
         }
     }
@@ -294,7 +480,7 @@ mod tests {
     fn failed_unload_does_not_skip_the_rest() {
         let engine = fake(&["a", "b"]);
         *engine.unload_codes.borrow_mut() = VecDeque::from([409, 200]);
-        run(stop_engines(&engine));
+        run(stop_engines(&engine, omlx_only().targets));
         assert_eq!(engine.calls(), ["omlx status", "unload a", "unload b"]);
     }
     #[test]
@@ -306,12 +492,148 @@ mod tests {
         let at_unregister = RefCell::new(Vec::new());
         let plan = QuitPlan {
             budget: Duration::from_millis(10),
+            ..QuitPlan::default()
         };
         let result = run(quit_sequence(&engine, &plan, || {
             *at_unregister.borrow_mut() = engine.calls()
         }));
         assert!(result.timed_out);
         assert_eq!(*at_unregister.borrow(), ["omlx status", "unload m"]);
+    }
+
+    #[test]
+    fn an_idle_comfyui_is_only_freed() {
+        let engine = Fake {
+            comfyui: Some((0, 0)),
+            ..Fake::default()
+        };
+        run(stop_engines(&engine, comfyui_only().targets));
+        assert_eq!(engine.calls(), ["comfyui queue", FREE]);
+    }
+    #[test]
+    fn a_running_job_is_interrupted_before_the_free() {
+        let engine = Fake {
+            comfyui: Some((1, 0)),
+            ..Fake::default()
+        };
+        run(stop_engines(&engine, comfyui_only().targets));
+        assert_eq!(
+            engine.calls(),
+            ["comfyui queue", "comfyui /interrupt {}", FREE]
+        );
+    }
+    #[test]
+    fn pending_jobs_are_cleared_and_only_when_there_are_any() {
+        let engine = Fake {
+            comfyui: Some((0, 3)),
+            ..Fake::default()
+        };
+        run(stop_engines(&engine, comfyui_only().targets));
+        assert_eq!(
+            engine.calls(),
+            ["comfyui queue", r#"comfyui /queue {"clear":true}"#, FREE]
+        );
+    }
+    #[test]
+    fn a_busy_comfyui_is_interrupted_cleared_and_freed_in_that_order() {
+        let engine = Fake {
+            comfyui: Some((1, 2)),
+            ..Fake::default()
+        };
+        run(stop_engines(&engine, comfyui_only().targets));
+        assert_eq!(
+            engine.calls(),
+            [
+                "comfyui queue",
+                "comfyui /interrupt {}",
+                r#"comfyui /queue {"clear":true}"#,
+                FREE
+            ]
+        );
+    }
+    #[test]
+    fn a_failing_interrupt_does_not_skip_the_clear_or_the_free() {
+        let engine = Fake {
+            comfyui: Some((1, 1)),
+            ..Fake::default()
+        };
+        *engine.post_codes.borrow_mut() = VecDeque::from([500, 500]);
+        run(stop_engines(&engine, comfyui_only().targets));
+        assert_eq!(engine.calls().len(), 4);
+        assert_eq!(engine.calls()[3], FREE);
+    }
+    #[test]
+    fn omlx_is_unloaded_before_comfyui_is_freed_and_both_before_the_unregister() {
+        let engine = Fake {
+            comfyui: Some((0, 0)),
+            ..fake(&["swift"])
+        };
+        let at_unregister = RefCell::new(Vec::new());
+        run(quit_sequence(&engine, &QuitPlan::default(), || {
+            *at_unregister.borrow_mut() = engine.calls()
+        }));
+        assert_eq!(
+            *at_unregister.borrow(),
+            ["omlx status", "unload swift", "comfyui queue", FREE]
+        );
+    }
+    #[test]
+    fn an_unwanted_engine_is_not_contacted() {
+        let engine = Fake {
+            comfyui: Some((1, 0)),
+            ..fake(&["swift"])
+        };
+        run(stop_engines(&engine, omlx_only().targets));
+        assert!(!engine.calls().iter().any(|c| c.starts_with("comfyui")));
+        let engine = Fake {
+            comfyui: Some((0, 0)),
+            ..fake(&["swift"])
+        };
+        run(stop_engines(&engine, comfyui_only().targets));
+        assert!(!engine
+            .calls()
+            .iter()
+            .any(|c| c == "omlx status" || c.starts_with("unload ")));
+    }
+    #[test]
+    fn an_unreachable_comfyui_still_unregisters() {
+        let engine = fake(&["swift"]);
+        let unregistered = RefCell::new(0);
+        let result = run(quit_sequence(&engine, &QuitPlan::default(), || {
+            *unregistered.borrow_mut() += 1
+        }));
+        assert!(!result.timed_out);
+        assert_eq!(*unregistered.borrow(), 1);
+        assert_eq!(
+            engine.calls(),
+            ["omlx status", "unload swift", "comfyui queue"]
+        );
+    }
+    #[test]
+    fn a_hanging_comfyui_runs_out_the_budget_and_still_unregisters_last() {
+        let engine = Fake {
+            comfyui: Some((1, 0)),
+            hang_on_comfyui_post: true,
+            ..fake(&["m"])
+        };
+        let at_unregister = RefCell::new(Vec::new());
+        let plan = QuitPlan {
+            budget: Duration::from_millis(10),
+            ..QuitPlan::default()
+        };
+        let result = run(quit_sequence(&engine, &plan, || {
+            *at_unregister.borrow_mut() = engine.calls()
+        }));
+        assert!(result.timed_out);
+        assert_eq!(
+            *at_unregister.borrow(),
+            [
+                "omlx status",
+                "unload m",
+                "comfyui queue",
+                "comfyui /interrupt {}"
+            ]
+        );
     }
 
     // --- the real client against a socket ----------------------------------------------------
@@ -371,6 +693,7 @@ mod tests {
         let engine = HttpEngines {
             urls: EngineUrls {
                 omlx: format!("http://127.0.0.1:{omlx_port}"),
+                ..EngineUrls::default()
             },
         };
         run(async {
@@ -382,7 +705,9 @@ mod tests {
         // a quit never waits on a streaming client: every unload carries force=1
         let seen = omlx.join().unwrap();
         assert_eq!(seen.len(), 3);
-        assert!(seen[1..].iter().all(|line| line.ends_with("/unload?force=1")));
+        assert!(seen[1..]
+            .iter()
+            .all(|line| line.ends_with("/unload?force=1")));
     }
 
     #[test]
@@ -394,10 +719,87 @@ mod tests {
         let engine = HttpEngines {
             urls: EngineUrls {
                 omlx: format!("http://127.0.0.1:{port}"),
+                comfyui: format!("http://127.0.0.1:{port}"),
             },
         };
         run(async {
             assert!(engine.loaded_omlx_ids().await.is_err());
+            assert!(engine.comfyui_queue().await.is_err());
+            assert!(engine
+                .comfyui_post("/free", serde_json::json!({}))
+                .await
+                .is_err());
         });
+    }
+
+    /// Like `serve`, but also keeps each request body (the part after the blank line).
+    fn serve_with_bodies(
+        routes: Vec<(&'static str, u16, &'static str)>,
+        connections: usize,
+    ) -> (u16, std::thread::JoinHandle<Vec<(String, String)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..connections {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0_u8; 8192];
+                let n = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..n]).to_string();
+                let line = request.lines().next().unwrap_or("").to_string();
+                let key: Vec<&str> = line.split(' ').take(2).collect();
+                let key = key.join(" ");
+                let body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                let (code, reply_body) = routes
+                    .iter()
+                    .find(|(route, _, _)| *route == key)
+                    .map(|(_, code, body)| (*code, *body))
+                    .unwrap_or((404, ""));
+                let reply = format!(
+                    "HTTP/1.1 {code} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply_body}",
+                    reply_body.len()
+                );
+                stream.write_all(reply.as_bytes()).unwrap();
+                seen.push((key, body));
+            }
+            seen
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn the_comfyui_client_reads_the_queue_and_posts_json_bodies() {
+        let (port, comfyui) = serve_with_bodies(
+            vec![
+                (
+                    "GET /queue",
+                    200,
+                    r#"{"queue_running":[[0,"a",{},{},[]]],"queue_pending":[[1,"b",{},{},[]],[2,"c",{},{},[]]]}"#,
+                ),
+                ("POST /interrupt", 200, ""),
+                ("POST /queue", 200, ""),
+                ("POST /free", 200, ""),
+            ],
+            4,
+        );
+        let engine = HttpEngines {
+            urls: EngineUrls {
+                comfyui: format!("http://127.0.0.1:{port}"),
+                ..EngineUrls::default()
+            },
+        };
+        run(async { stop_comfyui(&engine).await });
+        let seen = comfyui.join().unwrap();
+        let keys: Vec<&str> = seen.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["GET /queue", "POST /interrupt", "POST /queue", "POST /free"]
+        );
+        assert_eq!(seen[2].1, r#"{"clear":true}"#);
+        let free: serde_json::Value = serde_json::from_str(&seen[3].1).unwrap();
+        assert_eq!(
+            free,
+            serde_json::json!({"unload_models": true, "free_memory": true})
+        );
     }
 }
