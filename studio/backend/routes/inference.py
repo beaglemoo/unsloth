@@ -47500,6 +47500,8 @@ async def load_diffusion_model_gated(
 
         raise_if_load_cancelled(_DIFFUSION_LOAD_CANCELLED)
         preflight = preparing_load_token()
+        # Last refusal point, before the engine switch tears anything down: unload oMLX and free ComfyUI when attached-engine arbitration is enabled.
+        await _admit_attached_local_load()
         if off_torch is not None and pending_name == ENGINE_SD_CPP:
             # Checked under the preflight lock, so a cancelled load never unloads the video model.
             await asyncio.to_thread(
