@@ -105,19 +105,22 @@ async def free_comfyui(*, transport = None) -> list[str]:
 
 
 async def _comfyui_busy(url: str, *, cached: bool = False) -> bool:
-    """True while that ComfyUI has queued or running work. Unreachable is not busy; an unreadable queue is."""
+    """True while that ComfyUI has queued or running work. Confirmed not running is not busy; an
+    unreadable or uncertain answer is, and is never cached (a blip must not pin "busy" for the TTL)."""
     now = time.monotonic()
     if cached:
         hit = _busy_cache.get(url)
         if hit is not None and now - hit[0] < _COMFYUI_BUSY_TTL_S:
             return hit[1]
     try:
-        busy = (await ComfyuiClient(url).queue()).busy
+        queue = await ComfyuiClient(url).queue()
     except Exception:
-        busy = False
+        return True
+    if queue.uncertain or queue.malformed:
+        return True
     if cached:
-        _busy_cache[url] = (now, busy)
-    return busy
+        _busy_cache[url] = (now, queue.busy)
+    return queue.busy
 
 
 async def _own_comfyui_busy(config: Optional[AttachedEnginesConfig] = None, *, cached: bool = False) -> Optional[str]:
@@ -342,7 +345,7 @@ async def _idle_free_after(seconds: int) -> None:
                 if not own or not config.arbitrate_comfyui:
                     return
                 queue = await ComfyuiClient(own).queue()
-                if not queue.reachable:
+                if queue.state == "down":
                     return
                 if queue.busy:
                     continue

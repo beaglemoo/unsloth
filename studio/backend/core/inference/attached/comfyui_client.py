@@ -3,9 +3,13 @@
 
 """Async client for a ComfyUI server (Studio's own helper on 8844, or a peer such as StoryPress on 8188).
 
-``queue`` and ``system_stats`` never raise: a server that is down reports ``reachable = False``.
-A ``/queue`` body that is not the expected shape is ``reachable = False`` with ``malformed = True``:
-the display treats it as unreachable, admission treats it as busy (we cannot prove it idle).
+``queue`` and ``system_stats`` never raise. ``queue`` tells three cases apart:
+
+- confirmed not running (connection refused, nothing listening): ``reachable = False``, not busy;
+- answering with a queue: ``reachable = True``;
+- uncertain (an HTTP error status, a read timeout, invalid JSON, or a body that is not a queue):
+  ``reachable = False`` with ``uncertain = True``. The display treats it as unreachable, admission
+  treats it as busy because we cannot prove it idle.
 Everything else raises ``ComfyuiError`` so a caller can tell a refusal from success.
 """
 
@@ -30,6 +34,10 @@ class ComfyuiError(AttachedEngineError):
     """ComfyUI is unreachable or refused a request."""
 
 
+class ComfyuiNotRunning(ComfyuiError):
+    """Nothing is listening at the URL (connection refused): the server is confirmed not running."""
+
+
 class ComfyGraphError(ComfyuiError):
     """ComfyUI rejected a graph (HTTP 400); ``node_errors`` is its per-node detail."""
 
@@ -45,6 +53,8 @@ class ComfyQueue:
     pending_ids: tuple[str, ...] = ()
     # True when the server answered but the body was not a queue: not reachable for display, busy for admission.
     malformed: bool = False
+    # True when a server that may be running did not give a usable answer (HTTP error, timeout, bad JSON).
+    uncertain: bool = False
     # prompt_id -> the ``extra_data.unsloth`` marker of jobs Studio submitted.
     studio: dict = field(default_factory = dict)
     # prompt_id -> queue number (position key) as ComfyUI reports it.
@@ -52,7 +62,16 @@ class ComfyQueue:
 
     @property
     def busy(self) -> bool:
-        return self.malformed or bool(self.running_ids or self.pending_ids)
+        return self.malformed or self.uncertain or bool(self.running_ids or self.pending_ids)
+
+    @property
+    def state(self) -> str:
+        """``down`` (confirmed not running), ``unknown`` (cannot tell), ``busy`` or ``idle``."""
+        if self.uncertain or self.malformed:
+            return "unknown"
+        if not self.reachable:
+            return "down"
+        return "busy" if self.busy else "idle"
 
 
 def _items(value: Any) -> Optional[list[tuple[str, Any, Any]]]:
@@ -123,6 +142,8 @@ class ComfyuiClient:
                 return response.json()
         except httpx.HTTPStatusError as exc:
             raise ComfyuiError(f"ComfyUI returned HTTP {exc.response.status_code} for {path}") from exc
+        except httpx.ConnectError as exc:
+            raise ComfyuiNotRunning(f"ComfyUI is unreachable ({type(exc).__name__})") from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise ComfyuiError(f"ComfyUI is unreachable ({type(exc).__name__})") from exc
 
@@ -140,8 +161,10 @@ class ComfyuiClient:
     async def queue(self) -> ComfyQueue:
         try:
             body = await self._get_json("/queue")
-        except ComfyuiError:
+        except ComfyuiNotRunning:
             return ComfyQueue(reachable = False)
+        except ComfyuiError:
+            return ComfyQueue(reachable = False, uncertain = True)
         return parse_queue(body)
 
     async def system_stats(self) -> Optional[dict]:
