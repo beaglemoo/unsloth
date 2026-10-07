@@ -68,8 +68,8 @@ class Fake:
         self.native = 262144
         # Studio's ComfyUI (8844) and the StoryPress peer (8188); nothing here ever reaches a real port.
         self.comfy = {
-            8844: dict(up = True, running = [], pending = [], free_status = 200),
-            8188: dict(up = True, running = [], pending = [], free_status = 200),
+            8844: dict(up = True, running = [], pending = [], free_status = 200, queue_fault = None),
+            8188: dict(up = True, running = [], pending = [], free_status = 200, queue_fault = None),
         }
         self.comfy_calls: list[tuple[int, str, str, object]] = []
         self.comfy_models = {"diffusion_models": ["qwen.safetensors"], "loras": ["a.safetensors"]}
@@ -148,6 +148,15 @@ def _comfy_handler(state: "Fake"):
         path = request.url.path
         item = lambda pid, n, extra: [n, pid, {}, extra, []]  # noqa: E731
         if path == "/queue" and request.method == "GET":
+            fault = comfy["queue_fault"]
+            if fault == "http":
+                return httpx.Response(503)
+            if fault == "timeout":
+                raise httpx.ReadTimeout("slow", request = request)
+            if fault == "json":
+                return httpx.Response(200, content = b"<html>starting</html>")
+            if fault == "shape":
+                return httpx.Response(200, json = {"queue_running": "?"})
             return httpx.Response(
                 200,
                 json = {
@@ -601,7 +610,8 @@ def test_status_comfyui_block_when_up(client, fake):
     assert (body["queue_running"], body["queue_pending"]) == (1, 2)
     assert body["devices"][0]["name"] == "mps" and body["ram_free"] == 20 and body["ram_total"] == 64
     assert body["failure"] is None and body["helper_wanted"] is None
-    assert body["peers"] == [{"url": "http://127.0.0.1:8188", "reachable": True, "busy": True}]
+    assert body["state"] == "busy"
+    assert body["peers"] == [{"url": "http://127.0.0.1:8188", "reachable": True, "busy": True, "state": "busy"}]
 
 
 def test_status_comfyui_block_when_down_never_errors(client, fake):
@@ -612,8 +622,27 @@ def test_status_comfyui_block_when_down_never_errors(client, fake):
     body = response.json()["comfyui"]
     assert body["reachable"] is False and body["version"] is None
     assert (body["queue_running"], body["queue_pending"], body["devices"]) == (0, 0, [])
-    assert body["peers"] == [{"url": "http://127.0.0.1:8188", "reachable": False, "busy": False}]
+    assert body["state"] == "down"
+    assert body["peers"] == [{"url": "http://127.0.0.1:8188", "reachable": False, "busy": False, "state": "down"}]
     assert response.json()["omlx"]["reachable"] is True
+
+
+@pytest.mark.parametrize("fault", ["http", "timeout", "json", "shape"])
+def test_status_comfyui_uncertain_is_unknown_not_down(client, fake, fault):
+    fake.comfy[8844]["queue_fault"] = fault
+    fake.comfy[8188]["queue_fault"] = fault
+    response = client.get(f"{BASE}/status")
+    assert response.status_code == 200
+    body = response.json()["comfyui"]
+    assert body["state"] == "unknown" and body["reachable"] is False
+    assert body["peers"] == [
+        {"url": "http://127.0.0.1:8188", "reachable": False, "busy": True, "state": "unknown"}
+    ]
+
+
+def test_status_comfyui_idle_state(client, fake):
+    body = client.get(f"{BASE}/status").json()["comfyui"]
+    assert body["state"] == "idle" and body["peers"][0]["state"] == "idle"
 
 
 def test_status_comfyui_down_and_omlx_down_are_independent(client, fake):
@@ -676,6 +705,14 @@ def test_comfyui_queue_lists_jobs_with_the_studio_marker(client, fake):
 def test_comfyui_queue_unreachable_is_502(client, fake):
     fake.comfy[8844]["up"] = False
     assert client.get(f"{BASE}/comfyui/queue").status_code == 502
+
+
+def test_comfyui_queue_uncertain_is_502_with_its_own_message(client, fake):
+    fake.comfy[8844]["queue_fault"] = "http"
+    response = client.get(f"{BASE}/comfyui/queue")
+    assert response.status_code == 502 and response.json()["detail"] == "ComfyUI did not report its queue."
+    assert client.post(f"{BASE}/comfyui/free").status_code == 502
+    assert not any(c[1] == "POST" for c in fake.comfy_calls)
 
 
 def test_cancel_interrupts_a_running_job_by_id(client, fake):
