@@ -48,8 +48,55 @@ export type AttachedNotice = {
   inFlightKilled: number;
 };
 
+/** ComfyUI's queue as the backend classifies it: `down` is confirmed not running, `unknown` means
+ *  it answered without a usable queue. */
+export type ComfyuiQueueState = "down" | "unknown" | "busy" | "idle";
+
+/** A ComfyUI Studio does not own (StoryPress's on :8188). Studio only reads its queue. */
+export type ComfyuiPeer = {
+  url: string;
+  reachable: boolean;
+  busy: boolean;
+  state: ComfyuiQueueState;
+};
+
+export type ComfyuiDevice = {
+  name: string;
+  type: string;
+};
+
+/** The `comfyui` block of GET /status. */
+export type ComfyuiStatus = {
+  url: string;
+  reachable: boolean;
+  state: ComfyuiQueueState;
+  version: string | null;
+  queueRunning: number;
+  queuePending: number;
+  devices: ComfyuiDevice[];
+  ramTotal: number | null;
+  ramFree: number | null;
+  failure: AttachedEngineFailure | null;
+  /** The desktop shell's choice for the helper as the backend reads it; null when unknown. */
+  helperWanted: boolean | null;
+  peers: ComfyuiPeer[];
+};
+
+/** One row of GET /comfyui/queue. `studio` is the marker of a job Studio submitted. */
+export type ComfyuiQueueRow = {
+  promptId: string;
+  number: number | null;
+  state: "running" | "pending";
+  studio: boolean;
+};
+
+/** GET /comfyui/models: file names per ComfyUI model folder. */
+export type ComfyuiModels = Record<string, string[]>;
+
 export type AttachedStatus = {
   omlx: AttachedOmlxStatus | null;
+  /** Absent from a backend older than the ComfyUI engine. */
+  comfyui?: ComfyuiStatus | null;
   modelsHash: string;
   notices: AttachedNotice[];
   /** Epoch ms when this status was read: the base idle countdowns run down from. */
@@ -71,6 +118,11 @@ export type AttachedEnginesSettings = {
   omlxUrl: string;
   scanDenylist: string[];
   arbitrateLocalLoads: boolean;
+  comfyuiUrl: string;
+  comfyuiPeerUrls: string[];
+  arbitrateComfyui: boolean;
+  /** Seconds of idleness before Studio frees its ComfyUI; 0 turns it off. */
+  comfyuiIdleFreeS: number;
 };
 
 /** What POST /sync reports. `incomplete`: an engine's model catalog could not be read, so its

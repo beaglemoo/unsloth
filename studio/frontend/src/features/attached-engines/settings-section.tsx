@@ -20,12 +20,12 @@ import {
 } from "./api";
 import { useAttachedEnginesStore } from "./attached-engines-store";
 import {
-  loadEngineHelpersStatus,
+  setEngineHelperEnabled,
   setEngineHelpersEnabled,
   setEngineLifetime,
 } from "./engine-helpers-api";
 import {
-  type EngineHelpersStatus,
+  engineHelperRow,
   engineHelpersToggle,
 } from "./engine-helpers-state";
 import {
@@ -47,9 +47,9 @@ const ERROR_CLASS =
   "max-w-[calc(260px*var(--ui-space-scale,1))] text-right text-xs text-destructive";
 
 /**
- * Owner-only settings for oMLX on the oMLX tab. Always
- * rendered for the owner, since the enable toggle lives here: everything else, including the
- * Engines enabled switch and the Engine lifetime control, is hidden while the feature is off.
+ * Owner-only shared settings and the oMLX settings on the Engines tab. Always rendered for the
+ * owner, since the enable toggle lives here: everything else, including the Engines enabled
+ * switch, the Engine lifetime control and the per-engine switch, is hidden while the feature is off.
  */
 export function AttachedEnginesSettingsSection() {
   const settings = useAttachedEnginesStore((s) => s.settings);
@@ -60,20 +60,12 @@ export function AttachedEnginesSettingsSection() {
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   // null: not the desktop shell, or a shell built without the engine helpers.
-  const [helpers, setHelpers] = useState<EngineHelpersStatus | null>(null);
+  const helpers = useAttachedEnginesStore((s) => s.helpers);
+  const setHelpers = useAttachedEnginesStore((s) => s.setHelpers);
   const [isHelpersBusy, setIsHelpersBusy] = useState(false);
   const helpersToggle = engineHelpersToggle(helpers);
+  const omlxHelperRow = engineHelperRow(helpers, "omlx");
   const lifetimeRow = engineLifetimeRow(helpers);
-
-  useEffect(() => {
-    let cancelled = false;
-    void loadEngineHelpersStatus().then((status) => {
-      if (!cancelled) setHelpers(status);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const toggleHelpers = async (enabled: boolean) => {
     setIsHelpersBusy(true);
@@ -84,6 +76,21 @@ export function AttachedEnginesSettingsSection() {
         helpersError instanceof Error
           ? helpersError.message
           : "Failed to change the background engines",
+      );
+    } finally {
+      setIsHelpersBusy(false);
+    }
+  };
+
+  const toggleOmlxHelper = async (enabled: boolean) => {
+    setIsHelpersBusy(true);
+    try {
+      setHelpers(await setEngineHelperEnabled("omlx", enabled));
+    } catch (helperError) {
+      setError(
+        helperError instanceof Error
+          ? helperError.message
+          : "Failed to change the oMLX engine",
       );
     } finally {
       setIsHelpersBusy(false);
@@ -157,11 +164,11 @@ export function AttachedEnginesSettingsSection() {
   return (
     <SettingsSection
       title="Configuration"
-      description="Turn oMLX on, set where Studio reaches it and how it shares memory with local loads."
+      description="Turn the attached engines on, set where Studio reaches oMLX and how engines share memory with local loads."
     >
       <SettingsRow
-        label="Enable oMLX"
-        description="Show oMLX in the model picker and free its memory before a local load or training run."
+        label="Enable engines"
+        description="Show oMLX in the model picker, free engine memory before a local load or training run, and manage ComfyUI here."
         below={error ? <span className={ERROR_CLASS}>{error}</span> : null}
       >
         <Switch
@@ -190,6 +197,27 @@ export function AttachedEnginesSettingsSection() {
                 checked={helpersToggle.checked}
                 disabled={isHelpersBusy}
                 onCheckedChange={(enabled) => void toggleHelpers(enabled)}
+              />
+            </SettingsRow>
+          ) : null}
+          {omlxHelperRow ? (
+            <SettingsRow
+              label="Run oMLX"
+              description="Start oMLX as a background helper. Turn it off to stop oMLX while leaving ComfyUI as it is."
+              below={
+                omlxHelperRow.message ? (
+                  <span
+                    className={omlxHelperRow.isError ? ERROR_CLASS : INFO_CLASS}
+                  >
+                    {omlxHelperRow.message}
+                  </span>
+                ) : null
+              }
+            >
+              <Switch
+                checked={omlxHelperRow.checked}
+                disabled={isHelpersBusy}
+                onCheckedChange={(enabled) => void toggleOmlxHelper(enabled)}
               />
             </SettingsRow>
           ) : null}
