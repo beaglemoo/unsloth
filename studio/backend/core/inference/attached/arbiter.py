@@ -64,8 +64,8 @@ def recent_notices(since: float = 0) -> list[dict]:
 
 
 _COMFYUI_BUSY_TTL_S = 1.0
-# url -> (monotonic time, busy); only the per-chat-request probe reads it.
-_busy_cache: dict[str, tuple[float, bool]] = {}
+# url -> (monotonic time, state: down/idle/busy); only the per-chat-request probe reads it.
+_busy_cache: dict[str, tuple[float, str]] = {}
 
 
 def _comfyui_targets(config: AttachedEnginesConfig) -> tuple[Optional[str], list[str]]:
