@@ -2634,7 +2634,14 @@ def test_custom_provider_is_treated_as_template_applying():
     """Custom providers are user-supplied base_urls, such as self-hosted vLLM, so they are swept too."""
     from core.inference.external_provider import _TEMPLATE_APPLYING_PROVIDERS
 
-    assert _TEMPLATE_APPLYING_PROVIDERS == {"vllm", "llama_cpp", "ollama", "custom", "lemonade"}
+    assert _TEMPLATE_APPLYING_PROVIDERS == {
+        "vllm",
+        "llama_cpp",
+        "ollama",
+        "custom",
+        "lemonade",
+        "omlx",
+    }
     providers = (_REPO_ROOT / "studio" / "backend" / "routes" / "providers.py").read_text(
         encoding = "utf-8"
     )
