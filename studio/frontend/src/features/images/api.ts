@@ -301,6 +301,11 @@ export interface GalleryImage {
   // null = the model's shipped scheduler; schedule_type is the resolved schedule.
   sampler?: string | null;
   schedule_type?: string | null;
+  // Set on images made by an attached engine (ComfyUI): the engine, the template that ran and its scheduler
+  // (sampler above carries the ComfyUI sampler there).
+  engine?: string | null;
+  comfyui_template?: string | null;
+  scheduler?: string | null;
   created_at: number;
   // Library state, not recipe: stored beside the PNG, absent on records written before this existed.
   pinned?: boolean;
