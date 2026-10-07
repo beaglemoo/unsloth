@@ -354,7 +354,12 @@ rollback_install() {
   # Past the swap the helpers may already run from the new bundle: stop them before it goes.
   if [ "$APP_NEW_IN_PLACE" = 1 ]; then
     helpers_stop || warn "could not boot every helper out before restoring the app"
-    ( wait_ports_free ) || warn "the engine ports are still held; restoring the app anyway"
+    # Each engine's gate is soft and separate: one stuck engine (its unregister failed and it keeps
+    # its port) must not keep the previous app and the other engine from being restored. Nothing is killed.
+    local gate_label
+    for gate_label in "${HELPER_LABELS[@]}"; do
+      ports_free_wait "$gate_label" || warn "the ${gate_label##*.} helper still holds port $(label_port "$gate_label"); it is left running and the previous app is restored over it"
+    done
     if rm -rf "$INSTALLED_APP"; then APP_NEW_IN_PLACE=0; else warn "could not remove the new app at $INSTALLED_APP"; fi
   fi
   [ "$APP_STAGED" = 0 ] || rm -rf "$INSTALLED_APP.new" || true
