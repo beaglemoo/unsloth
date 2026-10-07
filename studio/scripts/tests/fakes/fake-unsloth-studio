@@ -34,12 +34,20 @@ start() {
   kind=omlx; port="$FAKE_OMLX_PORT"
   "$FAKE_PY" "$fakes/fake_engine.py" "$kind" "$FAKE_HOME" "$port" >/dev/null 2>&1 &
   echo $! >"$FAKE_LC/$label.pid"
+  # every spawned pid is also kept here, so the test's cleanup finds a fake whose label.pid was overwritten
+  echo $! >>"$FAKE_LC/spawned.pids"
   disown
 }
 stop() {
   alive "$1" || { rm -f "$FAKE_LC/$1.pid"; return 0; }
-  kill "$(cat "$FAKE_LC/$1.pid")"
-  while kill -0 "$(cat "$FAKE_LC/$1.pid")" 2>/dev/null; do sleep 0.05; done
+  local pid n=0
+  pid="$(cat "$FAKE_LC/$1.pid")"
+  kill "$pid"
+  while kill -0 "$pid" 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -lt 40 ] || kill -KILL "$pid" 2>/dev/null || true
+    sleep 0.05
+  done
   rm -f "$FAKE_LC/$1.pid"
 }
 # JSON status on stdout; $1 = error text or empty
