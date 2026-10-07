@@ -9,6 +9,7 @@ log dir; nothing touches ~/.unsloth or any live service.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
@@ -154,6 +155,25 @@ def comfy_cfg(home, port=18844, models=None, host=None, extra=""):
     lines.append('extra_args = ["--lowvram", "--offline"]')
     lines += ["", "[comfyui.env]", 'COMFYUI_TEST = "1"']
     return "\n".join(lines) + "\n" + extra
+
+
+@contextlib.contextmanager
+def _ipv6_socket():
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        sock.bind(("::1", 0))
+    except OSError:
+        pytest.skip("IPv6 loopback is not usable here")
+    sock.listen()
+    try:
+        yield sock, sock.getsockname()[1]
+    finally:
+        sock.close()
+
+
+def ipv6_listener_port():
+    """A context manager holding a listener on ::1 (skips the test when ::1 is unusable)."""
+    return _ipv6_socket()
 
 
 def listen_as(marker_arg, tmp_path):
@@ -340,6 +360,29 @@ class TestComfyuiLaunch:
         assert result.returncode == 0, result.stderr
         assert not (home / "comfyui.fail").exists()
         assert "fake-engine" in result.stdout
+
+    def test_an_ipv6_loopback_host_launches_when_the_port_is_free(self, home):
+        with ipv6_listener_port():  # skips when ::1 is unusable here
+            pass
+        comfy_layout(home)
+        result = launch(home, "comfyui", comfy_cfg(home, host="::1", port=free_port(), models=[]))
+        assert result.returncode == 0, result.stderr
+        assert "--listen ::1" in result.stdout and "Traceback" not in result.stderr
+        assert not (home / "comfyui.fail").exists()
+
+    def test_an_ipv6_loopback_host_with_a_busy_port_writes_the_marker(self, home):
+        comfy_layout(home)
+        with ipv6_listener_port() as (sock, port):
+            result = launch(home, "comfyui", comfy_cfg(home, host="::1", port=port, models=[]))
+            assert sock.fileno() != -1
+        assert result.returncode == 78 and "Traceback" not in result.stderr
+        assert f"port {port} (ComfyUI)" in read_fail(home, "comfyui")["reason"]
+
+    def test_an_unresolvable_host_is_a_failure_marker_not_a_traceback(self, home):
+        fake_python(home / "omlx" / "bin" / "python")
+        result = launch(home, "omlx", f'[omlx]\nport = {free_port()}\nhost = "no-such-host.invalid"\n')
+        assert result.returncode == 78 and "Traceback" not in result.stderr
+        assert "cannot check whether port" in read_fail(home, "omlx")["reason"]
 
     def test_the_usage_names_both_engines(self, home):
         result = run([sys.executable, str(ENGINES / "engines_launch.py"), "bogus"], env_for(home))
