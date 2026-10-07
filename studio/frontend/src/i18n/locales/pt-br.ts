@@ -1053,7 +1053,7 @@ export const ptBR = {
       chat: "Chat",
       connections: "Conexões",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "Motores",
       remoteLan: "Remoto e LAN",
       about: "Sobre",
       voice: "Voz",

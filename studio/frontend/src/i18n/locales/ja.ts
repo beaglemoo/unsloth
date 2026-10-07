@@ -1052,7 +1052,7 @@ export const ja = {
       chat: "チャット",
       connections: "接続",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "エンジン",
       remoteLan: "リモートとLAN",
       about: "情報",
       voice: "音声",

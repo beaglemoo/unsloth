@@ -1050,7 +1050,7 @@ export const ar = {
       chat: "المحادثة",
       connections: "الاتصالات",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "المحركات",
       remoteLan: "الوصول عن بُعد والشبكة المحلية",
       about: "حول",
       data: "البيانات",
