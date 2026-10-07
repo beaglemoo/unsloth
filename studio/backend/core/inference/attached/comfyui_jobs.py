@@ -118,6 +118,8 @@ class _State:
     # Set once the job is confirmed gone from ComfyUI's queue after a cancel (ComfyUI sends no message for a removed pending job).
     cancel_confirmed: bool = False
     admitted: bool = False
+    # True once ComfyUI no longer holds the prompt: it finished, failed, was interrupted, or was cancelled and confirmed gone.
+    terminal: bool = False
     stage: str = "starting"
     misses: int = 0
     poll_failures: int = 0
@@ -184,12 +186,15 @@ class ComfyJobRunner:
     # How long a cancel keeps retrying until ComfyUI no longer lists the job, and the pause between attempts.
     cancel_wait = 20.0
     cancel_poll = 0.5
+    # A job that could not be confirmed stopped keeps the runner busy while this retries, up to this many seconds.
+    reap_wait = 600.0
 
     def __init__(self, *, connect: Optional[Callable[..., Any]] = None, sleep: Callable[..., Any] = asyncio.sleep):
         self._connect = connect
         self._sleep = sleep
         self._state: Optional[_State] = None
         self._client: Optional[ComfyuiClient] = None
+        self._reaper: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------- state
 
@@ -241,17 +246,38 @@ class ComfyJobRunner:
         client = self._client = client or ComfyuiClient(get_config().comfyui_url)
         try:
             return await self._run(client, template, graph, resolved, st, timeout_s)
-        except asyncio.CancelledError:
-            if st.prompt_id:
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(client.interrupt(st.prompt_id))
-            raise
         finally:
+            if st.prompt_id and not st.terminal:
+                # ComfyUI may still hold the prompt (a cancel or a timeout could not be confirmed): keep owning it.
+                st.stage = "stopping"
+                self._reaper = asyncio.get_running_loop().create_task(self._reap(client, st))
+            else:
+                self._release(st)
+
+    def _release(self, st: _State) -> None:
+        if self._state is st:
             self._state = None
             self._client = None
-            if st.admitted:
-                with contextlib.suppress(Exception):
-                    arbiter.schedule_comfyui_idle_free()
+        if st.admitted:
+            with contextlib.suppress(Exception):
+                arbiter.schedule_comfyui_idle_free()
+
+    async def _reap(self, client: ComfyuiClient, st: _State) -> None:
+        """Keep trying to stop a prompt ComfyUI would not let go of; the runner stays busy until it has."""
+        try:
+            loop = asyncio.get_running_loop()
+            give_up = loop.time() + self.reap_wait
+            while not await self._cancel_and_confirm(client, st.prompt_id):
+                if loop.time() >= give_up:
+                    logger.warning("ComfyUI still holds prompt %s after %s s; releasing Studio's claim", st.prompt_id, int(self.reap_wait))
+                    break
+            else:
+                st.terminal = True
+        except Exception as exc:
+            logger.warning("ComfyUI job reaper failed: %s", exc)
+        finally:
+            self._reaper = None
+            self._release(st)
 
     async def _run(
         self, client: ComfyuiClient, template: Template, graph: dict, resolved: dict, st: _State, timeout_s: Optional[float]
@@ -291,9 +317,26 @@ class ComfyJobRunner:
             except ComfyGraphError as exc:
                 raise ComfyGraphError(_graph_error_text(exc), exc.node_errors) from exc
             st.prompt_id, st.stage = prompt_id, "queued"
-            if st.cancel_requested:
-                st.cancel_confirmed = await self._cancel_and_confirm(client, prompt_id)
-            await self._watch(client, graph, st, ws, prompt_id, timeout)
+            try:
+                if st.cancel_requested:
+                    st.cancel_confirmed = await self._cancel_and_confirm(client, prompt_id)
+                await self._watch(client, graph, st, ws, prompt_id, timeout)
+                st.terminal = True
+            except (ComfyJobError, ComfyCancelled):
+                # An execution error, an interrupt or a vanished job: ComfyUI is done with the prompt.
+                st.terminal = True
+                raise
+            except ComfyTimeout as exc:
+                stopped = await self._cancel_and_confirm(client, prompt_id)
+                st.terminal = stopped
+                raise ComfyTimeout(
+                    f"The ComfyUI job did not finish within {int(timeout)} s and was "
+                    + ("cancelled." if stopped else "asked to stop, but ComfyUI still lists it; it may still be running.")
+                ) from exc
+            except BaseException:
+                # Task cancellation or a ComfyUI that stopped answering: stop our prompt (pending or running) before letting go.
+                st.terminal = await asyncio.shield(self._cancel_and_confirm(client, prompt_id))
+                raise
 
         st.stage, st.phase = "saving", "decode"
         entry = await self._final_history(client, prompt_id)
@@ -330,9 +373,7 @@ class ComfyJobRunner:
                 return
             now = loop.time()
             if now >= deadline:
-                with contextlib.suppress(Exception):
-                    await client.interrupt(prompt_id)
-                raise ComfyTimeout(f"The ComfyUI job did not finish within {int(timeout)} s and was interrupted.")
+                raise ComfyTimeout(f"The ComfyUI job did not finish within {int(timeout)} s.")
             wait = max(0.0, min(due, deadline) - now)
             if ws is not None:
                 try:
