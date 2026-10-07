@@ -1,8 +1,10 @@
-//! Registration of the bundled oMLX helper agent with SMAppService.
+//! Registration of the bundled helper agents (oMLX, ComfyUI) with SMAppService.
 //!
-//! The agents ship as `Contents/Library/LaunchAgents/ai.unsloth.studio.omlx.plist` and
+//! The agents ship as `Contents/Library/LaunchAgents/ai.unsloth.studio.<name>.plist` and
 //! point (BundleProgram) at the wrappers in `Contents/Resources/engines`. They are
-//! registered when the user turns on "Engines enabled" (the old "Background engines" switch).
+//! registered when the user turns on "Engines enabled" (the old "Background engines" switch);
+//! each engine also has its own choice in `desktop.json` (`engine_lifetime::wanted`): oMLX is on
+//! by default, ComfyUI is off until the user turns it on.
 //! What happens at quit follows the engine lifetime (`engine_lifetime`): `always` leaves them
 //! running because other clients (pi, Claude Code, OpenCode) use the engines, so nothing in the
 //! quit, update or repair paths may call `disable` then; `with_app` (the default) is the one
@@ -12,7 +14,12 @@
 use serde::Serialize;
 
 pub(crate) const OMLX_PLIST: &str = "ai.unsloth.studio.omlx.plist";
-const HELPERS: [(&str, &str); 1] = [("omlx", OMLX_PLIST)];
+pub(crate) const COMFYUI_PLIST: &str = "ai.unsloth.studio.comfyui.plist";
+const HELPERS: [(&str, &str); 2] = [("omlx", OMLX_PLIST), ("comfyui", COMFYUI_PLIST)];
+/// The `cli` field of the status JSON: 2 = the commands take an optional `omlx|comfyui` target and
+/// the status lists every helper with `wanted`. An app from before has no such field, which is how
+/// the install scripts tell the two apart.
+pub(crate) const CLI_VERSION: u32 = 2;
 
 // Legacy-unregister migration: Apple requires a plist in the calling bundle.
 // --install unregisters through the OLD app before replacing it. Also attempt
@@ -50,12 +57,15 @@ pub(crate) struct HelperStatus {
     name: &'static str,
     plist: &'static str,
     state: HelperState,
+    /// The master switch is on and this engine's own choice is on.
+    wanted: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
 pub(crate) struct EngineHelpersStatus {
     /// False when SMAppService is unavailable (not macOS).
     supported: bool,
+    /// The aggregate over the wanted helpers (over all of them while the master switch is off).
     state: HelperState,
     helpers: Vec<HelperStatus>,
     error: Option<String>,
@@ -63,6 +73,8 @@ pub(crate) struct EngineHelpersStatus {
     engines_enabled: bool,
     /// `with_app` or `always`.
     engine_lifetime: crate::engine_lifetime::EngineLifetime,
+    /// `CLI_VERSION`.
+    cli: u32,
 }
 
 /// Where a bundled launch agent plist lives, resolved from the running executable
@@ -133,53 +145,138 @@ fn aggregate(states: &[HelperState]) -> HelperState {
     HelperState::Partial
 }
 
+/// The state of every bundled helper, from SMAppService.
+pub(crate) fn helper_states() -> Vec<(&'static str, HelperState)> {
+    HELPERS
+        .iter()
+        .map(|(name, plist)| (*name, sm::status(plist)))
+        .collect()
+}
+
+/// What the master switch is derived from when `desktop.json` has no `engines_enabled`: the oMLX
+/// helper, because before ComfyUI it was the only one, so its registration is the old evidence.
+pub(crate) fn master_state(states: &[(&'static str, HelperState)]) -> HelperState {
+    states
+        .iter()
+        .find(|(name, _)| *name == "omlx")
+        .map_or(HelperState::NotRegistered, |(_, state)| *state)
+}
+
 fn snapshot(error: Option<String>) -> EngineHelpersStatus {
+    let settings = crate::engine_lifetime::load();
+    let states = helper_states();
+    let master = crate::engine_lifetime::effective_enabled(&settings, master_state(&states));
     let helpers: Vec<HelperStatus> = HELPERS
         .iter()
-        .map(|(name, plist)| HelperStatus {
+        .zip(&states)
+        .map(|((name, plist), (_, state))| HelperStatus {
             name,
             plist,
-            state: sm::status(plist),
+            state: *state,
+            wanted: crate::engine_lifetime::wanted(&settings, name, master),
         })
         .collect();
-    let states: Vec<HelperState> = helpers.iter().map(|h| h.state).collect();
-    let state = aggregate(&states);
-    let settings = crate::engine_lifetime::load();
+    // The toggle reflects the helpers the user wants: an unwanted ComfyUI never turns "all running"
+    // into "partly". With the master switch off nothing is wanted, so every helper counts.
+    let pool: Vec<HelperState> = helpers
+        .iter()
+        .filter(|h| h.wanted || !master)
+        .map(|h| h.state)
+        .collect();
     EngineHelpersStatus {
         supported: sm::SUPPORTED,
-        state,
+        state: aggregate(&pool),
         helpers,
         error,
-        engines_enabled: crate::engine_lifetime::effective_enabled(&settings, state),
+        engines_enabled: master,
         engine_lifetime: settings.lifetime,
+        cli: CLI_VERSION,
     }
 }
 
-/// Register every helper. A failure on one is reported but does not stop the others, so the
+fn plist_of(name: &str) -> Result<&'static str, String> {
+    HELPERS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, plist)| *plist)
+        .ok_or_else(|| format!("unknown engine helper {name:?}; use omlx or comfyui"))
+}
+
+pub(crate) fn register_one(name: &str) -> Result<(), String> {
+    sm::register(plist_of(name)?)
+}
+
+pub(crate) fn unregister_one(name: &str) -> Result<(), String> {
+    unregister_legacy_helper_once();
+    sm::unregister(plist_of(name)?)
+}
+
+/// Unregister, wait for launchd to drop the label, register: for one helper.
+pub(crate) fn restart_one(name: &str) -> Result<(), String> {
+    plist_of(name)?;
+    let status = restart(
+        &[name],
+        &[name],
+        &launchd_has_label,
+        &|| std::thread::sleep(RESTART_POLL_INTERVAL),
+        RESTART_MAX_POLLS,
+    );
+    status.error.map_or(Ok(()), Err)
+}
+
+fn all_names() -> Vec<&'static str> {
+    HELPERS.iter().map(|(name, _)| *name).collect()
+}
+
+/// The helpers the user has chosen, whatever the master switch says (the CLI and the toggle both
+/// act on an explicit request).
+fn chosen_names() -> Vec<&'static str> {
+    let settings = crate::engine_lifetime::load();
+    all_names()
+        .into_iter()
+        .filter(|name| crate::engine_lifetime::chosen(&settings, name))
+        .collect()
+}
+
+fn register_names(names: &[&str]) -> EngineHelpersStatus {
+    let mut errors = Vec::new();
+    for name in names {
+        if let Err(error) = register_one(name) {
+            errors.push(format!("{name}: {error}"));
+        }
+    }
+    snapshot((!errors.is_empty()).then(|| errors.join("; ")))
+}
+
+fn unregister_names(names: &[&str]) -> EngineHelpersStatus {
+    let mut errors = Vec::new();
+    for name in names {
+        if let Err(error) = unregister_one(name) {
+            errors.push(format!("{name}: {error}"));
+        }
+    }
+    snapshot((!errors.is_empty()).then(|| errors.join("; ")))
+}
+
+/// Register the chosen helpers. A failure on one is reported but does not stop the others, so the
 /// toggle reports any registration failure.
 pub(crate) fn enable() -> EngineHelpersStatus {
-    let mut errors = Vec::new();
-    for (name, plist) in HELPERS {
-        if let Err(error) = sm::register(plist) {
-            errors.push(format!("{name}: {error}"));
-        }
-    }
-    snapshot((!errors.is_empty()).then(|| errors.join("; ")))
+    register_names(&chosen_names())
 }
 
+/// Unregister every bundled helper (a superset of the chosen ones, so an unwanted leftover goes too).
 pub(crate) fn disable() -> EngineHelpersStatus {
-    unregister_legacy_helper_once();
-    let mut errors = Vec::new();
-    for (name, plist) in HELPERS {
-        if let Err(error) = sm::unregister(plist) {
-            errors.push(format!("{name}: {error}"));
-        }
-    }
-    snapshot((!errors.is_empty()).then(|| errors.join("; ")))
+    unregister_names(&all_names())
 }
 
-pub(crate) fn current_state() -> HelperState {
-    snapshot(None).state
+/// For the tray: the wanted aggregate state, and whether ComfyUI is wanted.
+pub(crate) fn tray_state() -> (HelperState, bool) {
+    let status = snapshot(None);
+    let comfyui_wanted = status
+        .helpers
+        .iter()
+        .any(|h| h.name == "comfyui" && h.wanted);
+    (status.state, comfyui_wanted)
 }
 
 /// Open System Settings > Login Items, where the user approves or removes the helpers.
@@ -190,20 +287,6 @@ pub(crate) fn open_login_items_settings() {
 #[tauri::command]
 pub(crate) async fn engine_helpers_status() -> EngineHelpersStatus {
     snapshot(None)
-}
-
-/// Register the helpers (the launch hook and the toggle share it). Does not touch the saved choice.
-pub(crate) fn enable_helpers() -> EngineHelpersStatus {
-    enable()
-}
-
-/// `restart` with the real launchd poll, for the launch hook.
-pub(crate) fn restart_helpers() -> EngineHelpersStatus {
-    restart(
-        &launchd_has_label,
-        &|| std::thread::sleep(RESTART_POLL_INTERVAL),
-        RESTART_MAX_POLLS,
-    )
 }
 
 fn remember_enabled(enabled: bool) {
@@ -226,6 +309,38 @@ pub(crate) async fn engine_helpers_disable() -> EngineHelpersStatus {
     disable()
 }
 
+/// The per-engine switch: remember the choice, then act on it when the master switch is on. Turning
+/// ComfyUI off first interrupts a running job and frees its memory (best effort, short timeouts), so
+/// the model is not just cut off under the job; then the helper is unregistered. Turning an engine on
+/// registers it. With the master switch off only the choice is saved.
+#[tauri::command]
+pub(crate) async fn engine_helper_set_enabled(
+    name: String,
+    enabled: bool,
+) -> Result<EngineHelpersStatus, String> {
+    plist_of(&name)?;
+    crate::engine_lifetime::save_helper(&name, enabled)?;
+    let settings = crate::engine_lifetime::load();
+    let states = helper_states();
+    let master = crate::engine_lifetime::effective_enabled(&settings, master_state(&states));
+    let state = states
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or(HelperState::NotRegistered, |(_, state)| *state);
+    let mut error = None;
+    if enabled {
+        if master && state != HelperState::Enabled {
+            error = register_one(&name).err();
+        }
+    } else if matches!(state, HelperState::Enabled | HelperState::Partial) {
+        if name == "comfyui" {
+            crate::engine_quit::release_comfyui().await;
+        }
+        error = unregister_one(&name).err();
+    }
+    Ok(snapshot(error.map(|e| format!("{name}: {e}"))))
+}
+
 /// Save the engine lifetime (`with_app` or `always`) and report the status with it applied.
 #[tauri::command]
 pub(crate) async fn engine_lifetime_set(lifetime: String) -> Result<EngineHelpersStatus, String> {
@@ -237,8 +352,10 @@ pub(crate) async fn engine_lifetime_set(lifetime: String) -> Result<EngineHelper
 
 // --- Headless CLI ------------------------------------------------------------------------------
 //
-// `unsloth-studio --engine-helpers <status|register|unregister|restart>` runs the same SMAppService
-// calls as the Settings toggle, with no window. macOS refuses `launchctl bootstrap` of a bundled
+// `unsloth-studio --engine-helpers <status|register|unregister|restart> [omlx|comfyui]` runs the same
+// SMAppService calls as the Settings toggle, with no window. Without a target `register` acts on the
+// chosen helpers and `unregister` on all of them; `restart` unregisters all, waits for every label to
+// go, and registers the chosen ones. With a target only that helper is touched, wanted or not. macOS refuses `launchctl bootstrap` of a bundled
 // plist ("Bootstrap failed: 5"), so a restart outside the UI has to go through SMAppService, and
 // SMAppService only answers a process that is the app's own executable. main() calls `cli_main`
 // as its first statement, before logging, the PATH fix, the single-instance plugin, the backend
@@ -258,11 +375,14 @@ pub(crate) enum CliCommand {
     Restart,
 }
 
+/// `omlx` or `comfyui`, as the CLI names them.
+pub(crate) type CliTarget = Option<&'static str>;
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CliParse {
     /// Not an `--engine-helpers` invocation: start the app normally.
     NotCli,
-    Run(CliCommand),
+    Run(CliCommand, CliTarget),
     /// The flag with a missing or unknown command.
     Usage(String),
 }
@@ -273,23 +393,47 @@ pub(crate) fn parse_cli_args(args: &[String]) -> CliParse {
     if args.first().map(String::as_str) != Some(CLI_FLAG) {
         return CliParse::NotCli;
     }
-    match args.get(1).map(String::as_str) {
-        Some("status") => CliParse::Run(CliCommand::Status),
-        Some("register") => CliParse::Run(CliCommand::Register),
-        Some("unregister") => CliParse::Run(CliCommand::Unregister),
-        Some("restart") => CliParse::Run(CliCommand::Restart),
-        Some(other) => CliParse::Usage(format!(
-            "unknown command {other:?}; use status, register, unregister or restart"
-        )),
-        None => {
-            CliParse::Usage("missing command; use status, register, unregister or restart".into())
+    let command = match args.get(1).map(String::as_str) {
+        Some("status") => CliCommand::Status,
+        Some("register") => CliCommand::Register,
+        Some("unregister") => CliCommand::Unregister,
+        Some("restart") => CliCommand::Restart,
+        Some(other) => {
+            return CliParse::Usage(format!(
+                "unknown command {other:?}; use status, register, unregister or restart"
+            ))
         }
+        None => {
+            return CliParse::Usage(
+                "missing command; use status, register, unregister or restart".into(),
+            )
+        }
+    };
+    let target = match args.get(2).map(String::as_str) {
+        None => None,
+        Some(name) => match HELPERS.iter().find(|(n, _)| *n == name) {
+            Some((n, _)) => Some(*n),
+            None => {
+                return CliParse::Usage(format!(
+                    "unknown target {name:?}; use omlx or comfyui, or leave it out for all"
+                ))
+            }
+        },
+    };
+    if let Some(extra) = args.get(3) {
+        return CliParse::Usage(format!("unexpected argument {extra:?}"));
     }
+    CliParse::Run(command, target)
 }
 
 fn helper_labels() -> Vec<String> {
+    labels_of(&all_names())
+}
+
+fn labels_of(names: &[&str]) -> Vec<String> {
     HELPERS
         .iter()
+        .filter(|(name, _)| names.contains(name))
         .map(|(_, plist)| plist.trim_end_matches(".plist").to_string())
         .collect()
 }
@@ -332,17 +476,20 @@ fn wait_labels_gone(
     !labels.iter().any(|label| is_loaded(label))
 }
 
-/// Unregister, wait for launchd to drop the labels, register. A wait that times out still
-/// registers, so the helpers are never left unregistered, and reports the timeout as the error.
+/// Unregister `unregister`, wait for launchd to drop those labels, register `register`. A wait that
+/// times out still registers, so the helpers are never left unregistered, and reports the timeout as
+/// the error.
 fn restart(
+    unregister: &[&str],
+    register: &[&str],
     is_loaded: &dyn Fn(&str) -> bool,
     sleep: &dyn Fn(),
     max_polls: u32,
 ) -> EngineHelpersStatus {
-    let unregistered = disable();
-    let labels = helper_labels();
+    let unregistered = unregister_names(unregister);
+    let labels = labels_of(unregister);
     let gone = wait_labels_gone(&labels, is_loaded, sleep, max_polls);
-    let mut status = enable();
+    let mut status = register_names(register);
     let mut errors = Vec::new();
     if !gone {
         errors.push(format!(
@@ -372,26 +519,45 @@ fn exit_code(status: &EngineHelpersStatus) -> i32 {
     }
 }
 
+fn run_command(command: CliCommand, target: CliTarget) -> EngineHelpersStatus {
+    match (command, target) {
+        (CliCommand::Status, _) => snapshot(None),
+        (CliCommand::Register, None) => enable(),
+        (CliCommand::Register, Some(name)) => register_names(&[name]),
+        (CliCommand::Unregister, None) => disable(),
+        (CliCommand::Unregister, Some(name)) => unregister_names(&[name]),
+        (CliCommand::Restart, None) => restart(
+            &all_names(),
+            &chosen_names(),
+            &launchd_has_label,
+            &|| std::thread::sleep(RESTART_POLL_INTERVAL),
+            RESTART_MAX_POLLS,
+        ),
+        (CliCommand::Restart, Some(name)) => restart(
+            &[name],
+            &[name],
+            &launchd_has_label,
+            &|| std::thread::sleep(RESTART_POLL_INTERVAL),
+            RESTART_MAX_POLLS,
+        ),
+    }
+}
+
 /// Run the CLI when the arguments ask for it. `None` means "not the CLI: start the app".
 /// Prints the status as one line of JSON on stdout and returns the exit code.
 pub(crate) fn cli_main(args: &[String]) -> Option<i32> {
-    let command = match parse_cli_args(args) {
+    let (command, target) = match parse_cli_args(args) {
         CliParse::NotCli => return None,
         CliParse::Usage(message) => {
             eprintln!("unsloth-studio {CLI_FLAG}: {message}");
             return Some(2);
         }
-        CliParse::Run(command) => command,
+        CliParse::Run(command, target) => (command, target),
     };
     let status = if !sm::SUPPORTED {
         snapshot(Some("background engines need macOS".into()))
     } else {
-        match command {
-            CliCommand::Status => snapshot(None),
-            CliCommand::Register => enable(),
-            CliCommand::Unregister => disable(),
-            CliCommand::Restart => restart_helpers(),
-        }
+        run_command(command, target)
     };
     match serde_json::to_string(&status) {
         Ok(json) => println!("{json}"),
@@ -479,6 +645,7 @@ mod tests {
     use super::*;
 
     const OMLX: &str = include_str!("../launch-agents/ai.unsloth.studio.omlx.plist");
+    const COMFYUI: &str = include_str!("../launch-agents/ai.unsloth.studio.comfyui.plist");
     const FORK_CONF: &str = include_str!("../tauri.fork.conf.json");
 
     #[test]
@@ -495,7 +662,7 @@ mod tests {
             Ok(())
         });
         assert_eq!(calls.get(), 1);
-        assert_eq!(HELPERS, [("omlx", OMLX_PLIST)]);
+        assert_eq!(HELPERS, [("omlx", OMLX_PLIST), ("comfyui", COMFYUI_PLIST)]);
     }
 
     #[test]
@@ -508,6 +675,47 @@ mod tests {
         assert_eq!(aggregate(&[Enabled, RequiresApproval]), RequiresApproval);
         assert_eq!(aggregate(&[RequiresApproval, NotFound]), RequiresApproval);
         assert_eq!(aggregate(&[Unsupported, Unsupported]), Unsupported);
+    }
+
+    #[test]
+    fn aggregating_the_wanted_helpers_only_ignores_an_unwanted_one() {
+        use HelperState::*;
+        // oMLX running, ComfyUI not wanted and not registered: "Enabled", not "Partial"
+        let wanted_only = |states: &[(HelperState, bool)]| {
+            aggregate(
+                &states
+                    .iter()
+                    .filter(|(_, wanted)| *wanted)
+                    .map(|(state, _)| *state)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            wanted_only(&[(Enabled, true), (NotRegistered, false)]),
+            Enabled
+        );
+        assert_eq!(
+            wanted_only(&[(Enabled, true), (NotRegistered, true)]),
+            Partial
+        );
+        assert_eq!(
+            wanted_only(&[(NotRegistered, false), (NotRegistered, false)]),
+            NotRegistered
+        );
+    }
+
+    #[test]
+    fn the_master_state_is_the_omlx_helpers() {
+        use HelperState::*;
+        assert_eq!(
+            master_state(&[("omlx", Enabled), ("comfyui", NotRegistered)]),
+            Enabled
+        );
+        assert_eq!(
+            master_state(&[("omlx", NotRegistered), ("comfyui", Enabled)]),
+            NotRegistered
+        );
+        assert_eq!(master_state(&[]), NotRegistered);
     }
 
     #[test]
@@ -566,7 +774,10 @@ mod tests {
 
     #[test]
     fn plists_match_their_names_and_wrappers() {
-        for (plist_name, text, wrapper) in [(OMLX_PLIST, OMLX, "omlx-launch")] {
+        for (plist_name, text, wrapper, exit_timeout) in [
+            (OMLX_PLIST, OMLX, "omlx-launch", 120),
+            (COMFYUI_PLIST, COMFYUI, "comfyui-launch", 60),
+        ] {
             let label = plist_name.trim_end_matches(".plist");
             assert!(
                 text.contains(&format!("<string>{label}</string>")),
@@ -577,6 +788,18 @@ mod tests {
                     "<key>BundleProgram</key>\n\t<string>Contents/Resources/engines/{wrapper}</string>"
                 )),
                 "{label} BundleProgram"
+            );
+            assert!(
+                text.contains(&format!(
+                    "<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{wrapper}</string>"
+                )),
+                "{label} ProgramArguments"
+            );
+            assert!(
+                text.contains(
+                    "<key>AssociatedBundleIdentifiers</key>\n\t<array>\n\t\t<string>ai.unsloth.studio</string>"
+                ),
+                "{label} AssociatedBundleIdentifiers"
             );
             assert!(
                 text.contains("<key>KeepAlive</key>\n\t<true/>"),
@@ -595,7 +818,9 @@ mod tests {
                 "{label} ThrottleInterval"
             );
             assert!(
-                text.contains("<key>ExitTimeOut</key>\n\t<integer>120</integer>"),
+                text.contains(&format!(
+                    "<key>ExitTimeOut</key>\n\t<integer>{exit_timeout}</integer>"
+                )),
                 "{label} ExitTimeOut"
             );
             assert!(
@@ -606,11 +831,11 @@ mod tests {
     }
 
     #[test]
-    fn fork_config_bundles_only_the_active_plist_and_engines_dir() {
+    fn fork_config_bundles_both_plists_and_the_engines_dir() {
         let conf: serde_json::Value = serde_json::from_str(FORK_CONF).unwrap();
         let files = &conf["bundle"]["macOS"]["files"];
-        assert_eq!(files.as_object().unwrap().len(), 1);
-        for plist in [OMLX_PLIST] {
+        assert_eq!(files.as_object().unwrap().len(), 2);
+        for (_, plist) in HELPERS {
             let key = format!("Library/LaunchAgents/{plist}");
             assert_eq!(files[key.as_str()], format!("launch-agents/{plist}"));
         }
@@ -638,8 +863,44 @@ mod tests {
         ] {
             assert_eq!(
                 parse_cli_args(&args(&[CLI_FLAG, word])),
-                CliParse::Run(command)
+                CliParse::Run(command, None)
             );
+        }
+    }
+
+    #[test]
+    fn cli_args_take_an_optional_helper_target() {
+        for target in ["omlx", "comfyui"] {
+            for (word, command) in [
+                ("status", CliCommand::Status),
+                ("register", CliCommand::Register),
+                ("unregister", CliCommand::Unregister),
+                ("restart", CliCommand::Restart),
+            ] {
+                assert_eq!(
+                    parse_cli_args(&args(&[CLI_FLAG, word, target])),
+                    CliParse::Run(
+                        command,
+                        Some(if target == "omlx" { "omlx" } else { "comfyui" })
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_target_or_extra_argument_is_a_usage_error() {
+        for bad in [
+            vec![CLI_FLAG, "register", "plex"],
+            vec![CLI_FLAG, "status", "OMLX"],
+            vec![CLI_FLAG, "restart", "omlx", "comfyui"],
+        ] {
+            assert!(
+                matches!(parse_cli_args(&args(&bad)), CliParse::Usage(_)),
+                "{bad:?}"
+            );
+            // a usage error exits 2 and never touches a helper
+            assert_eq!(cli_main(&args(&bad)), Some(2), "{bad:?}");
         }
     }
 
@@ -659,7 +920,17 @@ mod tests {
 
     #[test]
     fn helper_labels_follow_the_plist_names() {
-        assert_eq!(helper_labels(), vec!["ai.unsloth.studio.omlx".to_string()]);
+        assert_eq!(
+            helper_labels(),
+            vec![
+                "ai.unsloth.studio.omlx".to_string(),
+                "ai.unsloth.studio.comfyui".to_string()
+            ]
+        );
+        assert_eq!(
+            labels_of(&["comfyui"]),
+            vec!["ai.unsloth.studio.comfyui".to_string()]
+        );
     }
 
     #[test]
@@ -696,7 +967,7 @@ mod tests {
         use std::cell::Cell;
         let sleeps = Cell::new(0u32);
         // one label never leaves
-        let stuck = |label: &str| label.ends_with(".omlx");
+        let stuck = |label: &str| label.ends_with(".comfyui");
         assert!(!wait_labels_gone(
             &helper_labels(),
             &stuck,
@@ -720,6 +991,7 @@ mod tests {
             error: None,
             engines_enabled: true,
             engine_lifetime: crate::engine_lifetime::EngineLifetime::WithApp,
+            cli: CLI_VERSION,
         };
         assert_eq!(exit_code(&ok), 0);
         let failed = EngineHelpersStatus {
@@ -739,7 +1011,12 @@ mod tests {
         let json = serde_json::to_value(snapshot(None)).unwrap();
         assert!(json["supported"].is_boolean());
         assert!(json["state"].is_string());
-        assert_eq!(json["helpers"].as_array().unwrap().len(), 1);
+        let helpers = json["helpers"].as_array().unwrap();
+        assert_eq!(helpers.len(), 2);
+        assert_eq!(helpers[0]["name"], "omlx");
+        assert_eq!(helpers[1]["name"], "comfyui");
+        assert!(helpers.iter().all(|h| h["wanted"].is_boolean()));
+        assert_eq!(json["cli"], 2);
         assert!(json["error"].is_null());
         assert!(json["engines_enabled"].is_boolean());
         assert!(matches!(

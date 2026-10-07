@@ -2420,6 +2420,8 @@ fn main() {
             #[cfg(feature = "attached-engines")]
             engine_helpers::engine_helpers_disable,
             #[cfg(feature = "attached-engines")]
+            engine_helpers::engine_helper_set_enabled,
+            #[cfg(feature = "attached-engines")]
             engine_helpers::engine_lifetime_set,
             fork_updates::fork_update_info,
             fork_updates::fork_update_check,
