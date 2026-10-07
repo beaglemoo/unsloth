@@ -384,6 +384,52 @@ class TestComfyuiLaunch:
         assert result.returncode == 78 and "Traceback" not in result.stderr
         assert "cannot check whether port" in read_fail(home, "omlx")["reason"]
 
+    @pytest.mark.parametrize("extra", [
+        ["--listen"], ["--listen", "0.0.0.0"], ["--listen=0.0.0.0"], ["--lis", "::"], ["--l"],
+        ["--port", "9"], ["--port=9"], ["--po", "9"],
+        ["--tls-keyfile", "k"], ["--tls-certfile=c"], ["--tls-k", "k"],
+        ["--enable-cors-header"], ["--enable-cors-header=*"], ["--enable-cors", "*"],
+        ["--base-directory", "/x"], ["--base-dir=/x"],
+        ["--lowvram", "--listen 0.0.0.0"],
+    ])
+    def test_extra_args_cannot_override_the_binding_flags(self, home, extra):
+        comfy_layout(home)
+        args = ", ".join(json.dumps(a) for a in extra)
+        cfg = comfy_cfg(home, models=[]).replace('extra_args = ["--lowvram", "--offline"]', f"extra_args = [{args}]")
+        result = launch(home, "comfyui", cfg)
+        assert result.returncode == 78 and "fake-engine" not in result.stdout
+        reason = read_fail(home, "comfyui")["reason"]
+        assert "extra_args sets" in reason and "[comfyui]" in reason
+        assert not (home / "data").exists()
+
+    def test_the_default_extra_args_and_harmless_flags_are_accepted(self, home):
+        comfy_layout(home)
+        extra = '["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline", "--preview-method", "auto"]'
+        cfg = comfy_cfg(home, models=[]).replace('["--lowvram", "--offline"]', extra)
+        result = launch(home, "comfyui", cfg, "--print")
+        assert result.returncode == 0, result.stderr
+
+    def test_print_also_rejects_an_overriding_flag_without_a_marker(self, home):
+        comfy_layout(home)
+        cfg = comfy_cfg(home, models=[]).replace('["--lowvram", "--offline"]', '["--listen"]')
+        result = launch(home, "comfyui", cfg, "--print")
+        assert result.returncode == 78 and "extra_args sets" in result.stderr
+        assert not (home / "comfyui.fail").exists()
+
+    @pytest.mark.parametrize("extra", [["--port", "9"], ["--host=0.0.0.0"], ["--base-path", "/x"], ["--por=9"]])
+    def test_omlx_extra_args_cannot_override_the_launchers_flags_either(self, home, extra):
+        fake_python(home / "omlx" / "bin" / "python")
+        args = ", ".join(json.dumps(a) for a in extra)
+        result = launch(home, "omlx", f"[omlx]\nport = {free_port()}\nextra_args = [{args}]\n")
+        assert result.returncode == 78 and "fake-engine" not in result.stdout
+        assert "extra_args sets" in read_fail(home, "omlx")["reason"]
+
+    def test_omlx_keeps_accepting_its_other_extra_args(self, home):
+        fake_python(home / "omlx" / "bin" / "python")
+        result = launch(home, "omlx", f'[omlx]\nport = {free_port()}\nextra_args = ["--log-level", "debug"]\n')
+        assert result.returncode == 0, result.stderr
+        assert "--log-level debug" in result.stdout
+
     def test_the_usage_names_both_engines(self, home):
         result = run([sys.executable, str(ENGINES / "engines_launch.py"), "bogus"], env_for(home))
         assert result.returncode == 78 and "omlx|comfyui" in result.stderr
