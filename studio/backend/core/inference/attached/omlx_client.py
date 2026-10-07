@@ -15,13 +15,16 @@ from urllib.parse import quote
 
 import httpx
 
-from core.inference.attached import AttachedEngineError
+from core.inference.attached import AttachedEngineBusy, AttachedEngineError
 from loggers import get_logger
 
 logger = get_logger(__name__)
 
 _TIMEOUT = httpx.Timeout(5.0, connect = 2.0)
 _LOAD_TIMEOUT = httpx.Timeout(300.0, connect = 2.0)
+# oMLX waits up to 20 s for in-flight requests before answering a graceful unload (200 or 409 model_busy).
+_UNLOAD_TIMEOUT = httpx.Timeout(5.0, connect = 2.0, read = 25.0)
+BUSY_MESSAGE = "oMLX is busy serving another client; retry shortly."
 _EMBEDDING_ID = re.compile(r"embed", re.IGNORECASE)
 
 
@@ -63,6 +66,15 @@ class OmlxStatus:
     memory_bytes: int = 0
     ceiling_bytes: int = 0
     error: Optional[str] = None
+
+
+def _error_type(response: httpx.Response) -> Optional[str]:
+    try:
+        error = response.json().get("error")
+    except (ValueError, AttributeError):
+        return None
+    kind = error.get("type") if isinstance(error, dict) else None
+    return kind if isinstance(kind, str) else None
 
 
 def _int(value: Any) -> int:
@@ -281,7 +293,7 @@ class OmlxClient:
         await self._post(f"/admin/api/models/{quote(dir_id, safe = '')}/load", _LOAD_TIMEOUT)
 
     async def unload(self, model_id: str) -> None:
-        await self._post(f"/v1/models/{quote(model_id, safe = '')}/unload", _TIMEOUT)
+        await self._post(f"/v1/models/{quote(model_id, safe = '')}/unload", _UNLOAD_TIMEOUT)
 
     async def unload_all(self, *, timeout_s: float = 10.0) -> list[str]:
         """Unload pinned and loading models too, and verify that draining has finished.
@@ -321,6 +333,8 @@ class OmlxClient:
                 response = await client.post(path)
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409 and _error_type(exc.response) == "model_busy":
+                raise AttachedEngineBusy(BUSY_MESSAGE) from exc
             raise AttachedEngineError(
                 f"oMLX returned HTTP {exc.response.status_code} for {path.rsplit('/', 1)[-1]}"
             ) from exc
