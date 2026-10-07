@@ -5,6 +5,9 @@
 
 oMLX answers /api/status, /v1/models and POST /v1/models/<id>/unload. It reports 500 on
 /v1/models while <home>/omlx/VERSION says "bad", which is how a test makes a venv unhealthy.
+It models the graceful-unload contract: while <home>/omlx-unload-busy exists a plain unload answers
+409 {"error": {"type": "model_busy"}} with Retry-After 15 and unloads nothing; "?force=1" aborts and
+unloads (200). The calls log gets omlx-unload, omlx-unload-busy or omlx-unload-force.
 ds4 stands for the legacy DwarfStar launcher of a pre-removal app (migration tests only): it answers
 /admin/status and POST /admin/stop; <home>/ds4-busy makes it report a request in flight and
 <home>/ds4-starting that it is starting.
@@ -16,6 +19,7 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 kind, home, port = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
 CALLS = Path(os.environ["FAKE_LC"]) / "calls.log"
@@ -29,9 +33,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def reply(self, code, body=None):
+    def reply(self, code, body=None, headers=None):
         data = json.dumps(body if body is not None else {}).encode()
         self.send_response(code)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -57,9 +63,18 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404)
 
     def do_POST(self):
-        if kind == "omlx" and self.path.startswith("/v1/models/") and self.path.endswith("/unload"):
+        url = urlsplit(self.path)
+        if kind == "omlx" and url.path.startswith("/v1/models/") and url.path.endswith("/unload"):
+            force = parse_qs(url.query).get("force") == ["1"]
+            if flag(home / "omlx-unload-busy") and not force:
+                CALLS.open("a").write("omlx-unload-busy\n")
+                return self.reply(
+                    409,
+                    {"error": {"type": "model_busy", "message": "model is serving a request"}},
+                    {"Retry-After": "15"},
+                )
             (home / "omlx-loaded").unlink(missing_ok=True)
-            CALLS.open("a").write("omlx-unload\n")
+            CALLS.open("a").write("omlx-unload-force\n" if force else "omlx-unload\n")
             return self.reply(200)
         if kind == "ds4" and self.path.startswith("/admin/stop"):
             (home / "ds4-loaded").unlink(missing_ok=True)

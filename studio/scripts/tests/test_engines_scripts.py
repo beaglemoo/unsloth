@@ -1441,6 +1441,25 @@ def test_update_refuses_while_an_engine_is_busy_and_stages_nothing(rig):
 
 
 
+def test_update_stops_on_a_model_busy_unload_without_forcing_it(rig):
+    # idle by /api/status, but oMLX answers 409 model_busy to the graceful unload (a client raced in)
+    (rig.home / "omlx-loaded").write_text("1")
+    (rig.home / "omlx-unload-busy").write_text("1")
+    result = rig.update(STAGE_VERSION="new")
+    assert result.returncode != 0 and "refused to unload" in result.stderr and "busy" in result.stderr
+    calls = rig.calls()
+    assert "omlx-unload-busy" in calls
+    assert "omlx-unload-force" not in calls and "omlx-unload" not in calls
+    assert (rig.home / "omlx-loaded").exists()
+    assert helpers_touched(rig) == []
+    assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+
+
+def test_the_quiesce_unload_never_passes_force():
+    text = (SCRIPTS / "engines-lib.sh").read_text()
+    assert "force=1" not in text.replace('Never "?force=1"', "")
+
+
 def test_a_failed_unregister_still_restarts_the_helper_that_was_stopped(tmp_path, home):
     rig = Rig(tmp_path, home)
     try:
