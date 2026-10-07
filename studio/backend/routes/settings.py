@@ -993,6 +993,10 @@ class AttachedEnginesPayload(BaseModel):
     omlx_url: Optional[str] = Field(default = None, max_length = 256)
     scan_denylist: Optional[list[str]] = Field(default = None, max_length = 64)
     arbitrate_local_loads: Optional[bool] = None
+    comfyui_url: Optional[str] = Field(default = None, max_length = 256)
+    comfyui_peer_urls: Optional[list[str]] = Field(default = None, max_length = 8)
+    arbitrate_comfyui: Optional[bool] = None
+    comfyui_idle_free_s: Optional[int] = Field(default = None, ge = 0, le = 86400)
 
 
 class AttachedEnginesResponse(BaseModel):
@@ -1000,6 +1004,10 @@ class AttachedEnginesResponse(BaseModel):
     omlx_url: str
     scan_denylist: list[str]
     arbitrate_local_loads: bool
+    comfyui_url: str
+    comfyui_peer_urls: list[str]
+    arbitrate_comfyui: bool
+    comfyui_idle_free_s: int
 
 
 def _attached_engines_response(config: AttachedEnginesConfig) -> AttachedEnginesResponse:
@@ -1008,6 +1016,10 @@ def _attached_engines_response(config: AttachedEnginesConfig) -> AttachedEngines
         omlx_url = config.omlx_url,
         scan_denylist = list(config.scan_denylist),
         arbitrate_local_loads = config.arbitrate_local_loads,
+        comfyui_url = config.comfyui_url,
+        comfyui_peer_urls = list(config.comfyui_peer_urls),
+        arbitrate_comfyui = config.arbitrate_comfyui,
+        comfyui_idle_free_s = config.comfyui_idle_free_s,
     )
 
 
