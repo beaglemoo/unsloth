@@ -15,8 +15,14 @@ case "$1" in
     label="$(label_of "$2")"
     alive "$label" || exit 3
     [ -z "${FAKE_BOOTOUT_FAIL:-}" ] || [ "${label##*.}" != "$FAKE_BOOTOUT_FAIL" ] || exit 5
-    kill "$(cat "$FAKE_LC/$label.pid")"
-    while kill -0 "$(cat "$FAKE_LC/$label.pid")" 2>/dev/null; do sleep 0.05; done
+    pid="$(cat "$FAKE_LC/$label.pid")"
+    kill "$pid"
+    n=0
+    while kill -0 "$pid" 2>/dev/null; do
+      n=$((n + 1))
+      [ "$n" -lt 40 ] || kill -KILL "$pid" 2>/dev/null || true
+      sleep 0.05
+    done
     rm -f "$FAKE_LC/$label.pid" ;;
   bootstrap) exit 5 ;;
   kickstart) exit 113 ;;
