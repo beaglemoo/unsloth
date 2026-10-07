@@ -64,6 +64,7 @@ export function comfyuiFromApi(raw: unknown): ComfyuiStatus | null {
     ramFree: numOrNull(body.ram_free),
     failure: failureFromApi(body.failure),
     helperWanted: typeof body.helper_wanted === "boolean" ? body.helper_wanted : null,
+    jobActive: body.job_active === true,
     peers: arr(body.peers).map((row) => peerFromApi((row ?? {}) as Obj)),
   };
 }
