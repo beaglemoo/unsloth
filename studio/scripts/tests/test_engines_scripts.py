@@ -1369,10 +1369,12 @@ def test_wheel_gate_requires_the_fork_modules(tmp_path):
     no_pins = builder.replace('z.writestr("unsloth/x.py", "")', engines + '; z.writestr("studio/_fork.py", "")')
     result = fork_fn(tmp_path, f"DRY=0; {no_pins} build_fork_wheel")
     assert result.returncode != 0 and "fork-pins.toml" in result.stderr
-    good = builder.replace(
-        'z.writestr("unsloth/x.py", "")',
-        engines + '; z.writestr("studio/_fork.py", ""); z.writestr("studio/fork-pins.toml", "")',
-    )
+    with_pins = engines + '; z.writestr("studio/_fork.py", ""); z.writestr("studio/fork-pins.toml", "")'
+    no_template = builder.replace('z.writestr("unsloth/x.py", "")', with_pins)
+    result = fork_fn(tmp_path, f"DRY=0; {no_template} build_fork_wheel")
+    assert result.returncode != 0 and "qwen-image-2.1-t2i.json" in result.stderr
+    template = 'z.writestr("studio/backend/core/inference/attached/comfyui_templates/qwen-image-2.1-t2i.json", "{}")'
+    good = builder.replace('z.writestr("unsloth/x.py", "")', f"{with_pins}; {template}")
     result = fork_fn(tmp_path, f'DRY=0; {good} build_fork_wheel; echo "wheel=$WHEEL"')
     assert result.returncode == 0, result.stderr
     assert "wheel=" in result.stdout and result.stdout.strip().endswith("unsloth-1.0-py3-none-any.whl")
