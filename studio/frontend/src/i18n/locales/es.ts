@@ -1209,7 +1209,7 @@ export const es = {
       chat: "Chat",
       connections: "Conexiones",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "Motores",
       remoteLan: "Remoto y LAN",
       about: "Acerca de",
       data: "Datos",

@@ -1210,7 +1210,7 @@ export const de = {
       chat: "Chat",
       connections: "Verbindungen",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "Engines",
       remoteLan: "Remote & LAN",
       about: "Info",
       data: "Daten",

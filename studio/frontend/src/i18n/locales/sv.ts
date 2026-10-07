@@ -1283,7 +1283,7 @@ export const sv = {
       connections: "Anslutningar",
       data: "Data",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "Motorer",
       remoteLan: "Fjärråtkomst och LAN",
       agents: "Agenter",
       keyboardShortcuts: "Genvägar",
