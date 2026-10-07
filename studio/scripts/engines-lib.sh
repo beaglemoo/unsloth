@@ -512,8 +512,10 @@ port_owners() {
   done
 }
 
-# Wait until none of the ports of the given labels (default all) listens. Never kills the owner.
-wait_ports_free() {
+# Wait until none of the ports of the given labels (default all) listens, up to PORT_GATE_TIMEOUT.
+# Returns 1 on a timeout (the owners are printed, nothing is killed). The rollback paths use this
+# form: they must go on restoring the other engine, so they never die.
+ports_free_wait() {
   log "port-free gate: ports $(gate_ports "$@") must stop listening (${PORT_GATE_TIMEOUT} s)"
   if [ "$DRY" = 1 ]; then
     printf '[dry-run] poll lsof for ports %s every 2 s until empty (timeout %s s)\n' "$(gate_ports "$@")" "$PORT_GATE_TIMEOUT"
@@ -525,11 +527,16 @@ wait_ports_free() {
     [ -z "$owners" ] && break
     if [ $((SECONDS - start)) -ge "$PORT_GATE_TIMEOUT" ]; then
       printf '%s\n' "$owners" >&2
-      die "ports still held after ${PORT_GATE_TIMEOUT} s (owners above). Not killing anything"
+      return 1
     fi
     sleep 2
   done
   log "ports are free"
+}
+
+# The same, for the forward path: a timeout is fatal.
+wait_ports_free() {
+  ports_free_wait "$@" || die "ports still held after ${PORT_GATE_TIMEOUT} s (owners above). Not killing anything"
 }
 
 # wait_engines_healthy <timeout s> <expect oMLX 0|1> [<expect ComfyUI 0|1>]

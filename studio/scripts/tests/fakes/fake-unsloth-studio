@@ -23,6 +23,8 @@
 #   FAKE_REGISTER_NOOP=1       register exits 0 and starts nothing (an approval pending, say)
 #   FAKE_UNREGISTER_FAIL=<s>   unregister fails for the label ending in .<s> (it stays registered
 #                              and running); the other label is unregistered, and the exit is 1
+#   FAKE_UNREGISTER_FAIL_SINCE=<n> FAKE_UNREGISTER_FAIL applies only from the n-th unregister call
+#                              on (calls are counted in $FAKE_LC/unregister-count, restart included)
 #   FAKE_UNREGISTER_FAIL_AFTER=<suffix> unregister stops that helper, then reports failure
 #   FAKE_RESTART_FAIL=1        restart exits 1 and changes nothing
 #   FAKE_STATUS_FAIL=1         status exits 1
@@ -133,7 +135,10 @@ do_register() {
   report ""
 }
 do_unregister() {
-  local label failed="" count=0
+  local label failed="" count=0 calls=0
+  [ ! -f "$FAKE_LC/unregister-count" ] || calls="$(cat "$FAKE_LC/unregister-count")"
+  calls=$((calls + 1))
+  echo "$calls" >"$FAKE_LC/unregister-count"
   # the legacy ds4 job of a pre-removal app: unregistered with the others unless it is sticky
   if registered "$LEGACY"; then
     [ ! -f "$FAKE_LC/ds4-unregister-count" ] || count="$(cat "$FAKE_LC/ds4-unregister-count")"
@@ -146,7 +151,7 @@ do_unregister() {
   fi
   for label in "${LABELS[@]}"; do
     [ -z "$TARGET" ] || [ "$label" = "$TARGET" ] || continue
-    if [ -n "${FAKE_UNREGISTER_FAIL:-}" ] && [ "${label##*.}" = "$FAKE_UNREGISTER_FAIL" ]; then
+    if [ -n "${FAKE_UNREGISTER_FAIL:-}" ] && [ "${label##*.}" = "$FAKE_UNREGISTER_FAIL" ] && [ "$calls" -ge "${FAKE_UNREGISTER_FAIL_SINCE:-1}" ]; then
       failed="$failed ${label##*.}"
       continue
     fi
