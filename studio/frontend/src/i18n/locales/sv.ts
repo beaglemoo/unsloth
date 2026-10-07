@@ -1316,6 +1316,7 @@ export const sv = {
       connections: "Anslutningar",
       data: "Data",
       apiKeys: "API",
+      attachedEngines: "oMLX",
       remoteLan: "Fjärråtkomst och LAN",
       agents: "Agenter",
       keyboardShortcuts: "Genvägar",
