@@ -1,16 +1,23 @@
 #!/bin/bash
 # A stand-in for Unsloth.app/Contents/MacOS/unsloth-studio, modelling `--engine-helpers <status|
-# register|unregister|restart>` the way the real binary behaves on macOS: it drives the same fake
-# engines as fake-launchctl, shares its pid files ($FAKE_LC) and logs one "engine-helpers <cmd>"
-# line to $FAKE_LC/calls.log. SMAppService keeps a registration separate from what launchd runs:
+# register|unregister|restart> [omlx|comfyui]` the way the real binary behaves on macOS: it drives
+# the same fake engines as fake-launchctl, shares its pid files ($FAKE_LC) and logs one
+# "engine-helpers <cmd>[ <target>]" line to $FAKE_LC/calls.log (the target as it was passed, even
+# when the mode ignores it). SMAppService keeps a registration separate from what launchd runs:
 # $FAKE_LC/registered.<label> is the registration, <label>.pid the running job.
 #
-#   register    registers and starts every label that is not registered; an already registered one
-#               is a no-op, even when launchctl bootout took its job down (as on macOS).
-#   unregister  drops the registration and stops the job.
-#   restart     unregister, then register.
+#   register    registers and starts every chosen label that is not registered (with a target: that
+#               label, chosen or not); an already registered one is a no-op, even when launchctl
+#               bootout took its job down (as on macOS).
+#   unregister  drops the registration and stops the job (every label, or the target).
+#   restart     unregister (every label, or the target), then register.
+# "Chosen" and "wanted" come from $FAKE_HOME/desktop.json like the real app: helpers.<name>, default
+# oMLX on and ComfyUI off, and wanted also needs engines_enabled (default true).
+# The status JSON lists both helpers with `wanted` and has "cli": 2.
+#   FAKE_CLI_V1=1              an app from before ComfyUI: one label (omlx), the target is ignored,
+#                              and the status has no "cli" key and no `wanted`
 #
-# Needs FAKE_LC, FAKE_HOME, FAKE_OMLX_PORT, FAKE_PY. make_app copies this file into
+# Needs FAKE_LC, FAKE_HOME, FAKE_OMLX_PORT, FAKE_COMFYUI_PORT, FAKE_PY. make_app copies this file into
 # a fake bundle and replaces __FAKES__ with the fakes directory. Failure switches:
 #   FAKE_REGISTER_FAIL=1       register exits 1 and starts nothing
 #   FAKE_REGISTER_NOOP=1       register exits 0 and starts nothing (an approval pending, say)
@@ -22,16 +29,27 @@
 #   FAKE_LEGACY_DS4_STICKY=<n> migration tests: a legacy ds4 job (registered.ai.unsloth.studio.ds4, started
 #                              by the test, never by register) survives the first <n> unregister calls
 fakes="__FAKES__"
-LABELS=(ai.unsloth.studio.omlx)
+LABELS=(ai.unsloth.studio.omlx ai.unsloth.studio.comfyui)
+[ "${FAKE_CLI_V1:-0}" != 1 ] || LABELS=(ai.unsloth.studio.omlx)
 LEGACY=ai.unsloth.studio.ds4
 [ "${1:-}" = "--engine-helpers" ] || { echo "gui-started" >>"$FAKE_LC/calls.log"; exit 0; }
-echo "engine-helpers ${2:-}" >>"$FAKE_LC/calls.log"
+echo "engine-helpers ${2:-}${3:+ $3}" >>"$FAKE_LC/calls.log"
+TARGET=""
+if [ "${FAKE_CLI_V1:-0}" != 1 ] && [ -n "${3:-}" ]; then
+  case "$3" in
+    omlx|comfyui) TARGET="ai.unsloth.studio.$3" ;;
+    *) echo "unknown target $3" >&2; exit 2 ;;
+  esac
+fi
 
 alive() { [ -f "$FAKE_LC/$1.pid" ] && kill -0 "$(cat "$FAKE_LC/$1.pid")" 2>/dev/null; }
 registered() { [ -f "$FAKE_LC/registered.$1" ]; }
 start() {
   local label="$1" kind port
-  kind=omlx; port="$FAKE_OMLX_PORT"
+  case "${label##*.}" in
+    comfyui) kind=comfyui; port="$FAKE_COMFYUI_PORT" ;;
+    *) kind=omlx; port="$FAKE_OMLX_PORT" ;;
+  esac
   "$FAKE_PY" "$fakes/fake_engine.py" "$kind" "$FAKE_HOME" "$port" >/dev/null 2>&1 &
   echo $! >"$FAKE_LC/$label.pid"
   # every spawned pid is also kept here, so the test's cleanup finds a fake whose label.pid was overwritten
@@ -50,20 +68,64 @@ stop() {
   done
   rm -f "$FAKE_LC/$1.pid"
 }
+# desktop.json as the app reads it: chosen <name> (the helper's own choice, ignoring the master
+# switch) and master (engines_enabled, default true).
+desktop() { # chosen <name> | master
+  "$FAKE_PY" - "$FAKE_HOME/desktop.json" "$1" "${2:-}" <<'PY'
+import json, sys
+path, what, name = sys.argv[1:4]
+try:
+    data = json.load(open(path))
+except Exception:
+    data = {}
+if not isinstance(data, dict):
+    data = {}
+if what == "master":
+    value = data.get("engines_enabled")
+    print("1" if value is not False else "0")
+else:
+    choices = data.get("helpers") if isinstance(data.get("helpers"), dict) else {}
+    value = choices.get(name)
+    if not isinstance(value, bool):
+        value = name == "omlx"
+    print("1" if value else "0")
+PY
+}
+chosen() { [ "$(desktop chosen "${1##*.}")" = 1 ]; }
+wanted() { [ "$(desktop master)" = 1 ] && chosen "$1"; }
 # JSON status on stdout; $1 = error text or empty
 report() {
-  local error=null enabled=0 label
+  local error=null label entries="" want=0 want_on=0 any=0 any_on=0 state=not_registered w
   [ -z "$1" ] || error="\"$1\""
-  for label in "${LABELS[@]}"; do registered "$label" && enabled=$((enabled + 1)); done
-  local state=not_registered
-  [ "$enabled" = 1 ] && state=enabled
-  printf '{"supported":true,"state":"%s","helpers":[{"name":"omlx"}],"error":%s}\n' "$state" "$error"
+  for label in "${LABELS[@]}"; do
+    w=false
+    if [ "${FAKE_CLI_V1:-0}" != 1 ] && wanted "$label"; then w=true; want=$((want + 1)); registered "$label" && want_on=$((want_on + 1)); fi
+    any=$((any + 1)); registered "$label" && any_on=$((any_on + 1))
+    if [ "${FAKE_CLI_V1:-0}" = 1 ]; then
+      entries="$entries${entries:+,}{\"name\":\"${label##*.}\"}"
+    else
+      local st=not_registered
+      registered "$label" && st=enabled
+      entries="$entries${entries:+,}{\"name\":\"${label##*.}\",\"state\":\"$st\",\"wanted\":$w}"
+    fi
+  done
+  if [ "${FAKE_CLI_V1:-0}" = 1 ]; then
+    [ "$any_on" = "$any" ] && [ "$any" -gt 0 ] && state=enabled
+    printf '{"supported":true,"state":"%s","helpers":[%s],"error":%s}\n' "$state" "$entries" "$error"
+  else
+    if [ "$want" -gt 0 ]; then
+      if [ "$want_on" = "$want" ]; then state=enabled; elif [ "$want_on" -gt 0 ]; then state=partial; fi
+    fi
+    printf '{"supported":true,"state":"%s","helpers":[%s],"error":%s,"cli":2}\n' "$state" "$entries" "$error"
+  fi
 }
 do_register() {
   local label
   [ "${FAKE_REGISTER_FAIL:-0}" != 1 ] || { report "register failed"; return 1; }
   [ "${FAKE_REGISTER_NOOP:-0}" != 1 ] || { report ""; return 0; }
   for label in "${LABELS[@]}"; do
+    # a target registers just that helper, chosen or not; without one, the chosen ones
+    if [ -n "$TARGET" ]; then [ "$label" = "$TARGET" ] || continue; elif [ "${FAKE_CLI_V1:-0}" != 1 ]; then chosen "$label" || continue; fi
     registered "$label" && continue
     : >"$FAKE_LC/registered.$label"
     alive "$label" || start "$label"
@@ -83,6 +145,7 @@ do_unregister() {
     fi
   fi
   for label in "${LABELS[@]}"; do
+    [ -z "$TARGET" ] || [ "$label" = "$TARGET" ] || continue
     if [ -n "${FAKE_UNREGISTER_FAIL:-}" ] && [ "${label##*.}" = "$FAKE_UNREGISTER_FAIL" ]; then
       failed="$failed ${label##*.}"
       continue

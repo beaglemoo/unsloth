@@ -5,8 +5,10 @@
 # that changes state goes through `run`/`post`, so --dry-run prints it instead.
 #
 # Environment (all optional; the overrides exist for tests):
-#   OMLX_URL            engine base URL (default 127.0.0.1:8843)
-#   ENGINE_PORTS        ports that must be free while the helper is stopped (default 8843)
+#   OMLX_URL            oMLX base URL (default 127.0.0.1:8843)
+#   COMFYUI_URL         ComfyUI base URL (default 127.0.0.1:8844)
+#   ENGINE_PORTS        the oMLX port, then the ComfyUI port; the ones that must be free while
+#                       that helper is stopped (default "8843 8844")
 #   LEGACY_DS4_URL      one-time migration: the DwarfStar launcher of a pre-removal app, if one still
 #                       answers (default 127.0.0.1:8001); LEGACY_DS4_PORTS its ports (default 8001 8000);
 #                       LEGACY_DS4_WAIT seconds to wait for its launchd job to go (default 20)
@@ -20,7 +22,8 @@
 #   PGREP               pgrep binary, to ask whether Unsloth (`unsloth-studio`) is running
 
 OMLX_URL="${OMLX_URL:-http://127.0.0.1:8843}"
-ENGINE_PORTS="${ENGINE_PORTS:-8843}"
+COMFYUI_URL="${COMFYUI_URL:-http://127.0.0.1:8844}"
+ENGINE_PORTS="${ENGINE_PORTS:-8843 8844}"
 # One-time migration for an install over a pre-removal app, which still ran the DwarfStar (ds4)
 # launcher as a second helper. The new bundle has no ds4 launcher, so a left-over job would
 # crash-loop once the bundle is swapped. Remove this block with the migration once no install
@@ -35,7 +38,7 @@ LAUNCHCTL="${LAUNCHCTL:-launchctl}"
 HELPER_START_WAIT="${HELPER_START_WAIT:-20}"
 PGREP="${PGREP:-pgrep}"
 HELPER_DOMAIN="gui/$(id -u)"
-HELPER_LABELS=(ai.unsloth.studio.omlx)
+HELPER_LABELS=(ai.unsloth.studio.omlx ai.unsloth.studio.comfyui)
 PORT_GATE_TIMEOUT="${PORT_GATE_TIMEOUT:-150}"
 # Helpers this run booted out and still owes a restart.
 STOPPED_HELPERS=()
@@ -47,15 +50,31 @@ POST_CODE=""
 
 urlencode() { python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"; }
 
-# POST <url> <max seconds>; the HTTP status ends up in POST_CODE (000 when unreachable).
+# POST <url> <max seconds> [json body]; the HTTP status ends up in POST_CODE (000 when unreachable).
 post() {
   if [ "$DRY" = 1 ]; then
-    printf '[dry-run] curl -s -m %s -X POST %q\n' "$2" "$1"
+    printf '[dry-run] curl -s -m %s -X POST %q%s\n' "$2" "$1" "${3:+ -d $3}"
     POST_CODE=200
     return 0
   fi
-  POST_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m "$2" -X POST "$1" || true)"
+  if [ -n "${3:-}" ]; then
+    POST_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m "$2" -X POST -H 'Content-Type: application/json' -d "$3" "$1" || true)"
+  else
+    POST_CODE="$(curl -s -o /dev/null -w '%{http_code}' -m "$2" -X POST "$1" || true)"
+  fi
   [ -n "$POST_CODE" ] || POST_CODE=000
+}
+post_json() { post "$1" "$2" "$3"; } # <url> <max seconds> <json>
+
+# stdin: ComfyUI /queue JSON; stdout: running + pending jobs. An answer that cannot be read counts as busy.
+comfyui_busy_count() {
+  python3 -c '
+import json, sys
+try:
+    s = json.load(sys.stdin)
+    print(len(s["queue_running"]) + len(s["queue_pending"]))
+except Exception:
+    print(1)' 2>/dev/null || echo 1
 }
 
 # stdin: oMLX /api/status JSON; stdout: line 1 = busy count, then one loaded model id per line
@@ -77,6 +96,9 @@ fetch_roster() { curl -fsS -m 10 "$OMLX_URL/v1/models" | roster_from_json; }
 # True when oMLX answers /api/status.
 omlx_up() { curl -fsS -m 5 -o /dev/null "$OMLX_URL/api/status" 2>/dev/null; }
 
+# True when ComfyUI answers /system_stats.
+comfyui_up() { curl -fsS -m 5 -o /dev/null "$COMFYUI_URL/system_stats" 2>/dev/null; }
+
 # Migration only: die unless the legacy ds4 launcher, when one answers, is idle (nothing in
 # flight and not starting). An answer that cannot be read counts as busy.
 legacy_ds4_require_idle() {
@@ -94,24 +116,56 @@ print("busy" if busy else "idle")' 2>/dev/null || echo busy)"
   [ "$verdict" = idle ] || die "the legacy DwarfStar launcher at $LEGACY_DS4_URL is busy or starting; wait for it to go idle"
 }
 
-# die unless oMLX (and, for the migration, the legacy ds4 launcher) is idle: nothing generating,
-# loading or starting.
+# die unless oMLX and ComfyUI (and, for the migration, the legacy ds4 launcher) are idle: nothing
+# generating, loading, starting or queued.
 engines_require_idle() {
-  local status summary busy
+  local status summary busy jobs
   if status="$(curl -fsS -m 5 "$OMLX_URL/api/status" 2>/dev/null)"; then
     summary="$(printf '%s' "$status" | omlx_status_summary)"
     busy="$(printf '%s\n' "$summary" | head -n 1)"
     [ "$busy" = 0 ] || die "oMLX is busy (active + waiting + loading = $busy); wait for it to go idle"
   fi
+  if status="$(curl -fsS -m 5 "$COMFYUI_URL/queue" 2>/dev/null)"; then
+    jobs="$(printf '%s' "$status" | comfyui_busy_count)"
+    [ "$jobs" = 0 ] || die "ComfyUI has $jobs jobs running or queued; wait or cancel them in Settings > Engines"
+  fi
   legacy_ds4_require_idle
 }
 
-# Unload every oMLX model gracefully and only while idle, so nothing holding
-# weights is ever killed. Never "?force=1": oMLX waits up to 20 s for in-flight requests and
-# answers 409 model_busy if a client is still streaming, which must stop the install, not abort it. A model that stays loaded (for example a pinned one) is a warning:
-# the helper's SIGTERM releases it.
+# Free the engines' memory gracefully and only while idle, so nothing holding weights is ever
+# killed: unload every oMLX model, and tell ComfyUI to free its models (POST /free; anything but 200
+# is a warning, the helper's SIGTERM releases the rest). Which engines: the arguments (omlx, comfyui;
+# default both). Never "?force=1" for oMLX: it waits up to 20 s for in-flight requests and answers
+# 409 model_busy if a client is still streaming, which must stop the install, not abort it. A model
+# that stays loaded (for example a pinned one) is a warning: the helper's SIGTERM releases it.
 engines_quiesce() {
   engines_require_idle
+  local which=" ${*:-omlx comfyui} "
+  case "$which" in *" omlx "*) quiesce_omlx ;; esac
+  case "$which" in *" comfyui "*) quiesce_comfyui ;; esac
+  # Migration only: the legacy ds4 launcher was idle above; ask it to unload (best effort, the
+  # helper unregister that follows stops it either way).
+  if [ "$LEGACY_DS4_SEEN" = 1 ]; then
+    log "legacy DwarfStar: stopping it while idle"
+    post "$LEGACY_DS4_URL/admin/stop?if_idle=1" 30
+    case "$POST_CODE" in
+      200|202) ;;
+      *) warn "legacy DwarfStar stop answered HTTP $POST_CODE; continuing (the helper unregister stops it)" ;;
+    esac
+  fi
+}
+
+quiesce_comfyui() {
+  if comfyui_up; then
+    log "ComfyUI: freeing its models and memory"
+    post_json "$COMFYUI_URL/free" 30 '{"unload_models": true, "free_memory": true}'
+    [ "$POST_CODE" = 200 ] || warn "ComfyUI /free answered HTTP $POST_CODE; continuing (the helper's SIGTERM releases the memory)"
+  else
+    log "ComfyUI: $COMFYUI_URL not reachable, nothing to free"
+  fi
+}
+
+quiesce_omlx() {
   local status summary loaded id
   if status="$(curl -fsS -m 5 "$OMLX_URL/api/status" 2>/dev/null)"; then
     summary="$(printf '%s' "$status" | omlx_status_summary)"
@@ -149,20 +203,10 @@ engines_quiesce() {
   else
     log "oMLX: $OMLX_URL not reachable, nothing to unload"
   fi
-  # Migration only: the legacy ds4 launcher was idle above; ask it to unload (best effort, the
-  # helper unregister that follows stops it either way).
-  if [ "$LEGACY_DS4_SEEN" = 1 ]; then
-    log "legacy DwarfStar: stopping it while idle"
-    post "$LEGACY_DS4_URL/admin/stop?if_idle=1" 30
-    case "$POST_CODE" in
-      200|202) ;;
-      *) warn "legacy DwarfStar stop answered HTTP $POST_CODE; continuing (the helper unregister stops it)" ;;
-    esac
-  fi
 }
 
-# desktop.json is written by the app (Settings > Attached engines): engine_lifetime and
-# engines_enabled. The scripts only read it, plus seed engines_enabled once (see below).
+# desktop.json is written by the app (Settings > Engines): engine_lifetime, engines_enabled and the
+# per-engine `helpers` choices. The scripts only read it, plus seed engines_enabled once (see below).
 engines_desktop_file() { printf '%s/desktop.json' "${UNSLOTH_ENGINES_HOME:-$HOME/.unsloth/engines}"; }
 
 # with_app (the default, also for a missing or unreadable file) or always.
@@ -238,6 +282,20 @@ sys.exit(0 if run.returncode == 0 and isinstance(data, dict) and "helpers" in da
 PY
 }
 
+# True when <binary> is an app with the named-target CLI: its status JSON has "cli": 2 (an app from
+# before ComfyUI has no such field and ignores a target). Call only after helper_cli_supported.
+helper_cli_v2() { # <binary>
+  python3 - "$1" <<'PY'
+import json, subprocess, sys
+try:
+    run = subprocess.run([sys.argv[1], "--engine-helpers", "status"], capture_output=True, text=True, timeout=20)
+    data = json.loads(run.stdout)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if run.returncode == 0 and isinstance(data, dict) and data.get("cli", 0) >= 2 else 1)
+PY
+}
+
 # Record <label> as owed a restart unless it already is. The debt accumulates: a helper stopped
 # earlier and not yet restarted stays owed.
 helper_owe() {
@@ -249,17 +307,23 @@ helper_owe() {
 }
 
 # Stop the helpers, and remember which ones (STOPPED_HELPERS, cleared by a successful
-# helpers_start). When none is loaded, the old app still gets a best-effort unregister.
+# helpers_start). Arguments: the labels to stop (default all of HELPER_LABELS); only the ones that
+# are loaded are stopped and owed. When none is loaded, the old app still gets a best-effort
+# unregister (all labels only, since that cleans a legacy registration).
 #   - When the app supports it: `unsloth-studio --engine-helpers unregister`, the SMAppService
-#     call the Settings toggle makes. It also clears a legacy bundled helper registration.
+#     call the Settings toggle makes. All labels: the plain call (it also clears a legacy bundled
+#     helper registration). A subset needs the named-target CLI (`unregister <name>` per label); an
+#     app without it would stop every helper, so that case boots the labels out instead.
 #   - Otherwise (an app from before the CLI): `launchctl bootout` of each loaded helper.
 # Everything is recorded as owed BEFORE the call that stops it: a call that fails part way may
 # still have taken a helper down, and helpers_start leaves a helper that is still loaded alone.
 # Under `set -e` a failing call ends the caller; what was recorded is still owed a restart.
 # Never kickstart -k and never a signal of our own.
 helpers_stop() {
-  local label bin loaded=() any=0
-  for label in "${HELPER_LABELS[@]}"; do
+  local label bin loaded=() any=0 want=("$@") all=0
+  [ "${#want[@]}" -gt 0 ] || want=("${HELPER_LABELS[@]}")
+  [ "${#want[@]}" -ne "${#HELPER_LABELS[@]}" ] || all=1
+  for label in "${want[@]}"; do
     if [ "$DRY" = 1 ] || helper_loaded "$label"; then
       loaded+=("$label")
       any=1
@@ -271,19 +335,26 @@ helpers_stop() {
   if [ "$any" = 0 ]; then
     # An old bundle may still have a registered legacy helper which the new bundle cannot
     # address. Its own CLI must get one best-effort chance to unregister it before the swap.
-    if helper_cli_supported "$bin"; then
+    if [ "$all" = 1 ] && helper_cli_supported "$bin"; then
       log "unregister legacy helper registration: $bin --engine-helpers unregister"
       run "$bin" --engine-helpers unregister || true
     fi
     return 0
   fi
   seed_engines_enabled
-  if helper_cli_supported "$bin"; then
-    for label in "${HELPER_LABELS[@]}"; do helper_owe "$label"; done
-    log "unregister the helpers: $bin --engine-helpers unregister"
-    run "$bin" --engine-helpers unregister
+  if helper_cli_supported "$bin" && { [ "$all" = 1 ] || helper_cli_v2 "$bin"; }; then
+    for label in "${loaded[@]}"; do helper_owe "$label"; done
+    if [ "$all" = 1 ]; then
+      log "unregister the helpers: $bin --engine-helpers unregister"
+      run "$bin" --engine-helpers unregister
+    else
+      for label in "${loaded[@]}"; do
+        log "unregister ${label##*.}: $bin --engine-helpers unregister ${label##*.}"
+        run "$bin" --engine-helpers unregister "${label##*.}"
+      done
+    fi
   else
-    log "$bin has no --engine-helpers; using launchctl bootout"
+    log "$bin has no usable --engine-helpers for this; using launchctl bootout"
     for label in "${loaded[@]}"; do
       helper_owe "$label"
       log "bootout $label"
@@ -330,14 +401,16 @@ owed_helpers_loaded() {
 }
 
 # Bring back the helpers helpers_stop took down with `unsloth-studio --engine-helpers register`
-# from the app at helper_app (after --install, the NEW app). macOS refuses `launchctl bootstrap`
-# and `kickstart` for a helper bundled for SMAppService, so those are never tried. A helper that
-# was only booted out (an app without the CLI) can leave its registration in place, which makes
-# `register` a no-op; one `restart` (unregister, wait, register) covers that. Returns 1 when a
-# helper could not be brought back, with the manual fallback in the warning (Settings > Attached
-# engines > Engines enabled, off and on).
+# from the app at helper_app (after --install, the NEW app). With the named-target CLI (cli: 2)
+# each owed helper is registered by name, so a helper nobody wants (ComfyUI, off by default) is
+# never started by accident; an app without it gets the plain `register` (its only helper).
+# macOS refuses `launchctl bootstrap` and `kickstart` for a helper bundled for SMAppService, so
+# those are never tried. A helper that was only booted out (an app without the CLI) can leave its
+# registration in place, which makes `register` a no-op; one `restart` (unregister, wait,
+# register) covers that. Returns 1 when a helper could not be brought back, with the manual
+# fallback in the warning (Settings > Engines > Engines enabled, off and on).
 helpers_start() {
-  local label bin all_up=1
+  local label bin all_up=1 v2=0 registered=1
   HELPERS_LEFT_STOPPED=0
   [ "${#STOPPED_HELPERS[@]}" -gt 0 ] || return 0
   if [ "$DRY" = 0 ]; then
@@ -360,11 +433,32 @@ helpers_start() {
   fi
   bin="$(helper_cli)"
   if ! helper_cli_supported "$bin"; then
-    warn "$bin has no --engine-helpers, so the helpers cannot be restarted from here. Turn Unsloth > Settings > Attached engines > Engines enabled off and on."
+    warn "$bin has no --engine-helpers, so the helpers cannot be restarted from here. Turn Unsloth > Settings > Engines > Engines enabled off and on."
     return 1
   fi
-  log "register the helpers: $bin --engine-helpers register"
-  if run "$bin" --engine-helpers register; then
+  helper_cli_v2 "$bin" && v2=1
+  if [ "$v2" = 0 ]; then
+    # An app without the named-target CLI only knows the oMLX helper; it cannot bring the others back.
+    local keep=()
+    for label in "${STOPPED_HELPERS[@]}"; do
+      case "$label" in
+        *.omlx) keep+=("$label") ;;
+        *) warn "$bin cannot register $label (no named-target CLI); it stays stopped" ;;
+      esac
+    done
+    STOPPED_HELPERS=(${keep[@]+"${keep[@]}"})
+    if [ "${#STOPPED_HELPERS[@]}" -eq 0 ]; then return 1; fi
+  fi
+  if [ "$v2" = 1 ]; then
+    for label in "${STOPPED_HELPERS[@]}"; do
+      log "register ${label##*.}: $bin --engine-helpers register ${label##*.}"
+      run "$bin" --engine-helpers register "${label##*.}" || registered=0
+    done
+  else
+    log "register the helpers: $bin --engine-helpers register"
+    run "$bin" --engine-helpers register || registered=0
+  fi
+  if [ "$registered" = 1 ]; then
     if [ "$DRY" = 1 ] || owed_helpers_loaded; then
       STOPPED_HELPERS=()
       return 0
@@ -373,37 +467,61 @@ helpers_start() {
   else
     warn "register failed; trying restart"
   fi
-  if run "$bin" --engine-helpers restart && owed_helpers_loaded; then
+  local restarted=1
+  if [ "$v2" = 1 ]; then
+    for label in "${STOPPED_HELPERS[@]}"; do
+      run "$bin" --engine-helpers restart "${label##*.}" || restarted=0
+    done
+  else
+    run "$bin" --engine-helpers restart || restarted=0
+  fi
+  if [ "$restarted" = 1 ] && owed_helpers_loaded; then
     STOPPED_HELPERS=()
     return 0
   fi
-  warn "the helpers did not restart. Turn Unsloth > Settings > Attached engines > Engines enabled off and on."
+  warn "the helpers did not restart. Turn Unsloth > Settings > Engines > Engines enabled off and on."
   return 1
 }
 
-# The ports the gate watches: the engine ports, plus the legacy ds4 ones only when that launcher
-# was seen in this run (migration).
+# The port of a helper label: ENGINE_PORTS lists the oMLX port, then the ComfyUI port.
+label_port() { # <label>
+  local ports
+  read -r -a ports <<<"$ENGINE_PORTS"
+  case "${1##*.}" in
+    omlx) printf '%s' "${ports[0]}" ;;
+    comfyui) printf '%s' "${ports[1]:-}" ;;
+  esac
+}
+
+# The ports the gate watches: those of the given labels (default all of HELPER_LABELS), plus the
+# legacy ds4 ones only when that launcher was seen in this run (migration).
 gate_ports() {
-  if [ "$LEGACY_DS4_SEEN" = 1 ]; then printf '%s %s' "$ENGINE_PORTS" "$LEGACY_DS4_PORTS"; else printf '%s' "$ENGINE_PORTS"; fi
+  local label port out=()
+  for label in "${@:-${HELPER_LABELS[@]}}"; do
+    port="$(label_port "$label")"
+    [ -z "$port" ] || out+=("$port")
+  done
+  if [ "$LEGACY_DS4_SEEN" = 1 ]; then out+=($LEGACY_DS4_PORTS); fi
+  printf '%s' "${out[*]}"
 }
 
 port_owners() {
   local port
-  for port in $(gate_ports); do
+  for port in $(gate_ports "$@"); do
     lsof -nP "-iTCP:$port" -sTCP:LISTEN 2>/dev/null || true
   done
 }
 
-# Wait until none of the engine ports listens. Never kills the owner.
+# Wait until none of the ports of the given labels (default all) listens. Never kills the owner.
 wait_ports_free() {
-  log "port-free gate: ports $(gate_ports) must stop listening (${PORT_GATE_TIMEOUT} s)"
+  log "port-free gate: ports $(gate_ports "$@") must stop listening (${PORT_GATE_TIMEOUT} s)"
   if [ "$DRY" = 1 ]; then
-    printf '[dry-run] poll lsof for ports %s every 2 s until empty (timeout %s s)\n' "$(gate_ports)" "$PORT_GATE_TIMEOUT"
+    printf '[dry-run] poll lsof for ports %s every 2 s until empty (timeout %s s)\n' "$(gate_ports "$@")" "$PORT_GATE_TIMEOUT"
     return 0
   fi
   local start=$SECONDS owners
   while :; do
-    owners="$(port_owners)"
+    owners="$(port_owners "$@")"
     [ -z "$owners" ] && break
     if [ $((SECONDS - start)) -ge "$PORT_GATE_TIMEOUT" ]; then
       printf '%s\n' "$owners" >&2
@@ -414,24 +532,25 @@ wait_ports_free() {
   log "ports are free"
 }
 
-# wait_engines_healthy <timeout s> <expect oMLX 0|1>
+# wait_engines_healthy <timeout s> <expect oMLX 0|1> [<expect ComfyUI 0|1>]
 wait_engines_healthy() {
-  local timeout="$1" want_omlx="$2" start=$SECONDS last=-15 o
+  local timeout="$1" want_omlx="$2" want_comfyui="${3:-0}" start=$SECONDS last=-15 o c
   while :; do
-    o=1
+    o=1 c=1
     if [ "$want_omlx" = 1 ]; then curl -fsS -m 3 -o /dev/null "$OMLX_URL/v1/models" 2>/dev/null || o=0; fi
-    [ "$o" = 1 ] && return 0
+    if [ "$want_comfyui" = 1 ]; then curl -fsS -m 3 -o /dev/null "$COMFYUI_URL/system_stats" 2>/dev/null || c=0; fi
+    [ "$o" = 1 ] && [ "$c" = 1 ] && return 0
     [ $((SECONDS - start)) -lt "$timeout" ] || return 1
     if [ $((SECONDS - last - start)) -ge 15 ]; then
       last=$((SECONDS - start))
-      log "waiting (${last} s): oMLX $([ "$o" = 1 ] && echo up || echo down)"
+      log "waiting (${last} s):$([ "$want_omlx" = 1 ] && echo " oMLX $([ "$o" = 1 ] && echo up || echo down)")$([ "$want_comfyui" = 1 ] && echo " ComfyUI $([ "$c" = 1 ] && echo up || echo down)")"
     fi
     sleep "${HEALTH_POLL:-3}"
   done
 }
 
 # Print the launch failure the wrappers recorded for an engine, if any.
-show_launch_failure() { # <name: omlx>
+show_launch_failure() { # <name: omlx|comfyui>
   local file="${UNSLOTH_ENGINES_HOME:-$HOME/.unsloth/engines}/$1.fail"
   [ -f "$file" ] && warn "$1 launch failure: $(cat "$file")"
   return 0
