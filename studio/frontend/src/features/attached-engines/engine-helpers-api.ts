@@ -5,6 +5,7 @@ import { isTauri } from "@/lib/api-base";
 import type {
   EngineHelpersStatus,
   EngineLifetime,
+  EngineName,
 } from "./engine-helpers-state";
 
 async function call(
@@ -33,6 +34,14 @@ export function setEngineHelpersEnabled(
   enabled: boolean,
 ): Promise<EngineHelpersStatus> {
   return call(enabled ? "engine_helpers_enable" : "engine_helpers_disable");
+}
+
+/** One engine's switch (shell `cli` 2 and up). Turning ComfyUI off frees its memory first. */
+export function setEngineHelperEnabled(
+  name: EngineName,
+  enabled: boolean,
+): Promise<EngineHelpersStatus> {
+  return call("engine_helper_set_enabled", { name, enabled });
 }
 
 /** Saves the engine lifetime in the desktop shell and returns the status with it applied. */
