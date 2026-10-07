@@ -2733,3 +2733,76 @@ def test_the_comfyui_smoke_dir_is_removed_after_validation(home, exit_code):
     result = build_fn(home, f'rc=0; validate_comfyui "{venv}" || rc=$?; echo "rc=$rc"; ls "$BUILD_ROOT"')
     assert f"rc={exit_code}" in result.stdout, result.stdout + result.stderr
     assert "comfyui-smoke" not in result.stdout
+
+
+# --- rollback with a stuck engine ----------------------------------------------------------------
+
+
+def test_a_stuck_comfyui_does_not_strand_omlx_in_an_update_rollback(rig):
+    rig.add_comfyui()
+    rig.enable_comfyui()
+    # step 4 stops both helpers (unregister call 1); in the rollback oMLX stops (2) and ComfyUI's
+    # unregister (3) fails: it keeps running and keeps its port
+    result = rig.update(
+        STAGE_VERSION="bad",
+        STAGE_COMFYUI_VERSION="new",
+        FAKE_UNREGISTER_FAIL="comfyui",
+        FAKE_UNREGISTER_FAIL_SINCE="3",
+    )
+    assert result.returncode != 0
+    out = result.stdout + result.stderr
+    assert "rolling back" in out, out
+    # oMLX: venv restored, helper registered again
+    assert (rig.home / "omlx" / "VERSION").read_text() == "old"
+    assert (rig.home / "omlx.failed" / "VERSION").read_text() == "bad"
+    assert rig.loaded(OMLX_LABEL) and (rig.lc / f"registered.{OMLX_LABEL}").exists()
+    # ComfyUI: its live process is not pulled out from under it, and the warning says what to do
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "new"
+    assert (rig.home / "comfyui.old" / "VERSION").read_text() == "old"
+    assert rig.loaded(COMFYUI_LABEL)
+    assert "the comfyui helper is still running" in result.stderr
+    assert "--rollback-venvs comfyui" in result.stderr
+    assert "keeps its new venv" in result.stderr
+
+
+def test_a_stuck_omlx_does_not_strand_comfyui_in_an_update_rollback(rig):
+    rig.add_comfyui()
+    rig.enable_comfyui()
+    result = rig.update(
+        STAGE_VERSION="new",
+        STAGE_COMFYUI_VERSION="bad",
+        COMFYUI_CHECK="/usr/bin/true",
+        FAKE_UNREGISTER_FAIL="omlx",
+        FAKE_UNREGISTER_FAIL_SINCE="2",
+    )
+    assert result.returncode != 0
+    # ComfyUI (the unhealthy one): restored and running again
+    assert (rig.home / "comfyui" / "VERSION").read_text() == "old"
+    assert rig.loaded(COMFYUI_LABEL)
+    # oMLX could not be stopped: its venv stays, with the manual step in the warning
+    assert (rig.home / "omlx" / "VERSION").read_text() == "new"
+    assert rig.loaded(OMLX_LABEL)
+    assert "the omlx helper is still running" in result.stderr and "--rollback-venvs omlx" in result.stderr
+
+
+def test_a_stuck_comfyui_does_not_strand_the_previous_app_or_omlx_in_an_install_rollback(tmp_path, home):
+    rig = Rig(tmp_path, home)
+    try:
+        rig.enable_comfyui()
+        overrides, _ = FAILURES["final-verify"]
+        # install stops everything (unregister 1) and registers from the new app; the rollback's
+        # unregister (2) leaves ComfyUI running and holding its port
+        result = txn(
+            tmp_path,
+            rig,
+            overrides,
+            {"FAKE_UNREGISTER_FAIL": "comfyui", "FAKE_UNREGISTER_FAIL_SINCE": "2"},
+        )
+        assert result.returncode != 0
+        assert (tmp_path / "Apps" / "Unsloth.app" / "Contents" / "marker").read_text() == "old"
+        assert rig.loaded(OMLX_LABEL) and (rig.lc / f"registered.{OMLX_LABEL}").exists()
+        assert rig.loaded(COMFYUI_LABEL)
+        assert "the comfyui helper still holds port" in result.stderr
+        assert "the previous backend was restored" in result.stderr
+    finally:
+        rig.close()
