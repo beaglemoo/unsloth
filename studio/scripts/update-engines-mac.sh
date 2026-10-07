@@ -1,6 +1,7 @@
 #!/bin/bash
-# Safely update the oMLX venv from its pinned submodule while Unsloth's
-# background helper keeps its place in launchd. Run it after bumping studio/engines/omlx.
+# Safely update the engine venvs (oMLX, ComfyUI) from their pinned submodules while Unsloth's
+# background helper keeps its place in launchd. Run it after bumping studio/engines/omlx or
+# studio/engines/comfyui (or its constraints file).
 #
 #   update-engines-mac.sh [--dry-run] [--yes] [--force]
 #
@@ -21,7 +22,11 @@
 #   7. on any failure after the swap: stop the helpers, build-engines-mac.sh --rollback-venvs,
 #      start them again, wait for health, and exit 1. <venv>.failed keeps the broken venv for inspection.
 #
-# Only the oMLX venv changes.
+# Only the staged venvs change. A ComfyUI-only update leaves oMLX and its helper alone: there is
+# no ComfyUI helper yet (Phase 2), so the swap is guarded instead. It is refused while a ComfyUI
+# process runs from the venv (nothing is killed), and the swapped venv is smoke-tested
+# (ComfyUI's --quick-test-for-ci from the live path; COMFYUI_CHECK overrides the command). A failure
+# rolls every venv this run swapped back. UNSLOTH_BUILD_COMFYUI=0 leaves ComfyUI out of all of it.
 #
 # The helper stop and start live in engines-lib.sh and use the app's `--engine-helpers` CLI
 # (macOS refuses `launchctl bootstrap` of a bundled helper). They have only been exercised with
@@ -29,7 +34,8 @@
 # Attached engines > Engines enabled, off and on.
 #
 # Environment: UNSLOTH_ENGINES_HOME (default ~/.unsloth/engines), OMLX_URL, ENGINE_PORTS,
-#   HELPER_APP, LAUNCHCTL, PGREP, BUILD_ENGINES (the build script), HEALTH_TIMEOUT (default 240 s)
+#   HELPER_APP, LAUNCHCTL, PGREP, BUILD_ENGINES (the build script), HEALTH_TIMEOUT (default 240 s),
+#   UNSLOTH_BUILD_COMFYUI (0: ignore ComfyUI), COMFYUI_CHECK (command run after a ComfyUI swap)
 set -euo pipefail
 
 DRY=0 YES=0 FORCE=0
@@ -48,6 +54,7 @@ ENGINES_HOME="${UNSLOTH_ENGINES_HOME:-$HOME/.unsloth/engines}"
 BUILD_ENGINES="${BUILD_ENGINES:-$SCRIPT_DIR/build-engines-mac.sh}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-240}"
 VENVS=(omlx)
+[ "${UNSLOTH_BUILD_COMFYUI:-1}" = 0 ] || VENVS+=(comfyui)
 
 log() { printf '[engines-update] %s\n' "$*"; }
 warn() { printf '[engines-update] warning: %s\n' "$*" >&2; }
@@ -70,6 +77,46 @@ STAGE=pre
 WANT_OMLX=0
 ROSTER=""
 SWAPPED=()
+SWAP_OMLX=0
+SWAP_COMFYUI=0
+
+swapped_has() { # <name>
+  local n
+  for n in ${SWAPPED[@]+"${SWAPPED[@]}"}; do [ "$n" != "$1" ] || return 0; done
+  return 1
+}
+
+# A ComfyUI process running from the venv (venv python or src/main.py in its argv). There is no
+# ComfyUI helper to stop yet, and nothing is ever killed here, so the update waits for it.
+comfyui_running() {
+  local venv="$ENGINES_HOME/comfyui"
+  pgrep -f "$venv/src/main.py" >/dev/null 2>&1 || pgrep -f "$venv/bin/python" >/dev/null 2>&1
+}
+
+# Smoke test of the swapped ComfyUI venv at its live path (relocation can break a venv):
+# ComfyUI's own --quick-test-for-ci, which initialises every node and exits before binding a port.
+comfyui_check() {
+  local venv="$ENGINES_HOME/comfyui"
+  if [ "$DRY" = 1 ]; then log "dry-run: would smoke-test the swapped ComfyUI venv ($venv/src/main.py --quick-test-for-ci)"; return 0; fi
+  if [ -n "${COMFYUI_CHECK:-}" ]; then "$COMFYUI_CHECK"; return; fi
+  mkdir -p "$ENGINES_HOME/.build/comfyui-smoke"
+  python3 - "$venv" "$ENGINES_HOME/.build/comfyui-smoke" <<'PY'
+import subprocess, sys
+venv, smoke = sys.argv[1:3]
+try:
+    run = subprocess.run(
+        [f"{venv}/bin/python", "main.py", "--quick-test-for-ci", "--base-directory", smoke,
+         "--disable-all-custom-nodes", "--cpu"],
+        cwd=f"{venv}/src", timeout=300, capture_output=True, text=True,
+    )
+except subprocess.TimeoutExpired:
+    print("ComfyUI smoke test timed out after 300 s", file=sys.stderr)
+    sys.exit(1)
+if run.returncode != 0:
+    print((run.stdout + run.stderr)[-2000:], file=sys.stderr)
+    sys.exit(1)
+PY
+}
 
 staged_names() {
   local name
@@ -89,14 +136,16 @@ confirm() {
 
 # Nothing to wait for when helpers_start left the helpers stopped (with_app, Unsloth closed).
 healthy() {
-  if [ "$HELPERS_LEFT_STOPPED" = 1 ]; then return 0; fi
+  if [ "$SWAP_OMLX" = 0 ] || [ "$HELPERS_LEFT_STOPPED" = 1 ]; then return 0; fi
   wait_engines_healthy "$HEALTH_TIMEOUT" "$WANT_OMLX"
 }
 
 rollback_swap() {
   log "rolling back: restoring the previous venvs"
-  helpers_stop
-  wait_ports_free
+  if [ "$SWAP_OMLX" = 1 ]; then
+    helpers_stop
+    wait_ports_free
+  fi
   local name args=()
   for name in ${SWAPPED[@]+"${SWAPPED[@]}"}; do
     # only venvs this run actually replaced (their .new is gone and a .old exists)
@@ -105,14 +154,14 @@ rollback_swap() {
   if [ "${#args[@]}" -gt 0 ]; then
     run "$BUILD_ENGINES" --rollback-venvs "${args[@]}" || warn "venv rollback failed; restore $ENGINES_HOME/*.old by hand"
   fi
-  helpers_start || warn "helpers did not restart after the rollback"
-  if [ "$HELPERS_LEFT_STOPPED" = 1 ]; then
+  if [ "$SWAP_OMLX" = 1 ]; then helpers_start || warn "helpers did not restart after the rollback"; fi
+  if [ "$SWAP_OMLX" = 1 ] && [ "$HELPERS_LEFT_STOPPED" = 1 ]; then
     log "rolled back; the helpers stay stopped until Unsloth registers them at its next launch"
   elif healthy; then
     log "rolled back; the previous engines are serving again"
   else
     warn "engines are not healthy after the rollback"
-    show_launch_failure omlx
+    [ "$SWAP_OMLX" = 0 ] || show_launch_failure omlx
   fi
 }
 
@@ -163,17 +212,31 @@ if [ "$DRY" = 0 ]; then
 else
   SWAPPED=("${VENVS[@]}")
 fi
+if swapped_has omlx; then SWAP_OMLX=1; fi
+if swapped_has comfyui; then SWAP_COMFYUI=1; fi
 
 # 3 -------------------------------------------------------------------------------------------
 log "3/6 idle check, then unload oMLX models"
-confirm "This stops the oMLX helper for a moment to swap in ${SWAPPED[*]}. Continue?"
-engines_quiesce
+if [ "$SWAP_COMFYUI" = 1 ] && comfyui_running; then
+  die "ComfyUI is running from $ENGINES_HOME/comfyui; stop it first (nothing was changed; the staged venv waits in comfyui.new)"
+fi
+if [ "$SWAP_OMLX" = 1 ]; then
+  confirm "This stops the oMLX helper for a moment to swap in ${SWAPPED[*]}. Continue?"
+  engines_quiesce
+else
+  confirm "This swaps in ${SWAPPED[*]}. oMLX and its helper are not touched. Continue?"
+  log "oMLX is not being updated; leaving it running"
+fi
 
 # 4 -------------------------------------------------------------------------------------------
 log "4/6 stop the helpers"
-STAGE=stopped
-helpers_stop
-wait_ports_free
+if [ "$SWAP_OMLX" = 1 ]; then
+  STAGE=stopped
+  helpers_stop
+  wait_ports_free
+else
+  log "no helper serves ${SWAPPED[*]}; nothing to stop"
+fi
 
 # 5 -------------------------------------------------------------------------------------------
 log "5/6 swap the venvs"
@@ -182,11 +245,23 @@ run "$BUILD_ENGINES" --swap-only
 
 # 6 -------------------------------------------------------------------------------------------
 log "6/6 restart the helpers and wait for health"
-helpers_start || die "the helpers did not restart"
+if [ "$SWAP_OMLX" = 1 ]; then
+  helpers_start || die "the helpers did not restart"
+fi
 if [ "$DRY" = 1 ]; then
-  log "dry-run: would poll $OMLX_URL/v1/models for up to ${HEALTH_TIMEOUT} s, then compare the roster"
+  if [ "$SWAP_OMLX" = 1 ]; then log "dry-run: would poll $OMLX_URL/v1/models for up to ${HEALTH_TIMEOUT} s, then compare the roster"; fi
+  if [ "$SWAP_COMFYUI" = 1 ]; then comfyui_check; fi
   log "dry-run complete"
   STAGE=pre
+  exit 0
+fi
+if [ "$SWAP_COMFYUI" = 1 ]; then
+  comfyui_check || die "the swapped ComfyUI venv failed its smoke test"
+  log "comfyui: the swapped venv passed its smoke test"
+fi
+if [ "$SWAP_OMLX" = 0 ]; then
+  STAGE=pre
+  log "done. oMLX was not touched. The previous venv is kept as comfyui.old for build-engines-mac.sh --rollback-venvs comfyui."
   exit 0
 fi
 if [ "$HELPERS_LEFT_STOPPED" = 1 ]; then
