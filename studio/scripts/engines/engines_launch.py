@@ -97,15 +97,21 @@ def die(msg: str) -> "None":
 
 
 def port_in_use(port: int, host: str | None = None) -> bool:
-    """True when something already accepts connections on the port (loopback, or the bind host)."""
+    """True when something already accepts connections on the port (loopback, or the bind host).
+
+    The socket family follows the address (getaddrinfo), so an IPv6 host such as ::1 works. Raises
+    OSError (including socket.gaierror) when a target cannot be probed; require_free_port turns
+    that into a failure marker.
+    """
     targets = ["127.0.0.1"]
     if host and host not in ("0.0.0.0", "::", "[::]", "127.0.0.1", "localhost"):
-        targets.append(str(host))
+        targets.append(str(host).strip("[]"))
     for target in targets:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.settimeout(1.0)
-            if probe.connect_ex((target, port)) == 0:
-                return True
+        for family, kind, proto, _canon, addr in socket.getaddrinfo(target, port, type=socket.SOCK_STREAM):
+            with socket.socket(family, kind, proto) as probe:
+                probe.settimeout(1.0)
+                if probe.connect_ex(addr) == 0:
+                    return True
     return False
 
 
@@ -126,7 +132,13 @@ def port_owner(port: int) -> tuple[int, str] | None:
 
 def require_free_port(port: int, label: str, host: str | None = None) -> None:
     # --print only inspects the resolved launch; it routinely runs while the engine is live.
-    if _failing_engine and port_in_use(port, host):
+    if not _failing_engine:
+        return
+    try:
+        in_use = port_in_use(port, host)
+    except OSError as exc:
+        die(f"cannot check whether port {port} ({label}) is free on host {host!r}: {exc}")
+    if in_use:
         owner = port_owner(port)
         if owner is None:
             die(f"port {port} ({label}) is already in use; another process holds it")
