@@ -1424,6 +1424,7 @@ export const he = {
       data: "נתונים",
       knowledge: "ידע",
       apiKeys: "API",
+      attachedEngines: "oMLX",
       remoteLan: "שליטה מרחוק ורשת מקומית",
       agents: "סוכנים",
       keyboardShortcuts: "קיצורי דרך",
