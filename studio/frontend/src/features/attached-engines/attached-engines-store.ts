@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { create } from "zustand";
+import type { EngineHelpersStatus } from "./engine-helpers-state";
 import type { AttachedEnginesSettings, AttachedStatus } from "./types";
 
 interface AttachedEnginesState {
@@ -9,6 +10,9 @@ interface AttachedEnginesState {
   settings: AttachedEnginesSettings | null;
   /** Null while the flag is off, nothing has been polled yet, or the account is not the owner. */
   status: AttachedStatus | null;
+  /** The desktop shell's helper status; null in a browser or a shell without the engine helpers. */
+  helpers: EngineHelpersStatus | null;
+  setHelpers: (helpers: EngineHelpersStatus | null) => void;
   setSettings: (settings: AttachedEnginesSettings | null) => void;
   setStatus: (status: AttachedStatus | null) => void;
 }
@@ -16,6 +20,8 @@ interface AttachedEnginesState {
 export const useAttachedEnginesStore = create<AttachedEnginesState>((set) => ({
   settings: null,
   status: null,
+  helpers: null,
+  setHelpers: (helpers) => set({ helpers }),
   setSettings: (settings) => set({ settings }),
   setStatus: (status) => set({ status }),
 }));

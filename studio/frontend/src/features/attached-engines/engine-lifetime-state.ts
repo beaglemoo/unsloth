@@ -46,8 +46,8 @@ export function engineLifetimeNote(lifetime: EngineLifetime): string {
 /** What the "Engines enabled" row says about the lifetime. */
 export function enginesEnabledDescription(lifetime: EngineLifetime): string {
   return lifetime === "with_app"
-    ? "Run oMLX as a macOS login item while Unsloth is open. It starts with Unsloth and stops when it quits."
-    : "Run oMLX as a macOS login item. It keeps serving after Unsloth quits.";
+    ? "Run the engines you turn on below as macOS login items while Unsloth is open. Each starts with Unsloth and stops when it quits."
+    : "Run the engines you turn on below as macOS login items. Each keeps serving after Unsloth quits.";
 }
 
 export interface EngineLifetimeRow {
