@@ -493,16 +493,18 @@ label_port() { # <label>
   esac
 }
 
-# The ports the gate watches: those of the given labels (default all of HELPER_LABELS), plus the
-# legacy ds4 ones only when that launcher was seen in this run (migration).
+# The ports the gate watches: those of the given labels and no others (no label: none), plus the
+# legacy ds4 ones only when that launcher was seen in this run (migration). The callers pass the
+# helpers this run actually stopped (STOPPED_HELPERS), so an unrelated process on the port of an
+# engine that was not running never holds an install up.
 gate_ports() {
   local label port out=()
-  for label in "${@:-${HELPER_LABELS[@]}}"; do
+  for label in "$@"; do
     port="$(label_port "$label")"
     [ -z "$port" ] || out+=("$port")
   done
   if [ "$LEGACY_DS4_SEEN" = 1 ]; then out+=($LEGACY_DS4_PORTS); fi
-  printf '%s' "${out[*]}"
+  printf '%s' "${out[*]-}"
 }
 
 port_owners() {
@@ -512,10 +514,14 @@ port_owners() {
   done
 }
 
-# Wait until none of the ports of the given labels (default all) listens, up to PORT_GATE_TIMEOUT.
+# Wait until none of the ports of the given labels listens, up to PORT_GATE_TIMEOUT.
 # Returns 1 on a timeout (the owners are printed, nothing is killed). The rollback paths use this
 # form: they must go on restoring the other engine, so they never die.
 ports_free_wait() {
+  if [ -z "$(gate_ports "$@")" ]; then
+    log "port-free gate: no engine port to wait for"
+    return 0
+  fi
   log "port-free gate: ports $(gate_ports "$@") must stop listening (${PORT_GATE_TIMEOUT} s)"
   if [ "$DRY" = 1 ]; then
     printf '[dry-run] poll lsof for ports %s every 2 s until empty (timeout %s s)\n' "$(gate_ports "$@")" "$PORT_GATE_TIMEOUT"
