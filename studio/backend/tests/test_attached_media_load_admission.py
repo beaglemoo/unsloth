@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import httpx
 import pytest
@@ -58,12 +58,14 @@ def media(request):
 
 
 def test_a_load_is_admitted_once_as_a_local_load(media, monkeypatch):
-    _, client, path, body, status, _ = media
+    kind, client, path, body, status, _ = media
     admit = AsyncMock(return_value = arbiter.ArbiterResult())
     monkeypatch.setattr(arbiter, "free_for_local", admit)
     response = client.post(path, json = body)
     assert response.status_code == 200, response.text
-    admit.assert_awaited_once_with("local_load")
+    admit.assert_awaited_once_with("local_load", media_hold = ANY)
+    hold = admit.await_args.kwargs["media_hold"]
+    assert isinstance(hold, arbiter.MediaHold) and hold.kind == kind
     assert client.get(status).json()["loaded"] is True
 
 
@@ -162,3 +164,52 @@ def test_the_flag_off_leaves_loads_untouched(media, world, monkeypatch):
     monkeypatch.setattr(arbiter, "get_config", lambda: DEFAULT_CONFIG)
     assert client.post(path, json = body).status_code == 200
     assert world["omlx"] == [] and world["free"] == []
+
+
+# --- the media claim: oMLX stays out from admission until the load is published -----------------
+
+
+@pytest.fixture
+def spy(monkeypatch):
+    """What the claim looked like right after admission, and whether the arbiter still holds one afterwards."""
+    real = arbiter.free_for_local
+    seen: list = []
+
+    async def wrapped(reason, **kwargs):
+        result = await real(reason, **kwargs)
+        seen.append(arbiter._media_held())
+        return result
+
+    monkeypatch.setattr(arbiter, "free_for_local", wrapped)
+    arbiter._media_holds.clear()
+    yield seen
+    arbiter._media_holds.clear()
+
+
+def test_an_admitted_load_holds_oMLX_out_until_the_route_is_done_and_then_lets_go(media, world, spy):
+    kind, client, path, body, _, _ = media
+    assert client.post(path, json = body).status_code == 200
+    assert spy == [f"is loading {'a video' if kind == 'video' else 'an image'} model"]
+    assert arbiter._media_holds == set()
+
+
+def test_a_refused_admission_leaves_no_claim(media, world, spy):
+    _, client, path, body, _, _ = media
+    world["busy"] = True
+    assert client.post(path, json = body).status_code == 503
+    assert spy == [None]
+    assert arbiter._media_holds == set()
+
+
+def test_a_load_that_fails_after_admission_releases_the_claim(media, world, spy, monkeypatch):
+    from hub.services.models import account_access
+
+    kind, client, path, body, _, _ = media
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("a load is already in progress")
+
+    monkeypatch.setattr(account_access, "admit_media_load", boom)
+    assert client.post(path, json = body).status_code == 409
+    assert spy and spy[0] is not None
+    assert arbiter._media_holds == set()
