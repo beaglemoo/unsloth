@@ -367,6 +367,10 @@ export interface GalleryImage {
   hires_guidance?: number | null;
   hires_base_width?: number | null;
   hires_base_height?: number | null;
+  // Set on images made by an attached engine (ComfyUI), where `engine` above reads "comfyui": the template
+  // that ran and its scheduler (sampler above carries the ComfyUI sampler there).
+  comfyui_template?: string | null;
+  scheduler?: string | null;
   created_at: number;
   pinned?: boolean;
   archived?: boolean;
