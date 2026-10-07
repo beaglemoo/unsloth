@@ -72,23 +72,47 @@ def test_malformed_queue_is_unreachable_for_display_and_busy_for_admission(body)
     assert not queue.reachable and queue.malformed and queue.busy
 
 
-def test_non_json_queue_is_unreachable_not_busy():
+def test_non_json_queue_is_uncertain_so_busy_for_admission():
     queue = run(_client(lambda r: httpx.Response(200, content = b"nope")).queue())
-    assert queue == ComfyQueue(reachable = False)
-    assert not queue.busy
+    assert queue == ComfyQueue(reachable = False, uncertain = True)
+    assert queue.busy and queue.state == "unknown"
 
 
-@pytest.mark.parametrize("failure", ["connect", "timeout", "http"])
-def test_queue_never_raises(failure):
+def _faulty(failure):
     def handler(request):
         if failure == "connect":
             raise httpx.ConnectError("offline")
         if failure == "timeout":
             raise httpx.ReadTimeout("slow")
-        return httpx.Response(500)
+        if failure == "connect-timeout":
+            raise httpx.ConnectTimeout("slow")
+        if failure == "protocol":
+            raise httpx.RemoteProtocolError("reset")
+        if failure == "json":
+            return httpx.Response(200, content = b"<html>")
+        return httpx.Response(503 if failure == "http" else 500)
 
-    queue = run(_client(handler).queue())
-    assert not queue.reachable and not queue.malformed and not queue.busy
+    return handler
+
+
+def test_connection_refused_is_confirmed_not_running():
+    queue = run(_client(_faulty("connect")).queue())
+    assert not queue.reachable and not queue.uncertain and not queue.malformed and not queue.busy
+    assert queue.state == "down"
+
+
+@pytest.mark.parametrize("failure", ["timeout", "connect-timeout", "protocol", "http", "http500", "json"])
+def test_a_server_that_may_be_running_but_gave_no_queue_is_uncertain_and_busy(failure):
+    queue = run(_client(_faulty(failure)).queue())
+    assert not queue.reachable and queue.uncertain and queue.busy
+    assert queue.state == "unknown"
+
+
+def test_queue_states():
+    idle = run(_client(lambda r: httpx.Response(200, json = {"queue_running": [], "queue_pending": []})).queue())
+    busy = run(_client(lambda r: httpx.Response(200, json = {"queue_running": [[1, "a"]], "queue_pending": []})).queue())
+    assert (idle.state, busy.state) == ("idle", "busy")
+    assert run(_client(lambda r: httpx.Response(200, json = [])).queue()).state == "unknown"
 
 
 def test_parse_queue_accepts_tuples_of_extra_data_less_entries():
