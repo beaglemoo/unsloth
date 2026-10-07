@@ -202,6 +202,26 @@ class ComfyuiClient:
     async def interrupt(self, prompt_id: Optional[str] = None) -> None:
         await self._post("/interrupt", {"prompt_id": prompt_id} if prompt_id else {})
 
+    async def cancel_job(self, prompt_id: str) -> Optional[bool]:
+        """``POST /api/jobs/{id}/cancel``: ComfyUI cancels the job atomically, whether it is pending or running.
+
+        True when it acted on a job that was pending or running, False for one that already finished or is
+        unknown, None when this ComfyUI has no such endpoint (the caller falls back to queue delete + interrupt).
+        """
+        try:
+            response = await self._post(f"/api/jobs/{quote(prompt_id, safe = '')}/cancel", {})
+        except ComfyuiError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+        try:
+            cancelled = response.json()["cancelled"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ComfyuiError("ComfyUI returned an unexpected cancel payload") from exc
+        if not isinstance(cancelled, bool):
+            raise ComfyuiError("ComfyUI returned an unexpected cancel payload")
+        return cancelled
+
     async def delete_pending(self, ids: list[str]) -> None:
         await self._post("/queue", {"delete": list(ids)})
 
