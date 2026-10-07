@@ -28,6 +28,7 @@ const LIVE = {
   ram_free: 32000000000,
   failure: null,
   helper_wanted: true,
+  job_active: true,
   peers: [{ url: "http://127.0.0.1:8188", reachable: true, busy: false, state: "idle" }],
 };
 
@@ -44,6 +45,7 @@ test("the /status comfyui block parses to camel case", () => {
     ramFree: 32000000000,
     failure: null,
     helperWanted: true,
+    jobActive: true,
     peers: [{ url: "http://127.0.0.1:8188", reachable: true, busy: false, state: "idle" }],
   });
 });
@@ -66,6 +68,7 @@ test("a down ComfyUI with a failure marker keeps the marker", () => {
   assert.deepEqual(parsed?.failure, { reason: "venv missing", ts: 5, count: 2 });
   assert.equal(parsed?.helperWanted, null);
   assert.equal(parsed?.ramFree, null);
+  assert.equal(parsed?.jobActive, true);
 });
 
 test("junk is tolerated: an unknown state reads as unknown, missing fields as empty", () => {

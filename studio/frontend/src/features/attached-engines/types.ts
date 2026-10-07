@@ -79,6 +79,8 @@ export type ComfyuiStatus = {
   failure: AttachedEngineFailure | null;
   /** The desktop shell's choice for the helper as the backend reads it; null when unknown. */
   helperWanted: boolean | null;
+  /** A Studio image job is running through ComfyUI right now (absent from an older backend). */
+  jobActive?: boolean;
   peers: ComfyuiPeer[];
 };
 
