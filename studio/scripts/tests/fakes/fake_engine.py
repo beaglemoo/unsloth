@@ -13,9 +13,17 @@ ds4 stands for the legacy DwarfStar launcher of a pre-removal app (migration tes
 
 import json
 import os
+import signal
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+# A harness that starts the tests can leave SIGTERM/SIGINT/SIGHUP ignored, and children inherit that:
+# a fake that cannot be terminated would outlive the run. Restore the defaults, and end by itself
+# after 15 minutes whatever happens.
+for _sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(_sig, signal.SIG_DFL)
+signal.alarm(900)
 
 kind, home, port = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3])
 CALLS = Path(os.environ["FAKE_LC"]) / "calls.log"
