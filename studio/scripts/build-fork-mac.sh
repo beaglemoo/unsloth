@@ -1,11 +1,11 @@
 #!/bin/bash
-# Build (and later install) the fork's Unsloth.app with the bundled oMLX engine.
+# Build (and later install) the fork's Unsloth.app with the bundled oMLX and ComfyUI engines.
 #
 #   build-fork-mac.sh [--build] [--dry-run] [--adhoc]     default phase
 #   build-fork-mac.sh --install [--dry-run]               explicit, separate phase
 #
 # build phase (touches neither /Applications, ~/.unsloth/studio nor any running app):
-#   1. build-engines-mac.sh (engine venv and engines.toml)
+#   1. build-engines-mac.sh (engine venvs and engines.toml)
 #   2. UNSLOTH_DESKTOP_BACKEND_VERSION from unsloth/_version.py in THIS repo; it must be
 #      numeric and >= 2026.8.4 (never read from the installed ~/.unsloth/studio)
 #   3. frontend build
@@ -17,8 +17,8 @@
 #   1. quit Unsloth (never killed; aborts if it does not exit within 120 s, QUIT_WAIT) and stop a
 #      surviving :8888 backend; the engines must be idle (nothing generating, loading or starting).
 #      With the engine lifetime on with_app (the default) the app's own quit first unloads the
-#      oMLX models and unregisters the
-#      helpers, so the quit can take up to about a minute
+#      oMLX models, interrupts and frees ComfyUI, and unregisters the helpers, so the quit can
+#      take up to about a minute
 #   2. build the fork wheel into a scratch dir first (uv build, else pip wheel) as a fail-fast
 #      gate: nothing is touched when the checkout does not build
 #   3. snapshot the backend venv (~/.unsloth/studio/unsloth_studio) with a clonefile copy into
@@ -32,13 +32,15 @@
 #   6. back up /Applications/Unsloth.app to ~/Applications/Unsloth-upstream-0.1.815.app.bak (once;
 #      copied to a .partial name and renamed, so an interrupted copy is never taken for a backup)
 #   7. ditto the built app to /Applications/Unsloth.app.new and codesign-verify it, then unload
-#      oMLX models, take the helper out of launchd (the helper execs from inside the
+#      oMLX models and free ComfyUI, take the helpers out of launchd (they exec from inside the
 #      bundle: `unsloth-studio --engine-helpers unregister` of the installed app, or launchctl
 #      bootout for an app from before that CLI), move the old app to
 #      ~/Applications/Unsloth-prev.app.bak, move the new one into place and register the helpers
-#      again with `--engine-helpers register` of the NEW app (macOS refuses launchctl bootstrap
-#      of a bundled helper; if register does not bring them back, use
-#      Settings > Attached engines > Engines enabled, off and on). In with_app mode the helpers
+#      that were running again, by name, with `--engine-helpers register <omlx|comfyui>` of the NEW
+#      app (a helper that was not running, such as ComfyUI before the user turns it on, is not
+#      started; macOS refuses launchctl bootstrap of a bundled helper; if register does not bring
+#      them back, use
+#      Settings > Engines > Engines enabled, off and on). In with_app mode the helpers
 #      are only registered again when Unsloth is running (`pgrep -x unsloth-studio`); otherwise
 #      they stay stopped and the app registers them at its next launch. The mode is
 #      engine_lifetime in ~/.unsloth/engines/desktop.json (with_app when missing)
@@ -375,7 +377,7 @@ rollback_install() {
       warn "the backend could not be restored; the snapshot is at $BACKEND_BACKUP"
     fi
   fi
-  helpers_start || warn "the helpers did not restart; use Settings > Attached engines > Engines enabled, off and on"
+  helpers_start || warn "the helpers did not restart; use Settings > Engines > Engines enabled, off and on"
 }
 
 install_on_exit() {
@@ -406,7 +408,7 @@ install_app() {
   run ditto "$DIST_APP" "$staged"
   run codesign --verify --deep --strict --verbose=2 "$staged"
 
-  log "unload oMLX models, then boot the helper out of launchd"
+  log "unload oMLX models and free ComfyUI, then boot the helpers out of launchd"
   engines_quiesce
   # The old bundle still contains the legacy SMAppService plist. Its CLI must unregister it
   # before this swap: a new bundle cannot address a plist it no longer contains.
@@ -425,7 +427,7 @@ install_app() {
   APP_NEW_IN_PLACE=1
 
   log "restart the helpers"
-  helpers_start || warn "the helpers did not restart; use Settings > Attached engines > Engines enabled, off and on"
+  helpers_start || warn "the helpers did not restart; use Settings > Engines > Engines enabled, off and on"
   [ "$own" = 0 ] || disarm_install_rollback
 }
 
@@ -481,7 +483,7 @@ phase_install() {
   disarm_install_rollback
   prune_backend_backups
   log "installed. The previous app is kept at $APP_PREV, the backend snapshot under $BACKUP_ROOT."
-  log "Open Unsloth: with the engine lifetime on with_app (the default) it registers and starts the engines at launch; with always, Settings > Attached engines > Engines enabled must be on."
+  log "Open Unsloth: with the engine lifetime on with_app (the default) it registers and starts the engines at launch; with always, Settings > Engines > Engines enabled must be on."
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
