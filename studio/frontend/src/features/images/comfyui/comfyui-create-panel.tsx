@@ -335,7 +335,7 @@ export function ComfyuiCreatePanel({
     useComfyPanelStore.getState().patchParams(change);
   }, []);
 
-  const useTemplate = (next: ComfyTemplate) => {
+  const applyTemplate = (next: ComfyTemplate) => {
     const store = useComfyPanelStore.getState();
     if (!store.params) return;
     store.setTemplateId(next.id);
@@ -350,7 +350,7 @@ export function ComfyuiCreatePanel({
 
   const selectTemplate = (id: string) => {
     const next = templates.find((t) => t.id === id);
-    if (next) useTemplate(next);
+    if (next) applyTemplate(next);
   };
 
   const openSettings = () => useSettingsDialogStore.getState().openDialog("attached-engines");
@@ -804,7 +804,7 @@ export function ComfyuiCreatePanel({
         templates={templates}
         onImported={(imported) => {
           setTemplates((prev) => [...prev.filter((t) => t.id !== imported.id), imported]);
-          useTemplate(imported);
+          applyTemplate(imported);
           void loadTemplates();
         }}
         onDeleted={() => void loadTemplates()}

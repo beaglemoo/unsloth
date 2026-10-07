@@ -113,8 +113,11 @@ test("an unset sampler in the record keeps the template default", () => {
 test("the page routes a ComfyUI record to the panel and any other to Studio", () => {
   const page = readSrc("features/images/images-page.tsx");
   const start = page.indexOf("const restoreFromRecipe = useCallback");
-  const wrapper = page.slice(start, page.indexOf("[restoreSettings, setEngine, setWorkflow]", start));
+  const wrapper = page.slice(start, page.indexOf("[comfyAvailable, restoreSettings, setEngine, setWorkflow]", start));
   assert.match(wrapper, /recallFromImage\(image\)/);
+  // with ComfyUI unavailable the recall is parked and the owner is told, not silently dropped
+  assert.match(wrapper, /comfyRecall && !comfyAvailable\) \{\s*\/\/[^\n]*\n\s*useComfyPanelStore\.getState\(\)\.requestRecall\(comfyRecall\);\s*toast\.info\(/);
+  assert.match(page, /prev === "generating" \? null : prev/);
   assert.match(wrapper, /setEngine\("comfyui"\)/);
   assert.match(wrapper, /requestRecall\(comfyRecall\)/);
   assert.match(wrapper, /setEngine\("studio"\);\s*restoreSettings\(image\)/);
