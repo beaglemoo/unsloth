@@ -22,6 +22,7 @@ from utils.attached_engines_settings import DEFAULT_CONFIG
 
 OWN = "http://127.0.0.1:8844"
 PEER = "http://127.0.0.1:8188"
+FAULTS = ["http", "timeout", "json"]
 
 
 class World:
@@ -208,11 +209,48 @@ def test_local_load_frees_comfyui_both_and_unloads_omlx(world):
     assert arbiter.recent_notices()[0]["actions"] == list(result.actions)
 
 
-def test_a_busy_peer_does_not_refuse_a_local_load_it_is_just_not_freed(world):
-    world.comfy[PEER]["running"] = 1
+@pytest.mark.parametrize("what", ["running", "pending"])
+@pytest.mark.parametrize("reason", ["local_load", "training"])
+def test_a_generating_peer_refuses_local_work_and_is_neither_freed_nor_interrupted(world, what, reason):
+    world.comfy[PEER][what] = 1
+    result = run(arbiter.free_for_local(reason))
+    assert result.error and PEER in result.error and "generating" in result.error
+    assert world.omlx_calls == []
+    assert world.posts(PEER) == [] and world.posts(OWN) == []
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_an_uncertain_peer_refuses_local_work(world, fault):
+    world.comfy[PEER]["fault"] = fault
+    result = run(arbiter.free_for_local("local_load"))
+    assert result.error and PEER in result.error
+    assert world.omlx_calls == [] and world.posts(PEER) == [] and world.posts(OWN) == []
+
+
+def test_a_down_peer_does_not_refuse_local_work_and_an_idle_one_is_freed(world):
+    world.comfy[PEER]["up"] = False
+    run(arbiter.free_for_local("local_load")).require_clear()
+    assert world.posts(PEER) == [] and len(world.posts(OWN)) == 1
+    world.comfy[PEER]["up"] = True
     result = run(arbiter.free_for_local("local_load"))
     result.require_clear()
-    assert world.posts(PEER) == [] and len(world.posts(OWN)) == 1
+    assert len(world.posts(PEER)) == 1 and PEER in result.actions[-1]
+
+
+def test_a_peer_busy_with_arbitration_off_never_refuses(world):
+    set_config(world, arbitrate_comfyui = False)
+    world.comfy[PEER]["running"] = 1
+    run(arbiter.free_for_local("local_load")).require_clear()
+    run(arbiter.before_omlx_use()).require_clear()
+    assert world.posts(PEER) == []
+
+
+def test_the_env_override_is_the_only_comfyui_probed_for_admission(world, monkeypatch):
+    world.comfy[PEER]["running"] = 1
+    monkeypatch.setenv("STUDIO_COMFYUI_URL", OWN)
+    run(arbiter.free_for_local("local_load")).require_clear()
+    run(arbiter.before_omlx_use()).require_clear()
+    assert all(c[0] == OWN for c in world.calls)
 
 
 def test_arbitrate_comfyui_off_never_refuses_a_local_load(world):
@@ -253,9 +291,6 @@ def test_an_oMLX_that_is_up_but_failing_to_unload_blocks_even_when_switched_off(
 
 # --- an uncertain queue answer is not an idle ComfyUI -----------------------------------------
 
-FAULTS = ["http", "timeout", "json"]
-
-
 @pytest.mark.parametrize("fault", FAULTS)
 def test_an_uncertain_own_queue_refuses_a_local_load_and_frees_nothing(world, fault):
     world.comfy[OWN]["fault"] = fault
@@ -277,7 +312,7 @@ def test_an_uncertain_own_queue_refuses_omlx_use_and_load(world, fault):
 def test_an_uncertain_answer_is_not_cached_as_idle_or_busy(world, fault):
     world.comfy[OWN]["fault"] = fault
     assert run(arbiter.before_omlx_use()).error
-    assert arbiter._busy_cache == {}
+    assert OWN not in arbiter._busy_cache
     world.comfy[OWN]["fault"] = None
     run(arbiter.before_omlx_use()).require_clear()
 
@@ -337,14 +372,40 @@ def test_omlx_use_is_not_refused_when_comfyui_arbitration_is_off(world):
     assert world.calls == []
 
 
-def test_omlx_use_ignores_a_busy_peer_and_a_down_comfyui(world):
-    world.comfy[PEER]["running"] = 1
-    run(arbiter.before_omlx_use()).require_clear()
+@pytest.mark.parametrize("what", ["running", "pending"])
+def test_omlx_use_and_load_are_refused_while_a_peer_generates(world, what):
+    world.comfy[PEER][what] = 1
+    for admit in (arbiter.before_omlx_use, arbiter.before_omlx_load):
+        arbiter._busy_cache.clear()
+        result = run(admit())
+        assert result.error and PEER in result.error and "to use oMLX" in result.error
+    assert world.posts(OWN) == [] and world.posts(PEER) == []
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_omlx_use_is_refused_next_to_an_uncertain_peer(world, fault):
+    world.comfy[PEER]["fault"] = fault
+    assert PEER in run(arbiter.before_omlx_use()).error
+
+
+def test_omlx_use_ignores_a_down_comfyui_and_a_down_peer(world):
     world.comfy[OWN]["up"] = False
+    run(arbiter.before_omlx_use()).require_clear()
+    world.comfy[PEER]["up"] = False
     arbiter._busy_cache.clear()
     run(arbiter.before_omlx_use()).require_clear()
     assert world.posts(OWN) == [] and world.posts(PEER) == []
-    assert all(c[0] == OWN for c in world.calls)
+
+
+def test_omlx_use_probes_the_peer_at_most_once_a_second_too(world, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(arbiter.time, "monotonic", lambda: clock[0])
+    run(arbiter.before_omlx_use())
+    run(arbiter.before_omlx_use())
+    assert len(world.probes(PEER)) == 1
+    world.comfy[PEER]["running"] = 1
+    clock[0] += 1.5
+    assert run(arbiter.before_omlx_use()).error
 
 
 def test_omlx_use_probes_comfyui_at_most_once_a_second(world, monkeypatch):

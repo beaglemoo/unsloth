@@ -104,30 +104,38 @@ async def free_comfyui(*, transport = None) -> list[str]:
     return await _free_urls([url for url in (own, *peers) if url], transport)
 
 
-async def _comfyui_busy(url: str, *, cached: bool = False) -> bool:
-    """True while that ComfyUI has queued or running work. Confirmed not running is not busy; an
-    unreadable or uncertain answer is, and is never cached (a blip must not pin "busy" for the TTL)."""
+async def _comfyui_state(url: str, *, cached: bool = False) -> str:
+    """``down`` (confirmed not running), ``idle``, ``busy`` or ``unknown`` (no usable answer from a server that may be up).
+    ``unknown`` is never cached: a blip must not pin an answer for the TTL."""
     now = time.monotonic()
     if cached:
         hit = _busy_cache.get(url)
         if hit is not None and now - hit[0] < _COMFYUI_BUSY_TTL_S:
             return hit[1]
     try:
-        queue = await ComfyuiClient(url).queue()
+        state = (await ComfyuiClient(url).queue()).state
     except Exception:
-        return True
-    if queue.uncertain or queue.malformed:
-        return True
-    if cached:
-        _busy_cache[url] = (now, queue.busy)
-    return queue.busy
+        return "unknown"
+    if cached and state != "unknown":
+        _busy_cache[url] = (now, state)
+    return state
 
 
-async def _own_comfyui_busy(config: Optional[AttachedEnginesConfig] = None, *, cached: bool = False) -> Optional[str]:
-    config = config or get_config()
-    own, _ = _comfyui_targets(config)
-    if own and await _comfyui_busy(own, cached = cached):
-        return "ComfyUI is generating"
+async def _comfyui_refusal(config: AttachedEnginesConfig, action: str, *, cached: bool = False) -> Optional[str]:
+    """Why Studio must not proceed with ``action`` while ComfyUI runs: Studio's own ComfyUI or any configured peer
+    (StoryPress) is generating, or did not answer its queue check. A busy server is never interrupted or freed."""
+    own, peers = _comfyui_targets(config)
+    urls = [url for url in (own, *peers) if url]
+    if not urls:
+        return None
+    states = await asyncio.gather(*(_comfyui_state(url, cached = cached) for url in urls))
+    for url, state in zip(urls, states):
+        if state not in ("busy", "unknown"):
+            continue
+        label = "ComfyUI" if url == own else f"The ComfyUI at {url}"
+        if state == "busy":
+            return f"{label} is generating; wait for or cancel the job {action}."
+        return f"{label} did not report its queue, so it may be generating; retry shortly {action}."
     return None
 
 
@@ -206,18 +214,14 @@ async def _admit(reason: str, *, local: bool) -> ArbiterResult:
                         f"Studio {busy}; finish or unload it to use oMLX."
                     )
             if not local and config.arbitrate_comfyui:
-                busy = await _own_comfyui_busy(config, cached = True)
-                if busy:
-                    raise AttachedAdmissionError(
-                        f"{busy}; wait for or cancel the job to use oMLX."
-                    )
+                refusal = await _comfyui_refusal(config, "to use oMLX", cached = True)
+                if refusal:
+                    raise AttachedAdmissionError(refusal)
             if local:
                 if config.arbitrate_comfyui:
-                    busy = await _own_comfyui_busy(config)
-                    if busy:
-                        raise AttachedAdmissionError(
-                            f"{busy}; wait for or cancel the job before loading a local model."
-                        )
+                    refusal = await _comfyui_refusal(config, "before loading a local model")
+                    if refusal:
+                        raise AttachedAdmissionError(refusal)
                 freed = await free_comfyui() or []
                 unloaded = await _unload_omlx(config)
                 actions = [f"Unloaded oMLX: {', '.join(unloaded)}"] if unloaded else []
@@ -303,9 +307,14 @@ async def before_comfyui_job() -> ArbiterResult:
                 raise AttachedAdmissionError(f"Studio {busy}; finish or unload it to run a ComfyUI job.")
             _, peers = _comfyui_targets(config)
             for peer in peers:
-                if await _comfyui_busy(peer):
+                state = await _comfyui_state(peer)
+                if state == "busy":
                     raise AttachedAdmissionError(
                         f"The ComfyUI at {peer} is generating; wait for it to finish."
+                    )
+                if state == "unknown":
+                    raise AttachedAdmissionError(
+                        f"The ComfyUI at {peer} did not report its queue, so it may be generating; retry shortly."
                     )
             unloaded = await _unload_omlx(config)
             freed = await _free_urls(peers)
