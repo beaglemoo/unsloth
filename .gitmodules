@@ -1,4 +1,4 @@
 [submodule "studio/engines/omlx"]
 	path = studio/engines/omlx
 	url = https://github.com/beaglemoo/omlx.git
-	branch = chore/merge-upstream-2026-10-03
+	branch = chore/merge-upstream-2026-10-07
