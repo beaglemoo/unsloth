@@ -8,19 +8,19 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import os
+import sys
 import time
 import weakref
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Optional
 from urllib.parse import urlsplit
 
-import httpx
-
-from core.inference.attached import AttachedEngineError
+from core.inference.attached import AttachedEngineBusy, AttachedEngineError, desktop_settings
+from core.inference.attached.comfyui_client import ComfyuiClient
 from core.inference.attached.omlx_client import OmlxClient
 from loggers import get_logger
-from utils.attached_engines_settings import get_config
+from utils.attached_engines_settings import AttachedEnginesConfig, get_config
 
 logger = get_logger(__name__)
 Reason = Literal["training", "local_load"]
@@ -62,22 +62,88 @@ def recent_notices(since: float = 0) -> list[dict]:
     return [dict(notice) for notice in _notices if notice["ts"] > since]
 
 
-async def free_comfyui(*, transport = None) -> None:
-    url = os.environ.get("STUDIO_COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
-    if not url:
-        return
+_COMFYUI_BUSY_TTL_S = 1.0
+# url -> (monotonic time, busy); only the per-chat-request probe reads it.
+_busy_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _comfyui_targets(config: AttachedEnginesConfig) -> tuple[Optional[str], list[str]]:
+    """Studio's own ComfyUI and its peers. Env ``STUDIO_COMFYUI_URL`` replaces all of them: set means only that URL, empty means none."""
+    override = os.environ.get("STUDIO_COMFYUI_URL")
+    if override is not None:
+        url = override.strip().rstrip("/")
+        return (url or None), []
+    peers = [url for url in config.comfyui_peer_urls if url != config.comfyui_url]
+    return config.comfyui_url, peers
+
+
+async def _free_if_idle(url: str, transport = None) -> bool:
+    """Free one ComfyUI's memory, only when its queue is confirmed empty. Never raises."""
     try:
-        async with httpx.AsyncClient(base_url = url, timeout = 3.0, trust_env = False, transport = transport) as client:
-            response = await client.get("/queue")
-            response.raise_for_status()
-            queue = response.json()
-            if not isinstance(queue, dict) or not isinstance(queue.get("queue_running"), list) or not isinstance(queue.get("queue_pending"), list):
-                return
-            if queue["queue_running"] or queue["queue_pending"]:
-                return
-            (await client.post("/free", json = {"unload_models": True, "free_memory": True})).raise_for_status()
+        client = ComfyuiClient(url, transport = transport)
+        queue = await client.queue()
+        if not queue.reachable or queue.busy:
+            return False
+        await client.free()
+        return True
     except Exception as exc:
         logger.info("ComfyUI memory release skipped: %s", type(exc).__name__)
+        return False
+
+
+async def _free_urls(urls: list[str], transport = None) -> list[str]:
+    if not urls:
+        return []
+    results = await asyncio.gather(*(_free_if_idle(url, transport) for url in urls))
+    return [url for url, freed in zip(urls, results) if freed]
+
+
+async def free_comfyui(*, transport = None) -> list[str]:
+    """Free Studio's ComfyUI and its peers (StoryPress) where idle; returns the URLs freed. Failures never raise."""
+    own, peers = _comfyui_targets(get_config() if os.environ.get("STUDIO_COMFYUI_URL") is None else None)
+    return await _free_urls([url for url in (own, *peers) if url], transport)
+
+
+async def _comfyui_busy(url: str, *, cached: bool = False) -> bool:
+    """True while that ComfyUI has queued or running work. Unreachable is not busy; an unreadable queue is."""
+    now = time.monotonic()
+    if cached:
+        hit = _busy_cache.get(url)
+        if hit is not None and now - hit[0] < _COMFYUI_BUSY_TTL_S:
+            return hit[1]
+    try:
+        busy = (await ComfyuiClient(url).queue()).busy
+    except Exception:
+        busy = False
+    if cached:
+        _busy_cache[url] = (now, busy)
+    return busy
+
+
+async def _own_comfyui_busy(config: Optional[AttachedEnginesConfig] = None, *, cached: bool = False) -> Optional[str]:
+    config = config or get_config()
+    own, _ = _comfyui_targets(config)
+    if own and await _comfyui_busy(own, cached = cached):
+        return "ComfyUI is generating"
+    return None
+
+
+def _studio_media_resident() -> Optional[str]:
+    """Which Studio image or video model is resident, if any. Reads loaded modules only: nothing is imported or constructed."""
+    for module_name, attribute, what in (
+        ("core.inference.diffusion", "_diffusion_backend", "has an image model loaded"),
+        ("core.inference.sd_cpp_backend", "_sd_cpp_backend", "has an image model loaded"),
+        ("core.inference.video", "_backend", "has a video model loaded"),
+    ):
+        backend = getattr(sys.modules.get(module_name), attribute, None)
+        if backend is None:
+            continue
+        try:
+            if backend.status().get("loaded"):
+                return what
+        except Exception:
+            continue
+    return None
 
 
 def _training_active() -> bool:
@@ -101,6 +167,27 @@ def _local_workload() -> Optional[str]:
     return None
 
 
+async def _unload_omlx(config: AttachedEnginesConfig) -> list[str]:
+    """Unload every oMLX model. An oMLX the user switched off in the desktop shell and that does not answer holds nothing, so it is not a failure."""
+    client = OmlxClient(config.omlx_url)
+    try:
+        return await client.unload_all()
+    except AttachedEngineBusy:
+        raise
+    except AttachedEngineError:
+        try:
+            switched_off = desktop_settings.helper_wanted("omlx") is False
+            if switched_off and not (await client.status()).reachable:
+                return []
+        except Exception:
+            pass
+        raise
+
+
+def _freed_action(urls: list[str]) -> str:
+    return f"Freed ComfyUI memory: {', '.join(urls)}"
+
+
 async def _admit(reason: str, *, local: bool) -> ArbiterResult:
     try:
         config = get_config()
@@ -115,10 +202,24 @@ async def _admit(reason: str, *, local: bool) -> ArbiterResult:
                     raise AttachedAdmissionError(
                         f"Studio {busy}; finish or unload it to use oMLX."
                     )
+            if not local and config.arbitrate_comfyui:
+                busy = await _own_comfyui_busy(config, cached = True)
+                if busy:
+                    raise AttachedAdmissionError(
+                        f"{busy}; wait for or cancel the job to use oMLX."
+                    )
             if local:
-                await free_comfyui()
-                unloaded = await OmlxClient(config.omlx_url).unload_all()
+                if config.arbitrate_comfyui:
+                    busy = await _own_comfyui_busy(config)
+                    if busy:
+                        raise AttachedAdmissionError(
+                            f"{busy}; wait for or cancel the job before loading a local model."
+                        )
+                freed = await free_comfyui() or []
+                unloaded = await _unload_omlx(config)
                 actions = [f"Unloaded oMLX: {', '.join(unloaded)}"] if unloaded else []
+                if freed:
+                    actions.append(_freed_action(freed))
                 if actions:
                     _record(reason, actions)
                 return ArbiterResult(acted = bool(actions), actions = tuple(actions))
@@ -162,6 +263,110 @@ async def free_for_local(reason: Reason) -> ArbiterResult:
 
 async def before_omlx_use() -> ArbiterResult:
     return await _admit("omlx_use", local = False)
+
+
+async def before_omlx_load() -> ArbiterResult:
+    """``before_omlx_use``, then free idle ComfyUI memory (Studio's and its peers') to make room for the load."""
+    result = await before_omlx_use()
+    if result.error or result.skipped:
+        return result
+    try:
+        if not get_config().arbitrate_comfyui:
+            return result
+        async with _lock():
+            freed = await free_comfyui() or []
+    except Exception as exc:
+        logger.info("ComfyUI memory release skipped: %s", type(exc).__name__)
+        return result
+    if not freed:
+        return result
+    actions = (*result.actions, _freed_action(freed))
+    _record("omlx_load", list(actions))
+    return replace(result, acted = True, actions = actions)
+
+
+async def before_comfyui_job() -> ArbiterResult:
+    """Admit a Studio-submitted ComfyUI job: refuse next to training or any resident Studio model or a busy peer, then make room by unloading oMLX and freeing idle peers."""
+    try:
+        config = get_config()
+        if not config.enabled:
+            return ArbiterResult(skipped = "disabled")
+        if not config.arbitrate_comfyui:
+            return ArbiterResult(skipped = "arbitration_off")
+        async with _lock():
+            cancel_comfyui_idle_free()
+            busy = _local_workload() or _studio_media_resident()
+            if busy:
+                raise AttachedAdmissionError(f"Studio {busy}; finish or unload it to run a ComfyUI job.")
+            _, peers = _comfyui_targets(config)
+            for peer in peers:
+                if await _comfyui_busy(peer):
+                    raise AttachedAdmissionError(
+                        f"The ComfyUI at {peer} is generating; wait for it to finish."
+                    )
+            unloaded = await _unload_omlx(config)
+            freed = await _free_urls(peers)
+            actions = [f"Unloaded oMLX: {', '.join(unloaded)}"] if unloaded else []
+            if freed:
+                actions.append(_freed_action(freed))
+            if actions:
+                _record("comfyui_job", actions)
+            return ArbiterResult(acted = bool(actions), actions = tuple(actions))
+    except Exception as exc:
+        message = f"Cannot free shared memory for a ComfyUI job: {exc}"
+        logger.warning("%s", message)
+        return ArbiterResult(skipped = "error", error = message)
+
+
+_IDLE_SLEEP = asyncio.sleep
+_idle_free: Optional[asyncio.Task] = None
+
+
+def cancel_comfyui_idle_free() -> None:
+    """Drop the pending idle free, from any thread."""
+    global _idle_free
+    task, _idle_free = _idle_free, None
+    if task is not None and not task.done():
+        task.get_loop().call_soon_threadsafe(task.cancel)
+
+
+async def _idle_free_after(seconds: int) -> None:
+    """After ``seconds`` of no Studio job, free Studio's ComfyUI once its queue is empty. Work in the queue pushes it back by another period."""
+    global _idle_free
+    try:
+        while True:
+            await _IDLE_SLEEP(seconds)
+            async with _lock():
+                config = get_config()
+                own, _ = _comfyui_targets(config)
+                if not own or not config.arbitrate_comfyui:
+                    return
+                queue = await ComfyuiClient(own).queue()
+                if not queue.reachable:
+                    return
+                if queue.busy:
+                    continue
+                if await _free_urls([own]):
+                    _record("comfyui_idle", [f"Freed ComfyUI memory after {seconds} s idle"])
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.info("ComfyUI idle free skipped: %s", type(exc).__name__)
+    finally:
+        if _idle_free is asyncio.current_task():
+            _idle_free = None
+
+
+def schedule_comfyui_idle_free() -> bool:
+    """(Re)start the idle timer; call after a Studio ComfyUI job, from the event loop. False when the setting is off."""
+    global _idle_free
+    cancel_comfyui_idle_free()
+    config = get_config()
+    if not config.enabled or not config.arbitrate_comfyui or config.comfyui_idle_free_s <= 0:
+        return False
+    _idle_free = asyncio.get_running_loop().create_task(_idle_free_after(config.comfyui_idle_free_s))
+    return True
 
 
 def free_for_local_from_thread(reason: Reason, loop: asyncio.AbstractEventLoop) -> ArbiterResult:
