@@ -14,6 +14,10 @@ function settings(
     omlxUrl: "http://127.0.0.1:8843",
     scanDenylist: [],
     arbitrateLocalLoads: true,
+    comfyuiUrl: "http://127.0.0.1:8844",
+    comfyuiPeerUrls: [],
+    arbitrateComfyui: true,
+    comfyuiIdleFreeS: 300,
     ...patch,
   };
 }

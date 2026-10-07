@@ -893,7 +893,7 @@ export const zhCN = {
       chat: "聊天",
       connections: "连接",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "引擎",
       remoteLan: "远程与局域网",
       about: "关于",
       voice: "语音",

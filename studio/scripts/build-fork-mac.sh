@@ -240,6 +240,8 @@ build_fork_wheel() {
     || die "$WHEEL does not contain the fork marker studio/_fork.py"
   grep -q 'studio/fork-pins.toml' <<<"$listing" \
     || die "$WHEEL does not contain studio/fork-pins.toml"
+  grep -q 'studio/backend/core/inference/attached/comfyui_templates/qwen-image-2.1-t2i.json' <<<"$listing" \
+    || die "$WHEEL does not contain the shipped ComfyUI template qwen-image-2.1-t2i.json"
   log "fork wheel built: $WHEEL"
 }
 

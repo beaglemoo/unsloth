@@ -895,7 +895,7 @@ export const ko = {
       chat: "채팅",
       connections: "연결",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "엔진",
       remoteLan: "원격 및 LAN",
       about: "정보",
       data: "데이터",

@@ -4895,6 +4895,11 @@ class GalleryImage(BaseModel):
         None, description = "Localized edit convention used: annotate, paint or mask"
     )
     created_at: float = Field(..., description = "Creation time (epoch seconds)")
+    # Set on images made by an attached engine (the ComfyUI template that ran, with its sampler and scheduler).
+    engine: Optional[str] = Field(None, description = "Attached engine that produced it, e.g. comfyui")
+    comfyui_template: Optional[str] = Field(None, description = "ComfyUI template id that produced it")
+    sampler: Optional[str] = Field(None, description = "ComfyUI sampler_name used")
+    scheduler: Optional[str] = Field(None, description = "ComfyUI scheduler used")
     # Library state, not recipe: stored beside the PNG, so older files simply read as unset.
     pinned: bool = Field(False, description = "Pinned to the front of the gallery")
     archived: bool = Field(False, description = "Moved to the archived shelf, hidden from the strip")

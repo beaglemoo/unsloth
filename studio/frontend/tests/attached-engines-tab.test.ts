@@ -60,7 +60,7 @@ function status(
   };
 }
 
-test("the oMLX tab (id attached-engines) is a registered settings tab, owner-only", () => {
+test("the Engines tab (id attached-engines) is a registered settings tab, owner-only", () => {
   assert.ok((SETTINGS_TABS as readonly string[]).includes("attached-engines"));
   assert.equal(settingsTabVisible("attached-engines", true), true);
   assert.equal(settingsTabVisible("attached-engines", false), false);
@@ -75,7 +75,7 @@ test("the dialog loads, lists, labels and indexes the tab", () => {
   assert.match(dialog, /"attached-engines": null/);
   assert.match(src("components/command-palette.tsx"), /"attached-engines": "settings\.tabs\.attachedEngines"/);
   assert.match(src("features/settings/settings-search.ts"), /"attached-engines": \[/);
-  assert.match(src("i18n/locales/en.ts"), /attachedEngines: "oMLX"/);
+  assert.match(src("i18n/locales/en.ts"), /attachedEngines: "Engines"/);
 });
 
 test("the engine pieces moved off the API Keys and Resources tabs onto the new one", () => {
@@ -92,9 +92,51 @@ test("the engine pieces moved off the API Keys and Resources tabs onto the new o
   assert.match(tab, /<OmlxDashboardSection \/>/);
 });
 
+test("the tab adds the ComfyUI section and its web UI after the oMLX sections, and keeps the helper status fresh", () => {
+  const tab = src("features/settings/tabs/attached-engines-tab.tsx");
+  const order = [
+    "<AttachedEnginesSettingsSection />",
+    "<AttachedEnginesPanel />",
+    "<AttachedEnginesContextSection />",
+    "<OmlxDashboardSection />",
+    "<ComfyuiSection />",
+    "<ComfyuiWebUiSection />",
+  ].map((tag) => tab.indexOf(tag));
+  assert.ok(order.every((at) => at > 0), String(order));
+  assert.deepEqual([...order].sort((a, b) => a - b), order);
+  assert.match(tab, /useEngineHelpers\(\);/);
+  assert.match(tab, /oMLX and ComfyUI run beside Studio/);
+  assert.match(src("features/attached-engines/engines-panel.tsx"), /title="oMLX"/);
+});
+
+test("the ComfyUI section follows the flag, offers Unload and shows the queue, models and settings", () => {
+  const section = src("features/attached-engines/comfyui-section.tsx");
+  assert.match(section, /if \(!enabled\) return null;/);
+  // hooks are all called before the early return
+  assert.ok(section.indexOf("useEffect(") < section.indexOf("if (!enabled) return null;"));
+  assert.match(section, /label="Unload models"/);
+  assert.match(section, /disabled=\{!rule\.enabled \|\| unloading\}/);
+  assert.match(section, /freeResultMessage\(result\)/);
+  assert.match(section, /<QueueRows rows=\{queue\} onChange=\{loadQueue\} \/>/);
+  assert.match(section, /<ModelsList reachable=/);
+  assert.match(section, /label="ComfyUI URL"/);
+  assert.match(section, /label="Arbitrate ComfyUI memory"/);
+  assert.match(section, /label="Free ComfyUI after idle \(s\)"/);
+  // one poller: the section reads the shared status, it never starts its own timer
+  assert.doesNotMatch(section, /setInterval|createAttachedPoller/);
+  assert.match(section, /Interrupt/);
+});
+
+test("the ComfyUI settings reach the settings API", () => {
+  const api = src("features/attached-engines/api.ts");
+  for (const key of ["comfyui_url", "comfyui_peer_urls", "arbitrate_comfyui", "comfyui_idle_free_s"]) {
+    assert.match(api, new RegExp(`"${key}"`));
+  }
+});
+
 test("with the flag off only the enable toggle is rendered", () => {
   const section = src("features/attached-engines/settings-section.tsx");
-  const enable = section.indexOf('label="Enable oMLX"');
+  const enable = section.indexOf('label="Enable engines"');
   const gate = section.indexOf("settings?.enabled ? (");
   assert.ok(enable > 0 && gate > enable);
   // everything else sits behind the flag, the Engines enabled switch included

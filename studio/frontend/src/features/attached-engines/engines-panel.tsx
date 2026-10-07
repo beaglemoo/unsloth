@@ -14,6 +14,7 @@ import {
   useAttachedEnginesStore,
 } from "./attached-engines-store";
 import { formatCountdown, remainingNow } from "./attached-active";
+import { describeEngineFailure } from "./engine-errors";
 import { failureMessage } from "./failure";
 import {
   groupOmlxModels,
@@ -189,7 +190,10 @@ export function AttachedEnginesPanel() {
     setBusy(key);
     void action()
       .catch((error) => {
-        toast.error(error instanceof Error ? error.message : failure);
+        // A busy engine (503, Retry-After) is a retry hint, not an error.
+        const shown = describeEngineFailure(error, failure);
+        if (shown.kind === "busy") toast.info(shown.message);
+        else toast.error(shown.message);
       })
       .then(() => refreshAttachedStatus())
       .finally(() => setBusy(null));
@@ -197,8 +201,8 @@ export function AttachedEnginesPanel() {
 
   return (
     <SettingsSection
-      title="Engines"
-      description="Live state of the attached oMLX engine."
+      title="oMLX"
+      description="Live state of the oMLX engine."
     >
       {status === null ? (
         <SettingsRow label="Engines" description="Checking engine status." />

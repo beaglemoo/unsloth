@@ -899,7 +899,7 @@ export const fr = {
       chat: "Discussion",
       connections: "Connexions",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "Moteurs",
       remoteLan: "Accès distant et LAN",
       about: "À propos",
       data: "Données",
