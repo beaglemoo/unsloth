@@ -2,6 +2,11 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { create } from "zustand";
+import {
+  type ImageEngine,
+  persistEngine,
+  readStoredEngine,
+} from "../comfyui/engine-choice";
 import type { WorkflowId } from "../workflows";
 
 export interface AdapterDeployRequest {
@@ -16,6 +21,9 @@ interface ImageWorkflowState {
   workflow: WorkflowId;
   pageMode: "create" | "train";
   supported: WorkflowId[] | null;
+  /** Which engine Create generates with; remembered. The page only honours "comfyui" while ComfyUI is available. */
+  engine: ImageEngine;
+  setEngine: (engine: ImageEngine) => void;
   navExpanded: boolean;
   setNavExpanded: (expanded: boolean) => void;
   setWorkflow: (id: WorkflowId) => void;
@@ -34,6 +42,11 @@ export const useImageWorkflowStore = create<ImageWorkflowState>((set, get) => ({
   pageMode: "create",
   supported: null,
   navExpanded: false,
+  engine: readStoredEngine(),
+  setEngine: (engine) => {
+    persistEngine(engine);
+    set({ engine });
+  },
   setNavExpanded: (navExpanded) => set({ navExpanded }),
   setWorkflow: (workflow) => set({ workflow, pageMode: "create" }),
   setPageMode: (pageMode) => set({ pageMode }),
