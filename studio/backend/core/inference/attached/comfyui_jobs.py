@@ -118,6 +118,8 @@ class _State:
     # Set once the job is confirmed gone from ComfyUI's queue after a cancel (ComfyUI sends no message for a removed pending job).
     cancel_confirmed: bool = False
     admitted: bool = False
+    # Studio's claim on the shared memory, registered by the arbiter at admission; released with the job.
+    hold: Optional[arbiter.ComfyJobHold] = None
     # True once ComfyUI no longer holds the prompt: it finished, failed, was interrupted, or was cancelled and confirmed gone.
     terminal: bool = False
     stage: str = "starting"
@@ -255,6 +257,9 @@ class ComfyJobRunner:
                 self._release(st)
 
     def _release(self, st: _State) -> None:
+        """Let go of the job: the memory claim first, then the runner; the idle timer restarts last."""
+        if st.hold is not None:
+            st.hold.release()
         if self._state is st:
             self._state = None
             self._client = None
@@ -300,7 +305,8 @@ class ComfyJobRunner:
         if absent:
             raise ComfyModelsMissing(absent, configured_model_dirs())
 
-        admission = await arbiter.before_comfyui_job()
+        st.hold = arbiter.new_comfyui_hold()
+        admission = await arbiter.before_comfyui_job(st.hold)
         admission.require_clear()
         st.admitted = True
         if st.cancel_requested:
