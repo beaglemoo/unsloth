@@ -5,14 +5,19 @@ import { AttachedEnginesContextSection } from "@/features/attached-engines/engin
 import {
   AttachedEnginesPanel,
   AttachedEnginesSettingsSection,
+  ComfyuiSection,
+  ComfyuiWebUiSection,
   OmlxDashboardSection,
 } from "@/features/attached-engines";
+import { useEngineHelpers } from "@/features/attached-engines/use-engine-helpers";
 import { useT } from "@/i18n";
 
-/** oMLX in one place: toggles and URL, live state, load and unload, context length.
+/** The engines in one place: shared toggles, oMLX (URL, live state, load and unload, context
+ *  length, dashboard), then ComfyUI (switch, state, queue, models, web UI).
  *  Owner-only (see settings-tab-visibility). While the feature flag is off only the enable toggle shows. */
 export function AttachedEnginesTab() {
   const t = useT();
+  useEngineHelpers();
 
   return (
     <div className="settings-page">
@@ -24,8 +29,8 @@ export function AttachedEnginesTab() {
           {t("settings.tabs.attachedEngines")}
         </h1>
         <p className="text-xs text-muted-foreground">
-          oMLX runs beside Studio. Its models appear in the chat
-          model picker; they are managed here rather than in Connections.
+          oMLX and ComfyUI run beside Studio. The oMLX models appear in the chat
+          model picker; the engines are managed here rather than in Connections.
         </p>
       </header>
 
@@ -33,6 +38,8 @@ export function AttachedEnginesTab() {
       <AttachedEnginesPanel />
       <AttachedEnginesContextSection />
       <OmlxDashboardSection />
+      <ComfyuiSection />
+      <ComfyuiWebUiSection />
     </div>
   );
 }

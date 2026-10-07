@@ -2,6 +2,8 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 export { AttachedEnginesPanel } from "./engines-panel";
+export { ComfyuiSection } from "./comfyui-section";
+export { ComfyuiWebUiSection } from "./comfyui-webui-section";
 export { OmlxDashboardSection } from "./omlx-dashboard-section";
 export { AttachedEnginesSettingsSection } from "./settings-section";
 export { AttachedEnginesMount } from "./use-attached-engines";
