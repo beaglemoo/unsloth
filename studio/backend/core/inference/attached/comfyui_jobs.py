@@ -383,8 +383,8 @@ class ComfyJobRunner:
             wait = max(0.0, min(due, deadline) - now)
             if ws is not None:
                 try:
-                    # Wake at least twice a second so a cancel that removed a queued job (no ws message) lands promptly.
-                    raw = await asyncio.wait_for(ws.recv(), timeout = min(wait, 0.5))
+                    # Wake at least twice a second so a cancel that removed a queued job (no ws message) lands promptly. A zero timeout would cancel recv before it reads a ready frame.
+                    raw = await asyncio.wait_for(ws.recv(), timeout = max(min(wait, 0.5), 0.01))
                 except asyncio.TimeoutError:
                     raw = None
                 except Exception as exc:
