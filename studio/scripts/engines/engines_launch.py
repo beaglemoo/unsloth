@@ -173,6 +173,29 @@ def base_env() -> dict[str, str]:
     return env
 
 
+def reject_owned_flags(label: str, args: list, owned: tuple[str, ...]) -> None:
+    """Fatal when extra_args sets a flag the launcher owns (binding, exposure, data layout).
+
+    Those flags are fixed from the validated config keys; ComfyUI's and oMLX's argparse honour the
+    LAST occurrence, so an extra_args entry would silently override the loopback and port checks.
+    argparse also accepts any unambiguous prefix (--lis, --po) and --flag=value, so each entry is
+    reduced to its flag name and rejected when it is a prefix (3+ characters) of an owned flag.
+    """
+    for arg in args:
+        text = str(arg)
+        if not text.startswith("--"):
+            continue
+        name = (text.split("=", 1)[0].split() or [""])[0]
+        if len(name) < 3:
+            continue
+        for flag in owned:
+            if flag.startswith(name):
+                die(
+                    f"[{label.lower()}] extra_args sets {text!r}, which overrides {flag}; the launcher owns "
+                    f"{', '.join(owned)} (use the [{label.lower()}] config keys)"
+                )
+
+
 def omlx(cfg: dict) -> tuple[list[str], dict[str, str], str | None]:
     section = cfg.get("omlx", {})
     python = HOME / "omlx" / "bin" / "python"
@@ -181,6 +204,7 @@ def omlx(cfg: dict) -> tuple[list[str], dict[str, str], str | None]:
     base_path = expand(section.get("base_path", "~/.omlx-tuned"))
     port = int(section.get("port", 8843))
     require_free_port(port, "oMLX", section.get("host"))
+    reject_owned_flags("oMLX", section.get("extra_args", []), OMLX_OWNED_FLAGS)
     argv = [str(python), "-m", "omlx.cli", "serve", "--base-path", base_path, "--port", str(port)]
     if section.get("host"):
         argv += ["--host", str(section["host"])]
@@ -193,6 +217,12 @@ def omlx(cfg: dict) -> tuple[list[str], dict[str, str], str | None]:
 
 
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+# Flags the launcher sets from validated config keys; extra_args may not repeat them (see
+# reject_owned_flags). ComfyUI: bind address, port, TLS and CORS exposure, data dir (cli_args.py).
+COMFYUI_OWNED_FLAGS = (
+    "--listen", "--port", "--tls-keyfile", "--tls-certfile", "--enable-cors-header", "--base-directory",
+)
+OMLX_OWNED_FLAGS = ("--host", "--port", "--base-path")
 # Folder keys written for every shared model dir; each value is a newline-separated list of
 # sub-folders of base_path (ComfyUI's extra_config splits it on a newline).
 MODEL_FOLDERS = {
@@ -247,6 +277,7 @@ def comfyui(cfg: dict) -> tuple[list[str], dict[str, str], str | None]:
     host = str(section.get("host", "127.0.0.1"))
     if host not in LOOPBACK_HOSTS:
         die(f"[comfyui] host {host!r} is not loopback; ComfyUI has no authentication")
+    reject_owned_flags("ComfyUI", section.get("extra_args", []), COMFYUI_OWNED_FLAGS)
     port = int(section.get("port", 8844))
     require_free_port(port, "ComfyUI", host)
     data_dir = Path(expand(section["data_dir"])) if section.get("data_dir") else HOME / "comfyui-data"
