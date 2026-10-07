@@ -350,6 +350,9 @@ async def load_video_model_gated(
     from utils.native_path_leases import redact_native_paths
 
     backend = get_video_backend()
+    from core.inference.attached.arbiter import new_media_hold
+
+    media_hold = new_media_hold("video")
     try:
         # Resolve the load kind once (gguf / single_file / pipeline) so validation and the load agree; a bad kind raises
         # here, so a 400.
@@ -461,7 +464,8 @@ async def load_video_model_gated(
         # Last refusal point, before anything is torn down: unload oMLX and free ComfyUI when attached-engine arbitration is enabled.
         from routes.inference import _admit_attached_local_load
 
-        await _admit_attached_local_load()
+        # The hold keeps oMLX out until begin_load has published the backend's loading state (released in the finally below).
+        await _admit_attached_local_load(media_hold)
         from core.inference.video_minimax_h3 import is_h3_native
 
         if is_h3_native(fam, kind):
@@ -507,6 +511,8 @@ async def load_video_model_gated(
     except RuntimeError as exc:
         # A video load is already in progress.
         raise HTTPException(status_code = 409, detail = str(exc))
+    finally:
+        media_hold.release()
 
 
 @router.get("/video/load-progress", response_model = VideoLoadProgressResponse)

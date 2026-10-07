@@ -11895,10 +11895,16 @@ def _attached_local_memory_active() -> bool:
     )
 
 
-async def _admit_attached_local_load():
+async def _admit_attached_local_load(media_hold = None):
+    """``media_hold``: an image or video load passes its arbiter claim, taken under the arbiter lock, so oMLX stays
+    refused from admission until the backend publishes its own loading state."""
     from core.inference.attached.arbiter import free_for_local
 
-    result = await free_for_local("local_load")
+    result = await (
+        free_for_local("local_load", media_hold = media_hold)
+        if media_hold is not None
+        else free_for_local("local_load")
+    )
     if result.error:
         raise HTTPException(status_code = 503, detail = result.error,
                             headers = {"Retry-After": "15"})
@@ -46174,6 +46180,9 @@ async def load_diffusion_model_gated(
     from utils.native_path_leases import redact_native_paths
 
     backend = get_diffusion_backend()
+    from core.inference.attached.arbiter import new_media_hold
+
+    media_hold = new_media_hold("image")
     try:
         # Resolve the load kind once (gguf / single_file / pipeline) so validation, engine selection and the load agree. A bad kind raises here, so a 400.
         kind = resolve_model_kind(request.gguf_filename, request.model_kind)
@@ -46298,7 +46307,8 @@ async def load_diffusion_model_gated(
         # begin_load signals whatever generation is running, so guard on every device, not just GPU.
         require_no_foreign_generations()
         # Last refusal point, before the engine switch tears anything down: unload oMLX and free ComfyUI when attached-engine arbitration is enabled.
-        await _admit_attached_local_load()
+        # The hold keeps oMLX out until begin_load has published the backend's loading state (released in the finally below).
+        await _admit_attached_local_load(media_hold)
         if off_torch is not None and pending_name == ENGINE_SD_CPP:
             await asyncio.to_thread(_unload_native_video_sharing_the_sd_cpp_tree)
         # Pick the engine for this host (diffusers on GPU, native sd.cpp otherwise), installing sd-cli if needed, BEFORE evicting chat.
@@ -46437,6 +46447,8 @@ async def load_diffusion_model_gated(
     except RuntimeError as exc:
         # A load is already in progress.
         raise HTTPException(status_code = 409, detail = str(exc))
+    finally:
+        media_hold.release()
 
 
 def _live_preview_kwarg(generate: Any, requested: Optional[bool]) -> dict:
