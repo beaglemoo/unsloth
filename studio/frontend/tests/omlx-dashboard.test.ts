@@ -19,22 +19,23 @@ const src = (path: string) =>
 const rust = (path: string) =>
   readFileSync(new URL(`../../src-tauri/src/${path}`, import.meta.url), "utf8");
 
-test("the settings tab is labelled oMLX everywhere the user sees it, with its id unchanged", () => {
+test("the settings tab is labelled Engines everywhere the user sees it, with its id unchanged", () => {
   assert.ok((SETTINGS_TABS as readonly string[]).includes("attached-engines"));
-  assert.match(src("i18n/locales/en.ts"), /attachedEngines: "oMLX"/);
+  assert.match(src("i18n/locales/en.ts"), /attachedEngines: "Engines"/);
   const dialog = src("features/settings/settings-dialog.tsx");
   assert.match(dialog, /id: "attached-engines",\s+labelKey: "settings\.tabs\.attachedEngines"/);
-  for (const file of ["ar", "de", "en", "es", "fr", "hi", "it", "ja", "ko", "pt-br", "ru", "zh-CN"]) {
-    assert.match(src(`i18n/locales/${file}.ts`), /attachedEngines: "oMLX"/, file);
+  for (const file of ["ar", "de", "en", "es", "fr", "he", "hi", "it", "ja", "ko", "pt-br", "ru", "sv", "zh-CN"]) {
+    assert.doesNotMatch(src(`i18n/locales/${file}.ts`), /attachedEngines: "oMLX"/, file);
+    assert.match(src(`i18n/locales/${file}.ts`), /attachedEngines: "[^"]+"/, file);
   }
   assert.match(
     rust("app_menu.rs"),
-    /Row::Action\("settings-attached-engines", "oMLX", ""\)/,
+    /Row::Action\("settings-attached-engines", "Engines", ""\)/,
   );
   assert.doesNotMatch(rust("app_menu.rs"), /"Attached engines"/);
   assert.match(
     src("features/chat/attached-connections.ts"),
-    /ATTACHED_CONNECTIONS_LINK = "oMLX"/,
+    /ATTACHED_CONNECTIONS_LINK = "Engines"/,
   );
 });
 

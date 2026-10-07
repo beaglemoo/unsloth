@@ -60,7 +60,7 @@ test("the input array is not mutated, so the picker keeps its attached rows", ()
   assert.equal(all.length, 2);
 });
 
-test("a request to configure an attached connection lands on the oMLX tab", () => {
+test("a request to configure an attached connection lands on the Engines tab", () => {
   const all = [omlx, openai];
   assert.equal(settingsTabForConnection(all, "attachedomlx0001"), "attached-engines");
   assert.equal(settingsTabForConnection(all, "p1"), "connections");
@@ -71,7 +71,7 @@ test("a request to configure an attached connection lands on the oMLX tab", () =
 test("the notice wording names the engine and the tab", () => {
   assert.equal(
     `${ATTACHED_CONNECTIONS_NOTICE} ${ATTACHED_CONNECTIONS_LINK}`,
-    "oMLX is managed in Settings > oMLX",
+    "oMLX is managed in Settings > Engines",
   );
 });
 

@@ -1290,7 +1290,7 @@ export const he = {
       connections: "חיבורים",
       data: "נתונים",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "מנועים",
       remoteLan: "שליטה מרחוק ורשת מקומית",
       agents: "סוכנים",
       keyboardShortcuts: "קיצורי דרך",
