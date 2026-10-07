@@ -30,8 +30,8 @@ class World:
     def __init__(self):
         self.calls: list[tuple[str, str, str]] = []
         self.comfy = {
-            OWN: dict(up = True, running = 0, pending = 0, malformed = False),
-            PEER: dict(up = True, running = 0, pending = 0, malformed = False),
+            OWN: dict(up = True, running = 0, pending = 0, malformed = False, fault = None),
+            PEER: dict(up = True, running = 0, pending = 0, malformed = False, fault = None),
         }
         self.omlx_calls: list[str] = []
         self.omlx_error: Exception | None = None
@@ -49,6 +49,12 @@ class World:
             if not state["up"]:
                 raise httpx.ConnectError("refused", request = request)
             if request.url.path == "/queue" and request.method == "GET":
+                if state["fault"] == "http":
+                    return httpx.Response(503)
+                if state["fault"] == "timeout":
+                    raise httpx.ReadTimeout("slow", request = request)
+                if state["fault"] == "json":
+                    return httpx.Response(200, content = b"<html>")
                 if state["malformed"]:
                     return httpx.Response(200, json = {"queue_running": "?"})
                 item = lambda n: [n, f"p{n}", {}, {}, []]  # noqa: E731
@@ -243,6 +249,66 @@ def test_an_oMLX_that_is_up_but_failing_to_unload_blocks_even_when_switched_off(
     world.omlx_error = AttachedEngineError("oMLX models are still loaded or loading: x")
     world.omlx_reachable = True
     assert run(arbiter.free_for_local("local_load")).error
+
+
+# --- an uncertain queue answer is not an idle ComfyUI -----------------------------------------
+
+FAULTS = ["http", "timeout", "json"]
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_an_uncertain_own_queue_refuses_a_local_load_and_frees_nothing(world, fault):
+    world.comfy[OWN]["fault"] = fault
+    result = run(arbiter.free_for_local("local_load"))
+    assert result.error and "ComfyUI" in result.error
+    assert world.omlx_calls == [] and world.posts(OWN) == [] and world.posts(PEER) == []
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_an_uncertain_own_queue_refuses_omlx_use_and_load(world, fault):
+    world.comfy[OWN]["fault"] = fault
+    assert run(arbiter.before_omlx_use()).error
+    arbiter._busy_cache.clear()
+    assert run(arbiter.before_omlx_load()).error
+    assert world.posts(OWN) == [] and world.posts(PEER) == []
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_an_uncertain_answer_is_not_cached_as_idle_or_busy(world, fault):
+    world.comfy[OWN]["fault"] = fault
+    assert run(arbiter.before_omlx_use()).error
+    assert arbiter._busy_cache == {}
+    world.comfy[OWN]["fault"] = None
+    run(arbiter.before_omlx_use()).require_clear()
+
+
+def test_a_cached_idle_answer_is_not_overwritten_by_a_later_fault_within_the_ttl(world):
+    run(arbiter.before_omlx_use()).require_clear()
+    world.comfy[OWN]["fault"] = "http"
+    run(arbiter.before_omlx_use()).require_clear()
+    assert len(world.probes(OWN)) == 1
+
+
+def test_connection_refused_is_not_running_and_admits(world):
+    world.comfy[OWN]["up"] = False
+    run(arbiter.before_omlx_use()).require_clear()
+    result = run(arbiter.free_for_local("local_load"))
+    result.require_clear()
+    assert result.actions == ("Unloaded oMLX: chat", f"Freed ComfyUI memory: {PEER}")
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_free_comfyui_never_frees_an_uncertain_server(world, fault):
+    world.comfy[OWN]["fault"] = fault
+    assert run(arbiter.free_comfyui()) == [PEER]
+    assert world.posts(OWN) == []
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_comfyui_job_is_refused_next_to_an_uncertain_peer(world, fault):
+    world.comfy[PEER]["fault"] = fault
+    assert run(arbiter.before_comfyui_job()).error
+    assert world.omlx_calls == [] and world.posts(PEER) == []
 
 
 # --- oMLX use and load ------------------------------------------------------------------------
@@ -504,6 +570,23 @@ def test_idle_free_waits_another_period_while_work_is_queued(idle):
         await _settle()
         assert idle.posts(OWN) == [] and len(idle.sleeps) == 2
         idle.comfy[OWN]["running"] = 0
+        idle.gate["release"].set()
+        await _settle()
+        assert len(idle.posts(OWN)) == 1
+
+    run(go())
+
+
+def test_idle_free_does_not_free_an_uncertain_server_and_tries_again_later(idle):
+    async def go():
+        idle.gate["release"] = asyncio.Event()
+        idle.comfy[OWN]["fault"] = "http"
+        arbiter.schedule_comfyui_idle_free()
+        await _settle()
+        idle.gate["release"].set()
+        await _settle()
+        assert idle.posts(OWN) == [] and len(idle.sleeps) == 2
+        idle.comfy[OWN]["fault"] = None
         idle.gate["release"].set()
         await _settle()
         assert len(idle.posts(OWN)) == 1
