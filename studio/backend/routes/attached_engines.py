@@ -19,9 +19,11 @@ from core.inference.attached import (
     AttachedEngineError,
 )
 from core.inference.attached import arbiter, desktop_settings
+from core.inference.attached.comfyui_jobs import get_runner
 from core.inference.attached.comfyui_client import ComfyuiClient, ComfyuiError, system_version
 from core.inference.attached.omlx_client import OmlxClient, OmlxContext
 from loggers import get_logger
+from routes.attached_comfyui import router as _generation_router
 from routes.provider_credentials import provider_config_guard
 from storage import providers_db
 from utils.attached_engines_settings import AttachedEnginesConfig, get_config
@@ -114,6 +116,7 @@ async def _probe_comfyui(config: AttachedEnginesConfig) -> dict:
         "ram_free": system.get("ram_free"),
         "failure": _engine_failure("comfyui"),
         "helper_wanted": desktop_settings.helper_wanted("comfyui"),
+        "job_active": get_runner().is_running(),
         "peers": list(peers),
     }
 
@@ -423,4 +426,5 @@ async def comfyui_models():
     return {"folders": dict(zip(COMFYUI_MODEL_FOLDERS, lists))}
 
 
+_gated.include_router(_generation_router)
 router.include_router(_gated)
