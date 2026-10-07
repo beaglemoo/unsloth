@@ -60,7 +60,7 @@ function status(
   };
 }
 
-test("the oMLX tab (id attached-engines) is a registered settings tab, owner-only", () => {
+test("the Engines tab (id attached-engines) is a registered settings tab, owner-only", () => {
   assert.ok((SETTINGS_TABS as readonly string[]).includes("attached-engines"));
   assert.equal(settingsTabVisible("attached-engines", true), true);
   assert.equal(settingsTabVisible("attached-engines", false), false);
@@ -75,7 +75,7 @@ test("the dialog loads, lists, labels and indexes the tab", () => {
   assert.match(dialog, /"attached-engines": null/);
   assert.match(src("components/command-palette.tsx"), /"attached-engines": "settings\.tabs\.attachedEngines"/);
   assert.match(src("features/settings/settings-search.ts"), /"attached-engines": \[/);
-  assert.match(src("i18n/locales/en.ts"), /attachedEngines: "oMLX"/);
+  assert.match(src("i18n/locales/en.ts"), /attachedEngines: "Engines"/);
 });
 
 test("the engine pieces moved off the API Keys and Resources tabs onto the new one", () => {
