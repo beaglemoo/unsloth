@@ -283,6 +283,11 @@ export interface GalleryImage {
   reference_image_count?: number | null;
   reference_resolution?: number | null;
   localized_edit?: LocalizedEditMode | null;
+  // Set on images made by an attached engine (ComfyUI): the engine, the template that ran and its sampler/scheduler.
+  engine?: string | null;
+  comfyui_template?: string | null;
+  sampler?: string | null;
+  scheduler?: string | null;
   created_at: number;
   // Library state, not recipe: stored beside the PNG, absent on records written before this existed.
   pinned?: boolean;
