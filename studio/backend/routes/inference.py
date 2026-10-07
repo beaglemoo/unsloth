@@ -11874,14 +11874,25 @@ def _loaded_slot_ident() -> Optional[str]:
 
 
 def _attached_local_memory_active() -> bool:
+    """True while Studio holds a local model: the primary, any kept extra slot (resident,
+    loading or stuck), or a load in flight. A stuck slot counts even when its worker is gone,
+    because its server was never confirmed stopped."""
     from core.inference.llama_cpp import chat_load_active
 
-    llama = get_llama_cpp_backend()
-    backend = _peek_inference_backend()
-    return bool(llama.is_active or chat_load_active()
-                or getattr(backend, "_managed_engine", None) is not None
-                or getattr(backend, "active_model_name", None)
-                or tuple(getattr(backend, "loading_models", ()) or ()))
+    def primary_active() -> bool:
+        # Routed to the primary: a task serving an extra slot would otherwise read that slot.
+        llama = get_llama_cpp_backend()
+        backend = _peek_inference_backend()
+        return bool(llama.is_active or chat_load_active()
+                    or getattr(backend, "_managed_engine", None) is not None
+                    or getattr(backend, "active_model_name", None)
+                    or tuple(getattr(backend, "loading_models", ()) or ()))
+
+    return bool(
+        model_slots.in_slot(None, primary_active)
+        or model_slots.resident()
+        or model_slots.any_loading()
+    )
 
 
 async def _admit_attached_local_load():

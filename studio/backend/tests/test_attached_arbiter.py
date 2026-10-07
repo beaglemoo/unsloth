@@ -178,6 +178,98 @@ def test_local_memory_probe_covers_loaded_loading_and_managed_engines(monkeypatc
     assert probe(_managed_engine = object())
 
 
+def _extra_slot(*, active_model = None, llama_active = False, loading_models = ()):
+    from types import SimpleNamespace as NS
+
+    return NS(
+        llama = NS(is_active = llama_active),
+        orchestrator = NS(active_model_name = active_model, loading_models = loading_models),
+    )
+
+
+@pytest.fixture
+def idle_primary(monkeypatch):
+    import routes.inference as inf_mod
+    import core.inference.llama_cpp as llama_mod
+    from core.inference import model_slots
+    from types import SimpleNamespace as NS
+
+    monkeypatch.setattr(inf_mod, "get_llama_cpp_backend", lambda: NS(is_active = False))
+    monkeypatch.setattr(llama_mod, "chat_load_active", lambda: False)
+    monkeypatch.setattr(inf_mod, "_peek_inference_backend", lambda: None)
+    monkeypatch.setattr(model_slots, "slots", [])
+    monkeypatch.setattr(model_slots, "stuck", [])
+    monkeypatch.setattr(model_slots, "loading", None)
+    monkeypatch.setattr(arbiter, "_training_active", lambda: False)
+    return model_slots
+
+
+def _extra_slot_states():
+    return {
+        "resident": lambda ms: ms.slots.append(_extra_slot(active_model = "kept")),
+        "resident_cpu_llama": lambda ms: ms.slots.append(_extra_slot(llama_active = True)),
+        "idle_but_retained": lambda ms: ms.slots.append(_extra_slot()),
+        "loading": lambda ms: setattr(ms, "loading", (_extra_slot(), "loading-model")),
+        "slot_orchestrator_loading": lambda ms: ms.slots.append(_extra_slot(loading_models = ("m",))),
+        "stuck": lambda ms: ms.stuck.append(_extra_slot()),
+    }
+
+
+def test_idle_primary_and_no_slots_leaves_omlx_open(admission, idle_primary):
+    import routes.inference as inf_mod
+
+    assert not inf_mod._attached_local_memory_active()
+    asyncio.run(arbiter.before_omlx_use()).require_clear()
+
+
+@pytest.mark.parametrize("state", list(_extra_slot_states()))
+def test_extra_slot_residency_refuses_omlx_use(admission, idle_primary, state):
+    import routes.inference as inf_mod
+
+    _extra_slot_states()[state](idle_primary)
+    assert inf_mod._attached_local_memory_active()
+    result = asyncio.run(arbiter.before_omlx_use())
+    with pytest.raises(arbiter.AttachedAdmissionError, match = "local model loaded"):
+        result.require_clear()
+    assert admission == []
+
+
+def test_extra_slot_residency_is_a_retryable_503_on_the_proxy_path(admission, idle_primary):
+    import routes.inference as inf_mod
+    import routes.attached_engines as attached_routes
+
+    idle_primary.stuck.append(_extra_slot())
+    with pytest.raises(Exception) as caught:
+        asyncio.run(attached_routes._admit_omlx_use())
+    assert caught.value.status_code == 503
+    assert caught.value.headers == {"Retry-After": "15"}
+    assert inf_mod._attached_local_memory_active()
+
+
+def test_primary_residency_is_read_from_the_primary_not_the_routed_slot(admission, monkeypatch):
+    import routes.inference as inf_mod
+    import core.inference.llama_cpp as llama_mod
+    from core.inference import model_slots
+    from core.inference.orchestrator import routed_slot
+    from types import SimpleNamespace as NS
+
+    primary = NS(is_active = True)
+    routed = NS(is_active = False)
+    monkeypatch.setattr(
+        inf_mod, "get_llama_cpp_backend", lambda: routed if routed_slot.get() is not None else primary
+    )
+    monkeypatch.setattr(llama_mod, "chat_load_active", lambda: False)
+    monkeypatch.setattr(inf_mod, "_peek_inference_backend", lambda: None)
+    monkeypatch.setattr(model_slots, "slots", [])
+    monkeypatch.setattr(model_slots, "stuck", [])
+    monkeypatch.setattr(model_slots, "loading", None)
+    token = routed_slot.set(object())
+    try:
+        assert inf_mod._attached_local_memory_active()
+    finally:
+        routed_slot.reset(token)
+
+
 def test_thread_admission_timeout_blocks_training_and_cancels(admission, monkeypatch):
     import concurrent.futures
 
