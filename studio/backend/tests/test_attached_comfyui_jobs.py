@@ -56,6 +56,10 @@ class FakeComfy:
         self.history_polls = 0
         self.finish_after_polls: int | None = None
         self.queue_gone = False
+        # The pinned ComfyUI has /api/jobs/{id}/cancel; tests of an older server leave this off (404).
+        self.has_cancel_endpoint = False
+        self.cancel_calls: list[str] = []
+        self.interrupts: list[dict] = []
 
     def finish(self, pid = PID, *, status = None):
         self.running = [i for i in self.running if i != pid]
@@ -63,6 +67,18 @@ class FakeComfy:
             "outputs": {"8": {"images": self.images}},
             "status": status or {"status_str": "success", "completed": True, "messages": []},
         }
+
+    def interrupt_running(self, pid) -> bool:
+        """What ComfyUI's atomic interrupt does: only a prompt that is running now is interrupted."""
+        if pid not in self.running:
+            return False
+        self.running.remove(pid)
+        self.history[pid] = {
+            "outputs": {},
+            "status": {"status_str": "error", "completed": False,
+                       "messages": [["execution_interrupted", {"prompt_id": pid}]]},
+        }
+        return True
 
     @property
     def transport(self):
@@ -83,6 +99,13 @@ class FakeComfy:
             body = json.loads(request.content)
             self.pending = [p for p in self.pending if p not in body.get("delete", [])]
             return httpx.Response(200)
+        if path.startswith("/api/jobs/") and path.endswith("/cancel") and self.has_cancel_endpoint:
+            pid = path.split("/")[3]
+            self.cancel_calls.append(pid)
+            if pid in self.pending:
+                self.pending.remove(pid)
+                return httpx.Response(200, json = {"cancelled": True})
+            return httpx.Response(200, json = {"cancelled": self.interrupt_running(pid)})
         if path.startswith("/models/"):
             return httpx.Response(200, json = self.models.get(path.split("/")[-1], []))
         if path == "/prompt":
@@ -100,6 +123,9 @@ class FakeComfy:
         if path == "/view":
             return httpx.Response(200, content = png())
         if path == "/interrupt":
+            body = json.loads(request.content or b"{}")
+            self.interrupts.append(body)
+            self.interrupt_running(body.get("prompt_id"))
             return httpx.Response(200)
         return httpx.Response(404)
 
@@ -174,8 +200,12 @@ def world(tmp_path, monkeypatch):
     spy = type("Spy", (), {})()
     spy.admissions, spy.scheduled, spy.result = 0, 0, ArbiterResult(acted = True, actions = ("Unloaded oMLX: swift",))
 
+    spy.on_admit = None
+
     async def admit():
         spy.admissions += 1
+        if spy.on_admit is not None:
+            await spy.on_admit()
         return spy.result
 
     monkeypatch.setattr(arbiter, "before_comfyui_job", admit)
@@ -624,3 +654,154 @@ def test_idle_free_never_fires_mid_job_and_fires_once_after_the_last_job(monkeyp
         assert fake.count("POST", "/free") == 1
 
     go(scenario())
+
+
+# ------------------------------------- cancel against a prompt that changes state
+
+
+async def _start(r, fake, *, ws = None, **kwargs):
+    """Start a job on ``r`` and wait until it has been submitted."""
+    task = asyncio.create_task(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = fake.client(), **kwargs))
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if r.progress()["prompt_id"]:
+            return task
+    raise AssertionError("the job was never submitted")
+
+
+def _queue_behind_a_foreign_job(world):
+    """The prompt is accepted behind someone else's job: pending, with that job running."""
+    original = world.fake.handle
+
+    def handle(request):
+        response = original(request)
+        if request.url.path == "/prompt":
+            world.fake.running, world.fake.pending = ["foreign"], [PID]
+        return response
+
+    world.fake.handle = handle
+
+
+def test_cancel_endpoint_is_atomic_for_a_pending_prompt_and_for_a_running_one(world):
+    world.fake.has_cancel_endpoint = True
+    _queue_behind_a_foreign_job(world)
+
+    async def pending_case():
+        r = runner(FakeConnect(FakeWS([])))
+        task = await _start(r, world.fake)
+        assert await r.cancel() is True
+        with pytest.raises(jobs.ComfyCancelled):
+            await task
+
+    go(pending_case())
+    assert world.fake.cancel_calls == [PID] and world.fake.pending == [] and world.fake.running == ["foreign"]
+
+    world.fake.cancel_calls.clear()
+    world.fake.running, world.fake.pending = [], []
+    world.fake.history.clear()
+
+    async def running_case():
+        r = runner(FakeConnect(FakeWS([msg("execution_start")])))
+        task = await _start(r, world.fake)
+        assert await r.cancel() is True
+        with pytest.raises(jobs.ComfyCancelled):
+            await task
+
+    go(running_case())
+    assert world.fake.cancel_calls == [PID]
+    # Neither the fallback delete nor a plain interrupt is used when the atomic endpoint exists.
+    assert world.fake.interrupts == [] and world.fake.count("POST", "/queue") == 0
+
+
+def test_cancel_that_races_with_the_start_falls_through_to_an_interrupt(world):
+    """Delete is a no-op because the prompt began running after the /queue snapshot; the job must still stop."""
+    deletes = []
+    _queue_behind_a_foreign_job(world)
+    inner = world.fake.handle
+
+    def handle(request):
+        if request.url.path == "/queue" and request.method == "POST":
+            deletes.append(json.loads(request.content))
+            # Between the runner's snapshot and this delete the foreign job ended and our prompt started.
+            world.fake.running, world.fake.pending = [PID], []
+            return httpx.Response(200)  # ComfyUI answers 200 even though nothing was deleted
+        return inner(request)
+
+    world.fake.handle = handle
+
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([])))
+        task = await _start(r, world.fake)
+        assert await r.cancel() is True
+        assert PID not in world.fake.running, "the cancel only returns once ComfyUI has let go of the prompt"
+        with pytest.raises(jobs.ComfyCancelled):
+            await task
+        assert not r.is_running()
+
+    go(scenario())
+    assert deletes == [{"delete": [PID]}]
+    assert world.fake.interrupts == [{"prompt_id": PID}]
+
+
+def test_cancel_reports_false_and_keeps_ownership_while_comfyui_still_runs_the_job(world):
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([msg("execution_start")])))
+        r.cancel_wait = 0.05
+        real = world.fake.interrupt_running
+        world.fake.interrupt_running = lambda pid: False  # ComfyUI ignores the interrupt for now
+        task = await _start(r, world.fake)
+        assert await r.cancel() is False
+        assert r.is_running() and not task.done(), "the runner still owns a job that is still running remotely"
+        with pytest.raises(jobs.ComfyBusyError):
+            await r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client())
+        world.fake.interrupt_running = real
+        assert await r.cancel() is True
+        with pytest.raises(jobs.ComfyCancelled):
+            await task
+        assert not r.is_running()
+
+    go(scenario())
+
+
+def test_cancel_after_the_job_finished_keeps_the_images(world):
+    world.fake.has_cancel_endpoint = True
+
+    async def scenario():
+        gate = asyncio.Event()
+
+        class GateWS(FakeWS):
+            async def recv(self):
+                await gate.wait()
+                return await super().recv()
+
+        r = runner(FakeConnect(GateWS([msg("execution_success")])))
+        task = await _start(r, world.fake)
+        world.fake.finish()  # completed before the cancel arrives: the endpoint answers cancelled=false
+        assert await r.cancel() is True
+        gate.set()
+        return await task
+
+    result = go(scenario())
+    assert len(result.images) == 1 and world.fake.cancel_calls == []
+
+
+def test_cancel_before_submission_cancels_right_after_it(world):
+    world.fake.has_cancel_endpoint = True
+
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([])))
+        admitted = asyncio.Event()
+
+        async def on_admit():
+            admitted.set()
+            await asyncio.sleep(0.05)
+
+        world.on_admit = on_admit
+        task = asyncio.create_task(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client()))
+        await admitted.wait()
+        assert await r.cancel() is True
+        with pytest.raises(jobs.ComfyCancelled):
+            await task
+
+    go(scenario())
+    assert world.fake.submitted == [], "a cancel before submission never reaches ComfyUI's queue"

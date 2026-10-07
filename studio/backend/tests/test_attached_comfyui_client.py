@@ -302,3 +302,23 @@ def test_client_ignores_environment_proxies(monkeypatch):
     monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:9")
     monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid:9")
     assert run(_client(lambda r: httpx.Response(200, json = {"queue_running": [], "queue_pending": []})).queue()).reachable
+
+
+def test_cancel_job_is_the_targeted_atomic_endpoint():
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json = {"cancelled": True})
+
+    assert run(_client(handler).cancel_job("abc")) is True
+    assert seen == [("POST", "/api/jobs/abc/cancel")]
+    assert run(_client(lambda r: httpx.Response(200, json = {"cancelled": False})).cancel_job("abc")) is False
+
+
+def test_cancel_job_without_the_endpoint_is_none_and_other_failures_raise():
+    assert run(_client(lambda r: httpx.Response(404)).cancel_job("abc")) is None
+    for response in (httpx.Response(500), httpx.Response(200, content = b"<html>"),
+                     httpx.Response(200, json = {"cancelled": "yes"}), httpx.Response(200, json = [])):
+        with pytest.raises(ComfyuiError):
+            run(_client(lambda r, response = response: response).cancel_job("abc"))
