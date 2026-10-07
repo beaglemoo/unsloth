@@ -1,7 +1,7 @@
 #!/bin/bash
 # A launchctl that supervises fake_engine.py processes. State: $FAKE_LC (pid files, calls.log).
-# Needs FAKE_LC, FAKE_HOME, FAKE_OMLX_PORT, FAKE_PY. FAKE_BOOTOUT_FAIL=<label suffix,
-# FAKE_BOOTOUT_FAIL makes a selected helper bootout fail without stopping it.
+# Knows every label (omlx, comfyui, the legacy ds4): it only looks at $FAKE_LC/<label>.pid.
+# FAKE_BOOTOUT_FAIL=<label suffix> makes that helper's bootout fail without stopping it.
 # Like macOS for a helper bundled for SMAppService, `bootstrap` always fails ("Bootstrap failed: 5")
 # and `kickstart` fails (launchd has no such label); the scripts must never depend on either. Starting
 # the helpers is fake-unsloth-studio's job (`--engine-helpers register`). A bootout stops the job but
