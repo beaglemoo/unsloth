@@ -136,6 +136,11 @@ import {
 } from "@/lib/last-prompt";
 import { usePersistedToggle } from "@/hooks/use-persisted-toggle";
 import { useImageWorkflowStore } from "./stores/image-workflow-store";
+import { ComfyuiCreatePanel, type ComfyRunState } from "./comfyui/comfyui-create-panel";
+import { useComfyPanelStore } from "./comfyui/comfyui-panel-store";
+import { recallFromImage } from "./comfyui/comfyui-panel-state";
+import { effectiveEngine } from "./comfyui/engine-choice";
+import { useComfyuiAvailable } from "./comfyui/use-comfyui-available";
 import {
   WORKFLOW_EXAMPLE_PROMPTS,
   WORKFLOW_TABS,
@@ -1192,7 +1197,13 @@ function RecipePopover({
           {image.negative_prompt ? (
             <RecipeRow label="Negative" value={image.negative_prompt} wrap />
           ) : null}
-          {image.model ? <RecipeRow label="Model" value={image.model} /> : null}
+          {image.engine === "comfyui" ? (
+            <RecipeRow label="Engine" value={`ComfyUI${image.comfyui_template ? ` · ${image.comfyui_template}` : ""}`} wrap />
+          ) : null}
+          {image.sampler ? (
+            <RecipeRow label="Sampler" value={image.scheduler ? `${image.sampler} · ${image.scheduler}` : image.sampler} />
+          ) : null}
+          {image.model && image.engine !== "comfyui" ? <RecipeRow label="Model" value={image.model} /> : null}
           {/* The load-time build, so the recipe still names the pipeline once the model is unloaded: the
               repo id alone does not say which quant ran. */}
           {image.gguf_filename ? <RecipeRow label="File" value={image.gguf_filename} mono /> : null}
@@ -1540,6 +1551,13 @@ export function ImagesPage({
   // Page mode: "create" is the generation workspace, "train" the LoRA training workspace.
   const pageMode = useImageWorkflowStore((s) => s.pageMode);
   const setPageMode = useImageWorkflowStore((s) => s.setPageMode);
+  // Engine: "comfyui" hands Create to the ComfyUI panel while ComfyUI is available.
+  const engine = useImageWorkflowStore((s) => s.engine);
+  const setEngine = useImageWorkflowStore((s) => s.setEngine);
+  const comfyAvailable = useComfyuiAvailable();
+  const [comfyRunning, setComfyRunning] = useState(false);
+  // A running job keeps the panel up even if ComfyUI stops answering mid-run.
+  const comfyMode = effectiveEngine(engine, comfyAvailable || comfyRunning, pageMode) === "comfyui";
   const tourSteps = useMemo(
     () => buildImagesTourSteps({ pageMode }),
     [pageMode],
@@ -2425,6 +2443,17 @@ export function ImagesPage({
   );
 
   const restoreSettings = useCallback((image: GalleryImage) => {
+    // A ComfyUI record reopens in ComfyUI mode with its template and parameters.
+    const comfyRecall = recallFromImage(image);
+    if (comfyRecall) {
+      setEngine("comfyui");
+      setWorkflow("create");
+      useComfyPanelStore.getState().requestRecall(comfyRecall);
+      toast.success("Settings restored to the ComfyUI panel");
+      return;
+    }
+    // Any other record is a Studio recipe: leave ComfyUI mode so it restores where it applies.
+    setEngine("studio");
     // Negative prompt only applies when guidance>0; do not restore a hidden value.
     const restoredNegative = image.guidance > 0 ? (image.negative_prompt ?? "") : "";
     setNegativePrompt(restoredNegative);
@@ -2495,7 +2524,7 @@ export function ImagesPage({
     } else {
       toast.success("Settings restored to inputs", rescaled);
     }
-  }, [setPromptFor, setWorkflow, sizeLimits]);
+  }, [setEngine, setPromptFor, setWorkflow, sizeLimits]);
 
   // A locked ratio keeps the paired dimension in step; "custom" frees both, Flip swaps W/H. ratioHW is h/w for [a,b].
   const ratioHW = (a: number, b: number) => (portrait ? a / b : b / a);
@@ -4485,6 +4514,23 @@ export function ImagesPage({
     }
   }, [allowOversized, livePreview, prompt, negativePrompt, negativeCapable, width, height, steps, guidance, seed, batchSize, count, workflow, initImage, maskImage, strength, extendPct, extendSides, upscaleFactor, upscaleStrength, referenceImages, loras, loraCapable, controlnetCapable, controlnetId, controlImage, controlType, controlStrength, ensureSrc, loadGallery, refreshStatus, unifiedEdit, localizedMode, localizedLayer, maxExtras, referenceResolution, conditioning, editSize, editSizing, sizeLimits]);
 
+  // ComfyUI mode: fold the records ComfyUI saved into the same strip a Studio run feeds, and mirror
+  // its progress into the same card and placeholder tile.
+  const handleComfyImages = useCallback(
+    (saved: GalleryImage[]) => {
+      stripEpoch.current += 1;
+      setImages((prev) => mergeGenerated(prev, saved));
+      if (saved[0]) setSelectedId(saved[0].id);
+      saved.forEach((image) => void ensureSrc(image));
+    },
+    [ensureSrc],
+  );
+  const handleComfyRunState = useCallback((run: ComfyRunState) => {
+    setComfyRunning(run.running);
+    setBusy(run.running ? "generating" : null);
+    setGenStep(run.progress);
+  }, []);
+
   // Stop the in-flight generation. Latch FIRST, so a multi-run request stops even if the POST
   // races the run that is already finishing.
   const handleCancelGenerate = useCallback(async () => {
@@ -4623,6 +4669,11 @@ export function ImagesPage({
   // Publish what the loaded model can do, so the sidebar submenu dims the rest. null while
   // nothing is loaded, which leaves every workflow open to set up first.
   useEffect(() => {
+    // ComfyUI only does Create; same single writer, so the sidebar and the snap below follow.
+    if (comfyMode) {
+      setSupported(["create"]);
+      return;
+    }
     if (!status?.loaded) {
       setSupported(null);
       return;
@@ -4633,7 +4684,7 @@ export function ImagesPage({
         wf.includes(t.requires === null ? "txt2img" : t.requires),
       ).map((t) => t.id),
     );
-  }, [status?.loaded, status?.workflows, setSupported]);
+  }, [comfyMode, status?.loaded, status?.workflows, setSupported]);
 
   // Keep the active workflow valid for the loaded model: snap to the first supported one when capabilities change.
   useEffect(() => {
@@ -4875,6 +4926,8 @@ export function ImagesPage({
                   setTrainBaseChoice(repo);
                 }}
               />
+            ) : comfyMode ? (
+              <span className="pl-3 text-ui-14 font-medium @[68rem]:pl-4 @[68rem]:text-ui-16">ComfyUI</span>
             ) : (
               <ModelSelector
                 triggerDataTour="images-model"
@@ -4994,7 +5047,7 @@ export function ImagesPage({
                 </p>
               </div>
 
-              {workflow === "create" && (
+              {workflow === "create" && !comfyMode && (
                 <MediaGenerationPresetControl
                   kind="image"
                   presets={imagePresets.presets}
@@ -5008,6 +5061,28 @@ export function ImagesPage({
               )}
             </div>
 
+            {comfyAvailable && pageMode === "create" && (
+              <PillTabs
+                ariaLabel="Image engine"
+                value={comfyMode ? "comfyui" : "studio"}
+                onValueChange={(v) => setEngine(v as "studio" | "comfyui")}
+                disabled={comfyRunning || busy !== null}
+                compact={true}
+                fit={true}
+                tabs={[
+                  { value: "studio", label: "Studio" },
+                  { value: "comfyui", label: "ComfyUI" },
+                ]}
+              />
+            )}
+
+            {comfyMode ? (
+              <ComfyuiCreatePanel
+                onImagesSaved={handleComfyImages}
+                onRunState={handleComfyRunState}
+                onUnloadStudioModel={status?.loaded ? () => void handleUnload() : undefined}
+              />
+            ) : (<>
             {workflow === "transform" && (
               <>
                 <Field
@@ -5618,9 +5693,12 @@ export function ImagesPage({
             <AdvancedDisclosure open={advancedOpen} onOpenChange={setAdvancedOpen}>
               {advancedControls}
             </AdvancedDisclosure>
+            </>)}
 
           </div>
-          {/* The scroll mask provides the fade; leave the footer unpainted to avoid dark-mode banding. */}
+          {/* The scroll mask provides the fade; leave the footer unpainted to avoid dark-mode banding.
+              The ComfyUI panel carries its own Generate / Stop. */}
+          {!comfyMode && (
           <div className="relative z-10 flex shrink-0 flex-wrap justify-center gap-2 px-4 pt-0.5 pb-4">
             {busy === "generating" ? (
               /* Replaces Generate while a run is in flight. Every workflow funnels through the same
@@ -5661,6 +5739,7 @@ export function ImagesPage({
               </>
             )}
           </div>
+          )}
         </div>
 
         <div
@@ -5837,7 +5916,7 @@ export function ImagesPage({
                 {/* Same icon as the Images nav item. */}
                 <HugeiconsIcon icon={Image03Icon} className="size-12" strokeWidth={1.5} />
                 <p className="text-sm">
-                  {status?.loaded
+                  {status?.loaded || comfyMode
                     ? "Enter a prompt and hit Generate."
                     : "Select a diffusion model to load"}
                 </p>
