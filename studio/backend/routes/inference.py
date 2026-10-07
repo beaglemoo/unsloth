@@ -46297,6 +46297,8 @@ async def load_diffusion_model_gated(
 
         # begin_load signals whatever generation is running, so guard on every device, not just GPU.
         require_no_foreign_generations()
+        # Last refusal point, before the engine switch tears anything down: unload oMLX and free ComfyUI when attached-engine arbitration is enabled.
+        await _admit_attached_local_load()
         if off_torch is not None and pending_name == ENGINE_SD_CPP:
             await asyncio.to_thread(_unload_native_video_sharing_the_sd_cpp_tree)
         # Pick the engine for this host (diffusers on GPU, native sd.cpp otherwise), installing sd-cli if needed, BEFORE evicting chat.

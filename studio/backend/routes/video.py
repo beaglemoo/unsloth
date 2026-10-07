@@ -458,6 +458,10 @@ async def load_video_model_gated(
 
         # begin_load signals whatever generation is running, so guard on every device.
         require_no_foreign_generations()
+        # Last refusal point, before anything is torn down: unload oMLX and free ComfyUI when attached-engine arbitration is enabled.
+        from routes.inference import _admit_attached_local_load
+
+        await _admit_attached_local_load()
         from core.inference.video_minimax_h3 import is_h3_native
 
         if is_h3_native(fam, kind):
