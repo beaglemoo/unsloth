@@ -61,6 +61,7 @@ class Fake:
         ]
         self.loaded = {EMBED}
         self.post_status = 200
+        self.post_json = {}
         self.models_fail = False
         self.ctx_setting = 131072
         self.native = 262144
@@ -95,7 +96,7 @@ class Fake:
                 self.loaded.discard(path.split("/")[3])
             if path.endswith("/load"):
                 self.loaded.add(path.split("/")[4])
-            return httpx.Response(self.post_status, json = {})
+            return httpx.Response(self.post_status, json = self.post_json)
         if path == "/v1/models/status":
             rows = [
                 _row(
@@ -355,6 +356,17 @@ def test_omlx_unload_and_unload_all(client, fake):
     response = client.post("/api/engines/attached/omlx/unload-all")
     assert response.json() == {"unloaded": [EMBED]}
     assert fake.loaded == set()
+
+
+def test_busy_omlx_unload_is_a_retryable_503(client, fake):
+    fake.loaded = {EMBED, SWIFT_DIR}
+    fake.post_status = 409
+    fake.post_json = {"error": {"type": "model_busy"}}
+    for path, body in (("/omlx/unload", {"model_id": "swift-1.5-27b"}), ("/omlx/unload-all", None)):
+        response = client.post(f"/api/engines/attached{path}", json = body)
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == "15"
+        assert "busy serving another client" in response.json()["detail"]
 
 
 def test_ids_with_colons_only_ever_travel_in_bodies(client, fake):

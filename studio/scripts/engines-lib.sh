@@ -107,7 +107,8 @@ engines_require_idle() {
 }
 
 # Unload every oMLX model gracefully and only while idle, so nothing holding
-# weights is ever killed. A model that stays loaded (for example a pinned one) is a warning:
+# weights is ever killed. Never "?force=1": oMLX waits up to 20 s for in-flight requests and
+# answers 409 model_busy if a client is still streaming, which must stop the install, not abort it. A model that stays loaded (for example a pinned one) is a warning:
 # the helper's SIGTERM releases it.
 engines_quiesce() {
   engines_require_idle
@@ -124,7 +125,7 @@ engines_quiesce() {
         post "$OMLX_URL/v1/models/$(urlencode "$id")/unload" 90
         case "$POST_CODE" in
           200|202|400|404) ;;
-          409) die "oMLX refused to unload $id (busy); try again when it is idle" ;;
+          409) die "oMLX refused to unload $id (busy serving another client, nothing was aborted); try again when it is idle" ;;
           *) die "oMLX unload of $id failed with HTTP $POST_CODE" ;;
         esac
       done <<<"$loaded"

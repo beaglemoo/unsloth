@@ -4,8 +4,10 @@
 //!
 //! The sequence, all of it bounded by `QUIT_BUDGET` (45 s):
 //!
-//! 1. unload every loaded oMLX model: `POST :8843/v1/models/{id}/unload`, for each loaded id of
-//!    `/v1/models/status`;
+//! 1. unload every loaded oMLX model: `POST :8843/v1/models/{id}/unload?force=1`, for each loaded
+//!    id of `/v1/models/status`. `force=1` aborts in-flight requests instead of waiting up to 20 s
+//!    for them (a plain unload answers 409 `model_busy` while a client streams), so a quit stays
+//!    fast;
 //! 2. unregister the helper even if unloading ran out of budget.
 //!
 //! It shows no UI, and logs to `tauri.log`. The hook is `cleanup_child_processes` in `main.rs`,
@@ -144,7 +146,10 @@ impl EngineHttp for HttpEngines {
     }
 
     async fn unload_omlx(&self, id: &str) -> Result<u16, String> {
-        let path = format!("/v1/models/{}/unload", engine_tray::encode_segment(id));
+        let path = format!(
+            "/v1/models/{}/unload?force=1",
+            engine_tray::encode_segment(id)
+        );
         self.post(&self.urls.omlx, &path, UNLOAD_TIMEOUT).await
     }
 }
@@ -358,8 +363,8 @@ mod tests {
         let (omlx_port, omlx) = serve(
             vec![
                 ("GET /v1/models/status", 200, body),
-                ("POST /v1/models/swift-1.5-27b/unload", 202, ""),
-                ("POST /v1/models/a%3Ab/unload", 409, ""),
+                ("POST /v1/models/swift-1.5-27b/unload?force=1", 202, ""),
+                ("POST /v1/models/a%3Ab/unload?force=1", 409, ""),
             ],
             3,
         );
@@ -374,7 +379,10 @@ mod tests {
             assert_eq!(engine.unload_omlx("swift-1.5-27b").await, Ok(202));
             assert_eq!(engine.unload_omlx("a:b").await, Ok(409));
         });
-        assert_eq!(omlx.join().unwrap().len(), 3);
+        // a quit never waits on a streaming client: every unload carries force=1
+        let seen = omlx.join().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(seen[1..].iter().all(|line| line.ends_with("/unload?force=1")));
     }
 
     #[test]
