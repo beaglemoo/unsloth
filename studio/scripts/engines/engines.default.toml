@@ -1,6 +1,6 @@
-# Unsloth attached engine (oMLX).
+# Unsloth attached engines (oMLX and ComfyUI).
 #
-# Read by the omlx-launch wrapper and by the Studio
+# Read by the omlx-launch and comfyui-launch wrappers and by the Studio
 # desktop tray. Written by studio/scripts/build-engines-mac.sh only when it is
 # missing, so edit freely. build-engines-mac.sh and update-engines-mac.sh remove
 # the retired OMLX_PEER_EVICT_URLS setting from old generated files (backup:
@@ -24,3 +24,15 @@ OMLX_NAX = "1"
 OMLX_QWEN35_QMM_NAX_VARIANT = "0"
 MallocSpaceEfficient = "1"
 OMLX_SUPERVISED = "launchd"
+
+# ComfyUI (bundled helper ai.unsloth.studio.comfyui). Loopback only: ComfyUI has no auth.
+[comfyui]
+port = 8844
+data_dir = "~/.unsloth/engines/comfyui-data"
+# Read-only shared weights, written into extra_model_paths.unsloth.yaml at every start.
+model_dirs = ["~/Library/Application Support/StoryPressRuntime/ComfyUI/models"]
+# The StoryPress-tested Apple Silicon flags plus no custom nodes and no internet for the web UI.
+extra_args = ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline"]
+
+[comfyui.env]
+PYTORCH_ENABLE_MPS_FALLBACK = "1"
