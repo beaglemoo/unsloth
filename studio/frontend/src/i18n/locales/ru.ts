@@ -897,7 +897,7 @@ export const ru = {
       chat: "Чат",
       connections: "Подключения",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "Движки",
       remoteLan: "Удалённый доступ и LAN",
       about: "О программе",
       data: "Данные",

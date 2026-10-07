@@ -898,7 +898,7 @@ export const hi = {
       chat: "चैट",
       connections: "कनेक्शन",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "इंजन",
       remoteLan: "रिमोट और LAN",
       about: "परिचय",
       data: "डेटा",

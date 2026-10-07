@@ -943,7 +943,7 @@ export const en = {
       connections: "Connections",
       data: "Data",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "Engines",
       remoteLan: "Remote & LAN",
       agents: "Agents",
       keyboardShortcuts: "Shortcuts",
