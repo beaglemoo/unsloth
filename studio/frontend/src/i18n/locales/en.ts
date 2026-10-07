@@ -1384,7 +1384,7 @@ export const en = {
       data: "Data",
       knowledge: "Knowledge",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "Engines",
       remoteLan: "Remote & LAN",
       agents: "Agents",
       keyboardShortcuts: "Shortcuts",

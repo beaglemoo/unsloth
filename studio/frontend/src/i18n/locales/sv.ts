@@ -1450,7 +1450,7 @@ export const sv = {
       data: "Data",
       knowledge: "Kunskap",
       apiKeys: "API",
-      attachedEngines: "oMLX",
+      attachedEngines: "Motorer",
       remoteLan: "Fjärråtkomst och LAN",
       agents: "Agenter",
       keyboardShortcuts: "Genvägar",
