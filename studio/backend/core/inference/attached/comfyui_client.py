@@ -89,6 +89,13 @@ def parse_queue(body: Any) -> ComfyQueue:
     )
 
 
+def system_version(stats: Optional[dict]) -> Optional[str]:
+    """``system.comfyui_version`` from a ``/system_stats`` body."""
+    system = stats.get("system") if isinstance(stats, dict) else None
+    value = system.get("comfyui_version") if isinstance(system, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 class ComfyuiClient:
     def __init__(
         self,
@@ -146,13 +153,7 @@ class ComfyuiClient:
 
     async def version(self) -> Optional[str]:
         stats = await self.system_stats()
-        return self.version_from(stats)
-
-    @staticmethod
-    def version_from(stats: Optional[dict]) -> Optional[str]:
-        system = stats.get("system") if isinstance(stats, dict) else None
-        value = system.get("comfyui_version") if isinstance(system, dict) else None
-        return value if isinstance(value, str) and value else None
+        return system_version(stats)
 
     async def folders(self) -> list[str]:
         body = await self._get_json("/models")
