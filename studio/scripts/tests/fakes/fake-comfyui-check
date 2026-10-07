@@ -1,0 +1,5 @@
+#!/bin/bash
+# COMFYUI_CHECK for the update script: the "smoke test" of the swapped ComfyUI venv. Fails exactly
+# while <home>/comfyui/VERSION says "bad".
+echo "comfyui-check" >>"$FAKE_LC/calls.log"
+[ "$(cat "$UNSLOTH_ENGINES_HOME/comfyui/VERSION" 2>/dev/null)" != bad ]
