@@ -3,8 +3,11 @@
 //!
 //! The tray talks to the engines directly (it must work with Studio's backend stopped): every
 //! 5 s it polls oMLX status and idle timers and ComfyUI's queue, using engines.toml for the URLs.
-//! The ComfyUI rows (status line and "Free ComfyUI memory") show only while the user wants ComfyUI
-//! or it answers anyway.
+//! The ComfyUI rows (status line and "Unload ComfyUI models") show only while the user wants
+//! ComfyUI or it answers anyway. ComfyUI has no loaded-model list, and on Apple Silicon the device
+//! figures in `/system_stats` are system-wide, so the status line shows the memory its process holds
+//! (read from `lsof` and `ps`). The unload item is enabled only while the queue is empty and
+//! refuses (with a message on the status line for one poll) if a job arrived since the last poll.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -247,6 +250,8 @@ pub(crate) struct ComfyStatus {
     pending: usize,
     /// The launch failure marker, read only while ComfyUI is not answering.
     failure: Option<Failure>,
+    /// Resident memory of the ComfyUI process in bytes, when it could be read.
+    resident_bytes: Option<u64>,
 }
 
 /// `(running, pending)` from ComfyUI's `/queue` body; None for anything that is not that shape.
@@ -457,12 +462,42 @@ fn comfyui_label(status: &ComfyStatus) -> String {
             None => "ComfyUI: not running".to_string(),
         };
     }
+    let memory = status
+        .resident_bytes
+        .map(|bytes| format!(", {} GB in memory", gib(bytes)))
+        .unwrap_or_default();
     if status.running == 0 && status.pending == 0 {
-        "ComfyUI: idle".to_string()
+        format!("ComfyUI: idle{memory}")
     } else {
         // the running job is not "queued": N counts the jobs waiting behind it
-        format!("ComfyUI: generating ({} queued)", status.pending)
+        format!("ComfyUI: generating ({} queued){memory}", status.pending)
     }
+}
+
+/// Why "Unload ComfyUI models" is refused right now, or None when the queue is empty. The tray
+/// never interrupts a job: the user cancels it in Settings > Engines.
+pub(crate) fn unload_refusal(running: usize, pending: usize) -> Option<String> {
+    match (running, pending) {
+        (0, 0) => None,
+        (_, 0) => Some("ComfyUI: a job is running, unload after it ends".to_string()),
+        (_, queued) => Some(format!(
+            "ComfyUI: busy ({queued} queued), unload after the queue empties"
+        )),
+    }
+}
+
+/// The pid `lsof -t` prints first.
+pub(crate) fn parse_pid(text: &str) -> Option<u32> {
+    text.lines().find_map(|line| line.trim().parse().ok())
+}
+
+/// Resident memory in bytes from `ps -o rss=` (kilobytes).
+pub(crate) fn parse_rss_bytes(text: &str) -> Option<u64> {
+    text.trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|kb| *kb > 0)
+        .map(|kb| kb * 1024)
 }
 
 /// The status line. While the helpers run in `with_app` mode it says they stop when Unsloth quits.
@@ -504,7 +539,7 @@ pub(crate) fn build_view(
         helpers_label: helpers_label(helpers, lifetime),
         comfyui_label: comfyui_label(comfyui),
         comfyui_visible: comfyui_wanted || comfyui.reachable,
-        comfyui_free_enabled: comfyui.reachable,
+        comfyui_free_enabled: comfyui.reachable && comfyui.running == 0 && comfyui.pending == 0,
     }
 }
 
@@ -612,6 +647,7 @@ async fn fetch_comfyui(urls: &EngineUrls) -> ComfyStatus {
             running,
             pending,
             failure: None,
+            resident_bytes: resident_bytes_of_port(port_of_url(&urls.comfyui)).await,
         },
         None => ComfyStatus {
             failure: read_failure("comfyui"),
@@ -620,9 +656,60 @@ async fn fetch_comfyui(urls: &EngineUrls) -> ComfyStatus {
     }
 }
 
-/// Unload ComfyUI's models and free its memory. It does not touch a running job: ComfyUI keeps
-/// the weights a running prompt holds and frees the rest.
+fn port_of_url(url: &str) -> Option<u16> {
+    url.rsplit(':').next()?.trim_end_matches('/').parse().ok()
+}
+
+/// Resident memory of the process listening on `port`, best effort (None when `lsof` or `ps` fail).
+async fn resident_bytes_of_port(port: Option<u16>) -> Option<u64> {
+    let port = port?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let run = |program: &str, args: &[String]| -> Option<String> {
+            let output = std::process::Command::new(program)
+                .args(args)
+                .output()
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        };
+        let pid = parse_pid(&run(
+            "lsof",
+            &[
+                "-nP".to_string(),
+                format!("-iTCP:{port}"),
+                "-sTCP:LISTEN".to_string(),
+                "-t".to_string(),
+            ],
+        )?)?;
+        parse_rss_bytes(&run(
+            "ps",
+            &[
+                "-o".to_string(),
+                "rss=".to_string(),
+                "-p".to_string(),
+                pid.to_string(),
+            ],
+        )?)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Unload ComfyUI's models and free its memory. Refused, without interrupting anything, when a
+/// job is running or queued (the status line already disabled the item, this covers a job that
+/// arrived since the last poll). The refusal text is returned as the error.
 async fn free_comfyui(urls: &EngineUrls) -> Result<(), String> {
+    if let Some((running, pending)) = get_json(&urls.comfyui, "/queue")
+        .await
+        .and_then(|body| parse_comfyui_queue(&body))
+    {
+        if let Some(refusal) = unload_refusal(running, pending) {
+            return Err(refusal);
+        }
+    }
     let client = loopback_http::client(UNLOAD_TIMEOUT).map_err(|e| e.to_string())?;
     let response = client
         .post(format!("{}/free", urls.comfyui))
@@ -733,6 +820,17 @@ impl EngineTray {
         dynamic.last = Some(view.clone());
     }
 
+    /// Show a refusal on the ComfyUI status line until the next poll replaces it.
+    fn comfyui_notice(&self, text: &str) {
+        let Ok(mut dynamic) = self.dynamic.lock() else {
+            return;
+        };
+        let _ = self.comfyui_label.set_text(text);
+        if let Some(last) = dynamic.last.as_mut() {
+            last.comfyui_label = text.to_string();
+        }
+    }
+
     /// Insert or remove the two ComfyUI rows (Tauri menu items cannot be hidden), right after
     /// "Stop all engines".
     fn show_comfyui(&self, dynamic: &mut Dynamic, show: bool) {
@@ -822,7 +920,7 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
     let comfyui_label = MenuItemBuilder::with_id("engine:comfyui-label", "ComfyUI: checking")
         .enabled(false)
         .build(app)?;
-    let comfyui_free = MenuItemBuilder::with_id(ID_COMFYUI_FREE, "Free ComfyUI memory")
+    let comfyui_free = MenuItemBuilder::with_id(ID_COMFYUI_FREE, "Unload ComfyUI models")
         .enabled(false)
         .build(app)?;
     let helpers = MenuItemBuilder::with_id(
@@ -904,6 +1002,11 @@ pub(crate) fn on_menu_event(app: &AppHandle, id: &str) {
         };
         if let Err(error) = result {
             warn!("engine tray action {action:?} failed: {error}");
+            if action == Action::FreeComfyui && error.starts_with("ComfyUI:") {
+                if let Some(tray) = handle.try_state::<EngineTray>() {
+                    tray.comfyui_notice(&error);
+                }
+            }
         }
         if let Some(tray) = handle.try_state::<EngineTray>() {
             tray.busy.store(false, Ordering::SeqCst);
@@ -1196,6 +1299,7 @@ mod tests {
             running,
             pending,
             failure: None,
+            resident_bytes: None,
         }
     }
 
@@ -1285,6 +1389,64 @@ mod tests {
         let running = view(&comfy(0, 0), false);
         assert!(running.comfyui_visible && running.comfyui_free_enabled);
         assert_eq!(running.comfyui_label, "ComfyUI: idle");
+        // a running or queued job disables the unload item; nothing is interrupted
+        assert!(!view(&comfy(1, 0), false).comfyui_free_enabled);
+        assert!(!view(&comfy(0, 2), false).comfyui_free_enabled);
+    }
+
+    #[test]
+    fn the_comfyui_label_shows_the_memory_the_process_holds() {
+        let mut idle = comfy(0, 0);
+        idle.resident_bytes = Some(27 * 1024 * 1024 * 1024);
+        assert_eq!(comfyui_label(&idle), "ComfyUI: idle, 27.0 GB in memory");
+        let mut busy = comfy(1, 2);
+        busy.resident_bytes = Some(1_610_612_736);
+        assert_eq!(
+            comfyui_label(&busy),
+            "ComfyUI: generating (2 queued), 1.5 GB in memory"
+        );
+        // an engine that is not answering has no memory figure to show
+        let mut down = ComfyStatus::default();
+        down.resident_bytes = Some(1);
+        assert_eq!(comfyui_label(&down), "ComfyUI: not running");
+    }
+
+    #[test]
+    fn unloading_comfyui_models_is_refused_while_a_job_runs_or_waits() {
+        assert_eq!(unload_refusal(0, 0), None);
+        assert_eq!(
+            unload_refusal(1, 0).as_deref(),
+            Some("ComfyUI: a job is running, unload after it ends")
+        );
+        assert_eq!(
+            unload_refusal(1, 3).as_deref(),
+            Some("ComfyUI: busy (3 queued), unload after the queue empties")
+        );
+        assert_eq!(
+            unload_refusal(0, 1).as_deref(),
+            Some("ComfyUI: busy (1 queued), unload after the queue empties")
+        );
+        // the refusal is shown on the status line, which only the "ComfyUI:" prefix reaches
+        assert!(unload_refusal(1, 0).unwrap().starts_with("ComfyUI:"));
+    }
+
+    #[test]
+    fn the_process_memory_probes_parse_lsof_and_ps_output() {
+        assert_eq!(parse_pid("1234\n5678\n"), Some(1234));
+        assert_eq!(parse_pid("  42 \n"), Some(42));
+        assert_eq!(parse_pid(""), None);
+        assert_eq!(parse_pid("not a pid\n"), None);
+        assert_eq!(parse_rss_bytes("  2048\n"), Some(2048 * 1024));
+        assert_eq!(parse_rss_bytes("0\n"), None);
+        assert_eq!(parse_rss_bytes(""), None);
+        assert_eq!(port_of_url("http://127.0.0.1:8844"), Some(8844));
+        assert_eq!(port_of_url("http://127.0.0.1:8844/"), Some(8844));
+        assert_eq!(port_of_url("http://127.0.0.1"), None);
+    }
+
+    #[test]
+    fn the_unload_item_keeps_its_id_and_parses_to_the_free_action() {
+        assert_eq!(parse_action(ID_COMFYUI_FREE), Some(Action::FreeComfyui));
     }
 
     #[test]
