@@ -136,7 +136,7 @@ test("the ComfyUI settings reach the settings API", () => {
 
 test("with the flag off only the enable toggle is rendered", () => {
   const section = src("features/attached-engines/settings-section.tsx");
-  const enable = section.indexOf('label="Enable engines"');
+  const enable = section.indexOf('label="Show engines in Studio"');
   const gate = section.indexOf("settings?.enabled ? (");
   assert.ok(enable > 0 && gate > enable);
   // everything else sits behind the flag, the Engines enabled switch included
