@@ -7,5 +7,7 @@ build (`../tauri.fork.conf.json`, `bundle.macOS.files`), into `Contents/Library/
   `studio/scripts/build-engines-mac.sh` into `Contents/Resources/engines`.
 - launchd does not expand `~`, so the wrappers redirect their own output to
   `~/Library/Logs/Unsloth/engines/` (no `StandardOutPath` here).
-- The agents are registered and unregistered by `src/engine_helpers.rs` (Settings, Background
-  engines). Quitting Unsloth never unregisters them: pi, Claude Code and OpenCode keep using :8843.
+- The agents are registered and unregistered by `src/engine_helpers.rs` (Settings > Engines). oMLX
+  (`omlx-launch`, :8843) is on by default; ComfyUI (`comfyui-launch`, :8844) is off until the user
+  turns it on (`helpers` in `~/.unsloth/engines/desktop.json`). Quitting Unsloth only unregisters them
+  in `with_app` mode; with `always`, pi, Claude Code and OpenCode keep using :8843.

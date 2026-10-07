@@ -7,7 +7,8 @@
     },
     "macOS": {
       "files": {
-        "Library/LaunchAgents/ai.unsloth.studio.omlx.plist": "launch-agents/ai.unsloth.studio.omlx.plist"
+        "Library/LaunchAgents/ai.unsloth.studio.omlx.plist": "launch-agents/ai.unsloth.studio.omlx.plist",
+        "Library/LaunchAgents/ai.unsloth.studio.comfyui.plist": "launch-agents/ai.unsloth.studio.comfyui.plist"
       }
     }
   }
