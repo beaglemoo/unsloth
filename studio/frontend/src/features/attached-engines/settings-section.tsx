@@ -164,10 +164,10 @@ export function AttachedEnginesSettingsSection() {
   return (
     <SettingsSection
       title="Configuration"
-      description="Turn the attached engines on, set where Studio reaches oMLX and how engines share memory with local loads."
+      description="Show the engines in Studio, set where Studio reaches oMLX and how engines share memory with local loads."
     >
       <SettingsRow
-        label="Enable engines"
+        label="Show engines in Studio"
         description="Show oMLX in the model picker, free engine memory before a local load or training run, and manage ComfyUI here."
         below={error ? <span className={ERROR_CLASS}>{error}</span> : null}
       >
