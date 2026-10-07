@@ -1,8 +1,10 @@
-//! Tray items for the attached oMLX engine, behind the
+//! Tray items for the attached engines (oMLX and ComfyUI), behind the
 //! `attached-engines` feature.
 //!
 //! The tray talks to the engines directly (it must work with Studio's backend stopped): every
-//! 5 s it polls oMLX status and idle timers, using engines.toml for the URL.
+//! 5 s it polls oMLX status and idle timers and ComfyUI's queue, using engines.toml for the URLs.
+//! The ComfyUI rows (status line and "Free ComfyUI memory") show only while the user wants ComfyUI
+//! or it answers anyway.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +23,7 @@ use crate::engine_lifetime::{self, EngineLifetime};
 use crate::loopback_http;
 
 const DEFAULT_OMLX_URL: &str = "http://127.0.0.1:8843";
+const DEFAULT_COMFYUI_URL: &str = "http://127.0.0.1:8844";
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
@@ -28,6 +31,7 @@ const UNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ID_STOP_ALL: &str = "engine:stop-all";
 const ID_HELPERS: &str = "engine:helpers";
+const ID_COMFYUI_FREE: &str = "engine:comfyui-free";
 const ID_UNLOAD_PREFIX: &str = "engine:unload:";
 const ID_LOAD_PREFIX: &str = "engine:load:";
 
@@ -37,12 +41,14 @@ const ID_LOAD_PREFIX: &str = "engine:load:";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EngineUrls {
     pub(crate) omlx: String,
+    pub(crate) comfyui: String,
 }
 
 impl Default for EngineUrls {
     fn default() -> Self {
         Self {
             omlx: DEFAULT_OMLX_URL.to_string(),
+            comfyui: DEFAULT_COMFYUI_URL.to_string(),
         }
     }
 }
@@ -80,6 +86,11 @@ pub(crate) fn parse_urls(text: &str) -> EngineUrls {
             "http://{}:{}",
             connect_host(host_of(&table, "omlx")),
             port_of(&table, "omlx", "port", 8843)
+        ),
+        comfyui: format!(
+            "http://{}:{}",
+            connect_host(host_of(&table, "comfyui")),
+            port_of(&table, "comfyui", "port", 8844)
         ),
     }
 }
@@ -226,6 +237,23 @@ pub(crate) fn parse_omlx_status(body: &Value) -> Option<OmlxStatus> {
             .unwrap_or(0),
         failure: None,
     })
+}
+
+/// ComfyUI as `GET /queue` shows it.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub(crate) struct ComfyStatus {
+    reachable: bool,
+    running: usize,
+    pending: usize,
+    /// The launch failure marker, read only while ComfyUI is not answering.
+    failure: Option<Failure>,
+}
+
+/// `(running, pending)` from ComfyUI's `/queue` body; None for anything that is not that shape.
+pub(crate) fn parse_comfyui_queue(body: &Value) -> Option<(usize, usize)> {
+    let running = body.get("queue_running")?.as_array()?.len();
+    let pending = body.get("queue_pending")?.as_array()?.len();
+    Some((running, pending))
 }
 
 /// The global idle timeout and each model directory's own `ttl_seconds`, from oMLX's admin API.
@@ -376,6 +404,10 @@ pub(crate) struct View {
     load_enabled: bool,
     stop_all_enabled: bool,
     helpers_label: String,
+    comfyui_label: String,
+    /// The ComfyUI rows show while the user wants ComfyUI or it answers anyway.
+    comfyui_visible: bool,
+    comfyui_free_enabled: bool,
 }
 
 fn gib(bytes: u64) -> String {
@@ -418,6 +450,21 @@ fn omlx_label(status: &OmlxStatus) -> String {
     label
 }
 
+fn comfyui_label(status: &ComfyStatus) -> String {
+    if !status.reachable {
+        return match &status.failure {
+            Some(failure) => failing_label("ComfyUI", failure),
+            None => "ComfyUI: not running".to_string(),
+        };
+    }
+    if status.running == 0 && status.pending == 0 {
+        "ComfyUI: idle".to_string()
+    } else {
+        // the running job is not "queued": N counts the jobs waiting behind it
+        format!("ComfyUI: generating ({} queued)", status.pending)
+    }
+}
+
 /// The status line. While the helpers run in `with_app` mode it says they stop when Unsloth quits.
 fn helpers_label(state: HelperState, lifetime: EngineLifetime) -> String {
     let text = match state {
@@ -438,6 +485,8 @@ fn helpers_label(state: HelperState, lifetime: EngineLifetime) -> String {
 
 pub(crate) fn build_view(
     omlx: &OmlxStatus,
+    comfyui: &ComfyStatus,
+    comfyui_wanted: bool,
     helpers: HelperState,
     lifetime: EngineLifetime,
 ) -> View {
@@ -453,6 +502,9 @@ pub(crate) fn build_view(
         load_enabled: omlx.reachable,
         loads,
         helpers_label: helpers_label(helpers, lifetime),
+        comfyui_label: comfyui_label(comfyui),
+        comfyui_visible: comfyui_wanted || comfyui.reachable,
+        comfyui_free_enabled: comfyui.reachable,
     }
 }
 
@@ -462,6 +514,7 @@ pub(crate) fn build_view(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     StopAll,
+    FreeComfyui,
     OpenLoginItems,
     Unload(String),
     Load(String),
@@ -470,6 +523,7 @@ pub(crate) enum Action {
 pub(crate) fn parse_action(id: &str) -> Option<Action> {
     match id {
         ID_STOP_ALL => Some(Action::StopAll),
+        ID_COMFYUI_FREE => Some(Action::FreeComfyui),
         ID_HELPERS => Some(Action::OpenLoginItems),
         _ => id
             .strip_prefix(ID_UNLOAD_PREFIX)
@@ -548,6 +602,41 @@ async fn fetch_omlx(urls: &EngineUrls) -> OmlxStatus {
     status
 }
 
+async fn fetch_comfyui(urls: &EngineUrls) -> ComfyStatus {
+    match get_json(&urls.comfyui, "/queue")
+        .await
+        .and_then(|body| parse_comfyui_queue(&body))
+    {
+        Some((running, pending)) => ComfyStatus {
+            reachable: true,
+            running,
+            pending,
+            failure: None,
+        },
+        None => ComfyStatus {
+            failure: read_failure("comfyui"),
+            ..ComfyStatus::default()
+        },
+    }
+}
+
+/// Unload ComfyUI's models and free its memory. It does not touch a running job: ComfyUI keeps
+/// the weights a running prompt holds and frees the rest.
+async fn free_comfyui(urls: &EngineUrls) -> Result<(), String> {
+    let client = loopback_http::client(UNLOAD_TIMEOUT).map_err(|e| e.to_string())?;
+    let response = client
+        .post(format!("{}/free", urls.comfyui))
+        .json(&serde_json::json!({"unload_models": true, "free_memory": true}))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("HTTP {}", response.status().as_u16()))
+    }
+}
+
 async fn load_model(urls: &EngineUrls, dir: &str) -> Result<(), String> {
     let path = format!("/admin/api/models/{}/load", encode_segment(dir));
     post(&urls.omlx, &path, LOAD_TIMEOUT).await
@@ -582,11 +671,15 @@ struct Dynamic {
     load_items: Vec<MenuItem<Wry>>,
     load_keys: Option<Vec<ModelEntry>>,
     last: Option<View>,
+    /// Whether the ComfyUI rows are in the menu right now.
+    comfyui_shown: bool,
 }
 
 struct EngineTray {
     menu: Menu<Wry>,
     omlx_label: MenuItem<Wry>,
+    comfyui_label: MenuItem<Wry>,
+    comfyui_free: MenuItem<Wry>,
     load_menu: Submenu<Wry>,
     stop_all: MenuItem<Wry>,
     helpers: MenuItem<Wry>,
@@ -619,6 +712,18 @@ impl EngineTray {
         {
             let _ = self.helpers.set_text(&view.helpers_label);
         }
+        if previous
+            .as_ref()
+            .is_none_or(|p| p.comfyui_label != view.comfyui_label)
+        {
+            let _ = self.comfyui_label.set_text(&view.comfyui_label);
+        }
+        if changed(|v| v.comfyui_free_enabled) {
+            let _ = self.comfyui_free.set_enabled(view.comfyui_free_enabled);
+        }
+        if view.comfyui_visible != dynamic.comfyui_shown {
+            self.show_comfyui(&mut dynamic, view.comfyui_visible);
+        }
         if dynamic.unload_keys != view.unloads || previous.is_none() {
             self.replace_unloads(app, &mut dynamic, &view.unloads);
         }
@@ -626,6 +731,26 @@ impl EngineTray {
             self.replace_loads(app, &mut dynamic, &view.loads);
         }
         dynamic.last = Some(view.clone());
+    }
+
+    /// Insert or remove the two ComfyUI rows (Tauri menu items cannot be hidden), right after
+    /// "Stop all engines".
+    fn show_comfyui(&self, dynamic: &mut Dynamic, show: bool) {
+        if show {
+            let position = self
+                .menu
+                .items()
+                .ok()
+                .and_then(|items| items.iter().position(|i| i.id() == self.stop_all.id()))
+                .map_or(0, |p| p + 1);
+            let ok = self.menu.insert(&self.comfyui_label, position).is_ok()
+                && self.menu.insert(&self.comfyui_free, position + 1).is_ok();
+            dynamic.comfyui_shown = ok;
+        } else {
+            let _ = self.menu.remove(&self.comfyui_free);
+            let _ = self.menu.remove(&self.comfyui_label);
+            dynamic.comfyui_shown = false;
+        }
     }
 
     fn replace_unloads(&self, app: &AppHandle, dynamic: &mut Dynamic, entries: &[ModelEntry]) {
@@ -693,6 +818,13 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
     let stop_all = MenuItemBuilder::with_id(ID_STOP_ALL, "Stop all engines")
         .enabled(false)
         .build(app)?;
+    // Not in the menu until the poll says ComfyUI is wanted or running (see `show_comfyui`).
+    let comfyui_label = MenuItemBuilder::with_id("engine:comfyui-label", "ComfyUI: checking")
+        .enabled(false)
+        .build(app)?;
+    let comfyui_free = MenuItemBuilder::with_id(ID_COMFYUI_FREE, "Free ComfyUI memory")
+        .enabled(false)
+        .build(app)?;
     let helpers = MenuItemBuilder::with_id(
         ID_HELPERS,
         helpers_label(HelperState::NotRegistered, EngineLifetime::default()),
@@ -713,6 +845,8 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
     app.manage(EngineTray {
         menu: menu.clone(),
         omlx_label,
+        comfyui_label,
+        comfyui_free,
         load_menu,
         stop_all,
         helpers,
@@ -724,10 +858,13 @@ pub(crate) fn install(app: &tauri::App, menu: &Menu<Wry>) -> tauri::Result<()> {
     tauri::async_runtime::spawn(async move {
         loop {
             let urls = load_urls();
-            let omlx = fetch_omlx(&urls).await;
+            let (omlx, comfyui) = tokio::join!(fetch_omlx(&urls), fetch_comfyui(&urls));
+            let (helpers, comfyui_wanted) = engine_helpers::tray_state();
             let view = build_view(
                 &omlx,
-                engine_helpers::current_state(),
+                &comfyui,
+                comfyui_wanted,
+                helpers,
                 engine_lifetime::load().lifetime,
             );
             if let Some(tray) = handle.try_state::<EngineTray>() {
@@ -760,6 +897,7 @@ pub(crate) fn on_menu_event(app: &AppHandle, id: &str) {
         let urls = load_urls();
         let result = match &action {
             Action::StopAll => stop_all(&urls).await,
+            Action::FreeComfyui => free_comfyui(&urls).await,
             Action::Unload(dir) => unload_model(&urls, dir).await,
             Action::Load(dir) => load_model(&urls, dir).await,
             Action::OpenLoginItems => Ok(()),
@@ -802,6 +940,36 @@ mod tests {
         assert_eq!(parse_urls(""), EngineUrls::default());
         assert_eq!(parse_urls("not = [valid"), EngineUrls::default());
         assert_eq!(EngineUrls::default().omlx, "http://127.0.0.1:8843");
+        assert_eq!(EngineUrls::default().comfyui, "http://127.0.0.1:8844");
+    }
+
+    #[test]
+    fn the_comfyui_url_follows_its_own_section() {
+        assert_eq!(
+            parse_urls("[comfyui]\nport = 18844\n").comfyui,
+            "http://127.0.0.1:18844"
+        );
+        assert_eq!(
+            parse_urls("[comfyui]\nhost = \"::\"\nport = 9000\n").comfyui,
+            "http://127.0.0.1:9000"
+        );
+        assert_eq!(
+            parse_urls("[comfyui]\nhost = \"localhost\"\n").comfyui,
+            "http://localhost:8844"
+        );
+        // the oMLX section never moves ComfyUI, and a bad port falls back
+        assert_eq!(
+            parse_urls("[omlx]\nport = 9000\n").comfyui,
+            "http://127.0.0.1:8844"
+        );
+        assert_eq!(
+            parse_urls("[comfyui]\nport = 0\n").comfyui,
+            "http://127.0.0.1:8844"
+        );
+        assert_eq!(
+            parse_urls("[comfyui]\nport = \"x\"\n").comfyui,
+            "http://127.0.0.1:8844"
+        );
     }
 
     #[test]
@@ -999,6 +1167,8 @@ mod tests {
     fn view_enables_controls_from_reachability() {
         let down = build_view(
             &OmlxStatus::default(),
+            &ComfyStatus::default(),
+            false,
             HelperState::NotRegistered,
             EngineLifetime::WithApp,
         );
@@ -1010,12 +1180,111 @@ mod tests {
 
         let up = build_view(
             &omlx(OMLX_BODY),
+            &ComfyStatus::default(),
+            false,
             HelperState::Enabled,
             EngineLifetime::Always,
         );
         assert!(up.load_enabled && up.stop_all_enabled);
         assert_eq!(up.helpers_label, "Engines: running as background helpers");
         assert_eq!(up.loads.len(), 1);
+    }
+
+    fn comfy(running: usize, pending: usize) -> ComfyStatus {
+        ComfyStatus {
+            reachable: true,
+            running,
+            pending,
+            failure: None,
+        }
+    }
+
+    #[test]
+    fn comfyui_labels() {
+        assert_eq!(
+            comfyui_label(&ComfyStatus::default()),
+            "ComfyUI: not running"
+        );
+        assert_eq!(comfyui_label(&comfy(0, 0)), "ComfyUI: idle");
+        assert_eq!(
+            comfyui_label(&comfy(1, 0)),
+            "ComfyUI: generating (0 queued)"
+        );
+        assert_eq!(
+            comfyui_label(&comfy(1, 3)),
+            "ComfyUI: generating (3 queued)"
+        );
+        let failing = ComfyStatus {
+            failure: Some(failure(
+                "port 8844 (ComfyUI) is held by StoryPress's ComfyUI (pid 7)",
+                2,
+            )),
+            ..ComfyStatus::default()
+        };
+        assert_eq!(
+            comfyui_label(&failing),
+            "ComfyUI failing: port 8844 (ComfyUI) is held by StoryPress's ComfyUI (pid 7) (x2)"
+        );
+        let long = ComfyStatus {
+            failure: Some(failure(&"b".repeat(200), 1)),
+            ..ComfyStatus::default()
+        };
+        assert_eq!(
+            comfyui_label(&long),
+            format!("ComfyUI failing: {}...", "b".repeat(FAILURE_REASON_MAX))
+        );
+        // a stale marker never hides a healthy ComfyUI
+        let up = ComfyStatus {
+            failure: Some(failure("old", 1)),
+            ..comfy(0, 0)
+        };
+        assert_eq!(comfyui_label(&up), "ComfyUI: idle");
+    }
+
+    #[test]
+    fn the_comfyui_queue_parses_only_its_own_shape() {
+        assert_eq!(
+            parse_comfyui_queue(
+                &json!({"queue_running": [[0, "a"]], "queue_pending": [[1, "b"], [2, "c"]]})
+            ),
+            Some((1, 2))
+        );
+        assert_eq!(
+            parse_comfyui_queue(&json!({"queue_running": [], "queue_pending": []})),
+            Some((0, 0))
+        );
+        for bad in [
+            json!({}),
+            json!({"queue_running": []}),
+            json!({"queue_running": 1, "queue_pending": []}),
+            json!({"models": []}),
+            json!([]),
+        ] {
+            assert_eq!(parse_comfyui_queue(&bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_comfyui_rows_show_when_wanted_or_reachable() {
+        let view = |status: &ComfyStatus, wanted| {
+            build_view(
+                &OmlxStatus::default(),
+                status,
+                wanted,
+                HelperState::NotRegistered,
+                EngineLifetime::WithApp,
+            )
+        };
+        let hidden = view(&ComfyStatus::default(), false);
+        assert!(!hidden.comfyui_visible && !hidden.comfyui_free_enabled);
+        // wanted but not up (starting, or failing): shown, Free disabled
+        let starting = view(&ComfyStatus::default(), true);
+        assert!(starting.comfyui_visible && !starting.comfyui_free_enabled);
+        assert_eq!(starting.comfyui_label, "ComfyUI: not running");
+        // up without being wanted (started by hand): shown and freeable
+        let running = view(&comfy(0, 0), false);
+        assert!(running.comfyui_visible && running.comfyui_free_enabled);
+        assert_eq!(running.comfyui_label, "ComfyUI: idle");
     }
 
     #[test]
@@ -1046,6 +1315,11 @@ mod tests {
     fn menu_ids_round_trip_to_actions() {
         assert_eq!(parse_action("engine:stop-all"), Some(Action::StopAll));
         assert_eq!(parse_action("engine:helpers"), Some(Action::OpenLoginItems));
+        assert_eq!(
+            parse_action("engine:comfyui-free"),
+            Some(Action::FreeComfyui)
+        );
+        assert_eq!(parse_action("engine:comfyui-label"), None);
         assert_eq!(
             parse_action("engine:unload:ukisai--Swift"),
             Some(Action::Unload("ukisai--Swift".into()))
