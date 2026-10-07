@@ -9,6 +9,7 @@ import asyncio
 import concurrent.futures
 import os
 import sys
+import threading
 import time
 import weakref
 from collections import deque
@@ -139,22 +140,83 @@ async def _comfyui_refusal(config: AttachedEnginesConfig, action: str, *, cached
     return None
 
 
+class MediaHold:
+    """Studio's claim on a media load from admission until the backend publishes its own loading state.
+
+    ``begin_load`` returns before the model is resident, and the route validates and selects an engine
+    between admission and ``begin_load``. Without a claim an oMLX request admitted in that window would
+    reload beside the media model. The claim is taken under the arbiter lock, so a concurrent oMLX
+    admission either ran first (the media load is then refused or has unloaded it) or sees the claim.
+    ``release`` is idempotent; the route calls it in a ``finally``.
+    """
+
+    __slots__ = ("kind", "active")
+
+    def __init__(self, kind: str):
+        self.kind = kind
+        self.active = False
+
+    def release(self) -> None:
+        with _media_holds_lock:
+            self.active = False
+            _media_holds.discard(self)
+
+
+_media_holds: set[MediaHold] = set()
+_media_holds_lock = threading.Lock()
+
+
+def new_media_hold(kind: str) -> MediaHold:
+    """An unregistered claim for an ``image`` or ``video`` load; admission registers it."""
+    return MediaHold(kind)
+
+
+def _register_media_hold(hold: MediaHold) -> None:
+    with _media_holds_lock:
+        hold.active = True
+        _media_holds.add(hold)
+
+
+def _media_held() -> Optional[str]:
+    with _media_holds_lock:
+        kinds = {hold.kind for hold in _media_holds}
+    if not kinds:
+        return None
+    return "is loading a video model" if kinds == {"video"} else "is loading an image model"
+
+
 def _studio_media_resident() -> Optional[str]:
-    """Which Studio image or video model is resident, if any. Reads loaded modules only: nothing is imported or constructed."""
-    for module_name, attribute, what in (
-        ("core.inference.diffusion", "_diffusion_backend", "has an image model loaded"),
-        ("core.inference.sd_cpp_backend", "_sd_cpp_backend", "has an image model loaded"),
-        ("core.inference.video", "_backend", "has a video model loaded"),
+    """Which Studio image or video model is resident, loading, or about to load, if any.
+    Reads loaded modules only: nothing is imported or constructed."""
+    for module_name, attribute, noun in (
+        ("core.inference.diffusion", "_diffusion_backend", "an image model"),
+        ("core.inference.sd_cpp_backend", "_sd_cpp_backend", "an image model"),
+        ("core.inference.video", "_backend", "a video model"),
     ):
         backend = getattr(sys.modules.get(module_name), attribute, None)
         if backend is None:
             continue
         try:
             if backend.status().get("loaded"):
-                return what
+                return f"has {noun} loaded"
+            loading_repo_ids = getattr(backend, "loading_repo_ids", None)
+            if callable(loading_repo_ids) and loading_repo_ids():
+                return f"is loading {noun}"
         except Exception:
             continue
-    return None
+    return _media_held()
+
+
+_MEDIA_PROBE_TIMEOUT_S = 3.0
+
+
+async def _media_resident_async() -> Optional[str]:
+    """``_studio_media_resident`` off the event loop: a backend's loading probe takes its own lock, which a
+    load can hold. A probe that does not answer in time is a refusal, not an admission."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_studio_media_resident), _MEDIA_PROBE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return "is busy loading or unloading an image or video model"
 
 
 def _training_active() -> bool:
@@ -199,7 +261,7 @@ def _freed_action(urls: list[str]) -> str:
     return f"Freed ComfyUI memory: {', '.join(urls)}"
 
 
-async def _admit(reason: str, *, local: bool) -> ArbiterResult:
+async def _admit(reason: str, *, local: bool, media_hold: Optional[MediaHold] = None) -> ArbiterResult:
     try:
         config = get_config()
         if not config.enabled:
@@ -213,6 +275,9 @@ async def _admit(reason: str, *, local: bool) -> ArbiterResult:
                     raise AttachedAdmissionError(
                         f"Studio {busy}; finish or unload it to use oMLX."
                     )
+                media = await _media_resident_async()
+                if media:
+                    raise AttachedAdmissionError(f"Studio {media}; unload it to use oMLX.")
             if not local and config.arbitrate_comfyui:
                 refusal = await _comfyui_refusal(config, "to use oMLX", cached = True)
                 if refusal:
@@ -222,6 +287,8 @@ async def _admit(reason: str, *, local: bool) -> ArbiterResult:
                     refusal = await _comfyui_refusal(config, "before loading a local model")
                     if refusal:
                         raise AttachedAdmissionError(refusal)
+                if media_hold is not None:
+                    _register_media_hold(media_hold)
                 freed = await free_comfyui() or []
                 unloaded = await _unload_omlx(config)
                 actions = [f"Unloaded oMLX: {', '.join(unloaded)}"] if unloaded else []
@@ -232,6 +299,8 @@ async def _admit(reason: str, *, local: bool) -> ArbiterResult:
                 return ArbiterResult(acted = bool(actions), actions = tuple(actions))
             return ArbiterResult()
     except Exception as exc:
+        if media_hold is not None:
+            media_hold.release()
         message = f"Cannot free shared memory for {reason}: {exc}"
         logger.warning("%s", message)
         return ArbiterResult(skipped = "error", error = message)
@@ -264,8 +333,10 @@ def targets_omlx(provider_type: Optional[str], base_url: Optional[str]) -> bool:
     return target is not None and target == _origin(get_config().omlx_url)
 
 
-async def free_for_local(reason: Reason) -> ArbiterResult:
-    return await _admit(reason, local = True)
+async def free_for_local(reason: Reason, *, media_hold: Optional[MediaHold] = None) -> ArbiterResult:
+    """Admit local work. A Studio image or video load passes its ``MediaHold``, registered under the arbiter lock on
+    success so oMLX is refused from this moment until the route releases it (or the backend reports the load)."""
+    return await _admit(reason, local = True, media_hold = media_hold)
 
 
 async def before_omlx_use() -> ArbiterResult:
@@ -302,7 +373,7 @@ async def before_comfyui_job() -> ArbiterResult:
             return ArbiterResult(skipped = "arbitration_off")
         async with _lock():
             cancel_comfyui_idle_free()
-            busy = _local_workload() or _studio_media_resident()
+            busy = _local_workload() or await _media_resident_async()
             if busy:
                 raise AttachedAdmissionError(f"Studio {busy}; finish or unload it to run a ComfyUI job.")
             _, peers = _comfyui_targets(config)
