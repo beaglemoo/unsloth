@@ -2489,17 +2489,6 @@ export function ImagesPage({
 
   const restoreSettings = useCallback((image: GalleryImage) => {
     const viaConnection = image.model_kind === "connection";
-    // A ComfyUI record reopens in ComfyUI mode with its template and parameters.
-    const comfyRecall = recallFromImage(image);
-    if (comfyRecall) {
-      setEngine("comfyui");
-      setWorkflow("create");
-      useComfyPanelStore.getState().requestRecall(comfyRecall);
-      toast.success("Settings restored to the ComfyUI panel");
-      return;
-    }
-    // Any other record is a Studio recipe: leave ComfyUI mode so it restores where it applies.
-    setEngine("studio");
     // Negative prompt only applies when guidance>0; do not restore a hidden value.
     const restoredNegative = image.guidance > 0 ? (image.negative_prompt ?? "") : "";
     setNegativePrompt(restoredNegative);
@@ -2578,7 +2567,7 @@ export function ImagesPage({
     } else {
       toast.success("Settings restored to inputs", rescaled);
     }
-  }, [changeSamplerChoice, samplerOptions.length, setEngine, setPromptFor, setWorkflow, sizeLimits]);
+  }, [changeSamplerChoice, samplerOptions.length, setPromptFor, setWorkflow, sizeLimits]);
 
   // Like dropping an image on ComfyUI: Unsloth's recipe first, else AUTOMATIC1111 / ComfyUI metadata.
   const importFileRef = useRef<HTMLInputElement>(null);
@@ -2716,6 +2705,24 @@ export function ImagesPage({
       }
     },
     [importSettingsFromFile],
+  );
+
+  // Recipe > Restore: a ComfyUI record reopens in ComfyUI mode with its template and parameters, any
+  // other record is a Studio recipe and leaves ComfyUI mode so it restores where it applies.
+  const restoreFromRecipe = useCallback(
+    (image: GalleryImage) => {
+      const comfyRecall = recallFromImage(image);
+      if (comfyRecall) {
+        setEngine("comfyui");
+        setWorkflow("create");
+        useComfyPanelStore.getState().requestRecall(comfyRecall);
+        toast.success("Settings restored to the ComfyUI panel");
+        return;
+      }
+      setEngine("studio");
+      restoreSettings(image);
+    },
+    [restoreSettings, setEngine, setWorkflow],
   );
 
   // A locked ratio keeps the paired dimension in step; "custom" frees both, Flip swaps W/H. ratioHW is h/w for [a,b].
@@ -6137,7 +6144,7 @@ export function ImagesPage({
                   >
                     <HugeiconsIcon icon={ArrowExpand01Icon} className="size-4" />
                   </Button>
-                  <RecipePopover image={selected} onRestore={restoreSettings} active={active} />
+                  <RecipePopover image={selected} onRestore={restoreFromRecipe} active={active} />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild={true}>
                       <Button size="sm" variant="ghost" className="gap-1.5">

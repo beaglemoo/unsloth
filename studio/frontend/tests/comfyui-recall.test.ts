@@ -112,10 +112,14 @@ test("an unset sampler in the record keeps the template default", () => {
 
 test("the page routes a ComfyUI record to the panel and any other to Studio", () => {
   const page = readSrc("features/images/images-page.tsx");
-  const restore = page.slice(page.indexOf("const restoreSettings = useCallback"));
-  const head = restore.slice(0, restore.indexOf("setNegativePrompt(restoredNegative)"));
-  assert.match(head, /recallFromImage\(image\)/);
-  assert.match(head, /setEngine\("comfyui"\)/);
-  assert.match(head, /requestRecall\(comfyRecall\)/);
-  assert.match(head, /setEngine\("studio"\)/);
+  const start = page.indexOf("const restoreFromRecipe = useCallback");
+  const wrapper = page.slice(start, page.indexOf("[restoreSettings, setEngine, setWorkflow]", start));
+  assert.match(wrapper, /recallFromImage\(image\)/);
+  assert.match(wrapper, /setEngine\("comfyui"\)/);
+  assert.match(wrapper, /requestRecall\(comfyRecall\)/);
+  assert.match(wrapper, /setEngine\("studio"\);\s*restoreSettings\(image\)/);
+  // the Recipe popover restores through the wrapper, and Studio's own restore is untouched
+  assert.match(page, /<RecipePopover image=\{selected\} onRestore=\{restoreFromRecipe\}/);
+  const restore = page.slice(page.indexOf("const restoreSettings = useCallback"), start);
+  assert.doesNotMatch(restore, /recallFromImage|setEngine|ComfyPanel/);
 });
