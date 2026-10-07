@@ -325,24 +325,29 @@ def test_a_failing_install_does_not_swap_the_engines(e):
 
 def test_the_submodules_are_updated_to_the_pinned_commits(tmp_path):
     e = Env(tmp_path)
-    sub = tmp_path / "sub.git"
-    subwork = tmp_path / "subwork"
-    git(tmp_path, "init", "-q", "-b", "main", str(subwork))
-    pinned = commit(subwork, "engine.txt")
-    git(tmp_path, "clone", "-q", "--bare", str(subwork), str(sub))
-    # the other clone adds the submodule and pushes
-    git(e.other, "submodule", "add", "-q", str(sub), "studio/engines/omlx")
-    git(e.other, "commit", "-q", "-m", "add the omlx submodule")
+    bare, work, pinned = {}, {}, {}
+    for name in ("omlx", "comfyui"):
+        work[name] = tmp_path / f"{name}-work"
+        bare[name] = tmp_path / f"{name}.git"
+        git(tmp_path, "init", "-q", "-b", "main", str(work[name]))
+        pinned[name] = commit(work[name], "engine.txt")
+        git(tmp_path, "clone", "-q", "--bare", str(work[name]), str(bare[name]))
+    # the other clone adds the submodules and pushes
+    for name in ("omlx", "comfyui"):
+        git(e.other, "submodule", "add", "-q", str(bare[name]), f"studio/engines/{name}")
+    git(e.other, "commit", "-q", "-m", "add the omlx and comfyui submodules")
     git(e.other, "push", "-q", "origin", BRANCH)
-    # a newer submodule commit that the superproject does NOT pin
-    commit(subwork, "later.txt")
-    git(subwork, "push", "-q", str(sub), "HEAD:main")
+    # newer submodule commits that the superproject does NOT pin
+    for name in ("omlx", "comfyui"):
+        commit(work[name], "later.txt")
+        git(work[name], "push", "-q", str(bare[name]), "HEAD:main")
     r = e.run("--yes")
     assert r.returncode == 0, out(r)
-    checked_out = git(e.work / "studio/engines/omlx", "rev-parse", "HEAD").stdout.strip()
-    assert checked_out == pinned
-    assert (e.work / "studio/engines/omlx/engine.txt").exists()
-    assert not (e.work / "studio/engines/omlx/later.txt").exists()
+    for name in ("omlx", "comfyui"):
+        checkout = e.work / "studio/engines" / name
+        assert git(checkout, "rev-parse", "HEAD").stdout.strip() == pinned[name]
+        assert (checkout / "engine.txt").exists()
+        assert not (checkout / "later.txt").exists()
 
 
 # ---- never the upstream remote -------------------------------------------------------------
