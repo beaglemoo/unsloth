@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-"""Owner-only management routes for the attached oMLX engine."""
+"""Owner-only management routes for the attached oMLX and ComfyUI engines."""
 
 import asyncio
 import hashlib
@@ -18,7 +18,8 @@ from core.inference.attached import (
     AttachedEngineBusy,
     AttachedEngineError,
 )
-from core.inference.attached import arbiter
+from core.inference.attached import arbiter, desktop_settings
+from core.inference.attached.comfyui_client import ComfyuiClient, ComfyuiError, system_version
 from core.inference.attached.omlx_client import OmlxClient, OmlxContext
 from loggers import get_logger
 from routes.provider_credentials import provider_config_guard
@@ -37,6 +38,8 @@ router = APIRouter(dependencies = [Depends(get_current_subject), Depends(policy.
 _gated = APIRouter(dependencies = [Depends(_require_enabled)])
 
 MIN_CONTEXT = 4096
+# The model folders the ComfyUI panel lists.
+COMFYUI_MODEL_FOLDERS = ("diffusion_models", "checkpoints", "text_encoders", "vae", "loras")
 
 class OmlxModelRequest(BaseModel):
     model_id: str = Field(min_length = 1, max_length = 512)
@@ -52,8 +55,16 @@ class PrepareRequest(BaseModel):
     provider: Literal["omlx"]
 
 
+class ComfyuiCancelRequest(BaseModel):
+    prompt_id: str = Field(min_length = 1, max_length = 128)
+
+
 def _omlx(config: AttachedEnginesConfig) -> OmlxClient:
     return OmlxClient(config.omlx_url)
+
+
+def _comfyui(config: AttachedEnginesConfig) -> ComfyuiClient:
+    return ComfyuiClient(config.comfyui_url)
 
 
 def _models_hash(omlx_ids: list[str]) -> str:
@@ -76,9 +87,37 @@ def _engine_failure(name: str):
     return read_failure(name)
 
 
-@_gated.get("/status")
-async def attached_status(since: float = 0):
-    config = get_config()
+async def _probe_comfyui(config: AttachedEnginesConfig) -> dict:
+    """The ``comfyui`` status block. Never raises: a ComfyUI that is down is just ``reachable: false``."""
+    own = _comfyui(config)
+    peer_urls = [url for url in config.comfyui_peer_urls if url != config.comfyui_url]
+
+    async def peer(url: str) -> dict:
+        queue = await ComfyuiClient(url).queue()
+        return {"url": url, "reachable": queue.reachable, "busy": queue.busy}
+
+    queue, stats, peers = await asyncio.gather(
+        own.queue(), own.system_stats(), asyncio.gather(*(peer(url) for url in peer_urls))
+    )
+    system = stats.get("system") if isinstance(stats, dict) else None
+    system = system if isinstance(system, dict) else {}
+    devices = stats.get("devices") if isinstance(stats, dict) else None
+    return {
+        "url": config.comfyui_url,
+        "reachable": queue.reachable,
+        "version": system_version(stats),
+        "queue_running": len(queue.running_ids),
+        "queue_pending": len(queue.pending_ids),
+        "devices": devices if isinstance(devices, list) else [],
+        "ram_total": system.get("ram_total"),
+        "ram_free": system.get("ram_free"),
+        "failure": _engine_failure("comfyui"),
+        "helper_wanted": desktop_settings.helper_wanted("comfyui"),
+        "peers": list(peers),
+    }
+
+
+async def _probe_omlx(config: AttachedEnginesConfig) -> tuple[dict, list[str]]:
     omlx_client = _omlx(config)
     omlx_status = await omlx_client.status()
     omlx_ids = (
@@ -87,9 +126,17 @@ async def attached_status(since: float = 0):
     omlx = asdict(omlx_status)
     omlx["chat_model_ids"] = omlx_ids
     omlx["failure"] = _engine_failure("omlx")
+    return omlx, omlx_ids
+
+
+@_gated.get("/status")
+async def attached_status(since: float = 0):
+    config = get_config()
+    (omlx, omlx_ids), comfyui = await asyncio.gather(_probe_omlx(config), _probe_comfyui(config))
     return {
         "enabled": True,
         "omlx": omlx,
+        "comfyui": comfyui,
         "models_hash": _models_hash(omlx_ids),
         "notices": arbiter.recent_notices(since),
     }
@@ -201,8 +248,8 @@ async def _resolve_omlx_dir(client: OmlxClient, model_id: str) -> str:
     return dir_id
 
 
-async def _admit_omlx_use():
-    result = await arbiter.before_omlx_use()
+async def _admit_omlx_use(admit = None):
+    result = await (admit or arbiter.before_omlx_use)()
     try:
         result.require_clear()
     except AttachedEngineError as exc:
@@ -220,7 +267,7 @@ async def omlx_load(body: OmlxModelRequest):
     config = get_config()
     client = _omlx(config)
     dir_id = await _resolve_omlx_dir(client, body.model_id)
-    notice = await _admit_omlx_use()
+    notice = await _admit_omlx_use(arbiter.before_omlx_load)
     try:
         await client.load(dir_id)
     except AttachedEngineError as exc:
@@ -296,13 +343,81 @@ async def omlx_unload_all():
 
 @_gated.post("/prepare")
 async def prepare(body: PrepareRequest):
-    result = await _admit_omlx_use()
+    result = await _admit_omlx_use(arbiter.before_omlx_load)
     return {
         "provider": body.provider,
         "actions": list(result.actions),
         "in_flight_killed": result.in_flight_killed,
     }
 
+
+
+def _comfyui_unreachable(exc: Exception) -> HTTPException:
+    return HTTPException(status_code = 502, detail = "ComfyUI is not reachable.")
+
+
+async def _comfyui_queue(client: ComfyuiClient):
+    queue = await client.queue()
+    if not queue.reachable:
+        raise HTTPException(status_code = 502, detail = "ComfyUI is not reachable.")
+    return queue
+
+
+@_gated.post("/comfyui/free")
+async def comfyui_free():
+    """Unload ComfyUI's models and free its memory. While a job runs ComfyUI applies it once the job ends (``deferred``)."""
+    client = _comfyui(get_config())
+    queue = await _comfyui_queue(client)
+    try:
+        await client.free()
+    except ComfyuiError as exc:
+        raise _comfyui_unreachable(exc) from exc
+    return {"freed": True, "deferred": queue.busy}
+
+
+@_gated.get("/comfyui/queue")
+async def comfyui_queue():
+    queue = await _comfyui_queue(_comfyui(get_config()))
+
+    def rows(ids: tuple[str, ...], state: str) -> list[dict]:
+        return [
+            {
+                "prompt_id": prompt_id,
+                "number": queue.numbers.get(prompt_id),
+                "state": state,
+                "studio": queue.studio.get(prompt_id),
+            }
+            for prompt_id in ids
+        ]
+
+    return {"running": rows(queue.running_ids, "running"), "pending": rows(queue.pending_ids, "pending")}
+
+
+@_gated.post("/comfyui/queue/cancel")
+async def comfyui_cancel(body: ComfyuiCancelRequest):
+    """Interrupt a running job or drop a pending one on Studio's own ComfyUI (never a peer)."""
+    client = _comfyui(get_config())
+    queue = await _comfyui_queue(client)
+    try:
+        if body.prompt_id in queue.running_ids:
+            await client.interrupt(body.prompt_id)
+            return {"cancelled": body.prompt_id, "state": "running"}
+        if body.prompt_id in queue.pending_ids:
+            await client.delete_pending([body.prompt_id])
+            return {"cancelled": body.prompt_id, "state": "pending"}
+    except ComfyuiError as exc:
+        raise _comfyui_unreachable(exc) from exc
+    raise HTTPException(status_code = 404, detail = "Job not found in the ComfyUI queue.")
+
+
+@_gated.get("/comfyui/models")
+async def comfyui_models():
+    client = _comfyui(get_config())
+    try:
+        lists = await asyncio.gather(*(client.models(folder) for folder in COMFYUI_MODEL_FOLDERS))
+    except ComfyuiError as exc:
+        raise _comfyui_unreachable(exc) from exc
+    return {"folders": dict(zip(COMFYUI_MODEL_FOLDERS, lists))}
 
 
 router.include_router(_gated)
