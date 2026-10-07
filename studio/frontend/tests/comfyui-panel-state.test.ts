@@ -1,0 +1,347 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  type ComfyParams,
+  type ComfyTemplate,
+  MAX_LORAS,
+  buildGenerateRequest,
+  clampNumber,
+  defaultParams,
+  describeComfyFailure,
+  loraRowsFromRecipe,
+  missingModelList,
+  parseGraphJson,
+  parseSeed,
+  progressFromApi,
+  queueLabel,
+  randomSeed,
+  reconcileParams,
+  snapSide,
+  templatesFromApi,
+} from "../src/features/images/comfyui/comfyui-panel-state.ts";
+
+const QWEN = {
+  id: "qwen-image-2.1-t2i",
+  name: "Qwen-Image 2.1 (text to image)",
+  kind: "t2i",
+  source: "shipped",
+  defaults: { steps: 25, cfg: 1.0, width: 1024, height: 1024, sampler: "euler", scheduler: "simple" },
+  limits: { steps: [1, 100], cfg: [0, 20], side: [256, 2048], multiple: 16, batch_size: [1, 4] },
+  slots: [
+    "prompt",
+    "negative_prompt",
+    "seed",
+    "steps",
+    "cfg",
+    "sampler",
+    "scheduler",
+    "width",
+    "height",
+    "batch_size",
+  ],
+  supports_lora: true,
+  required_models: { diffusion_models: ["qwen_image_2.1_bf16.safetensors"], vae: ["vae.safetensors"] },
+  missing_models: {},
+};
+
+function qwen(patch: Partial<typeof QWEN> = {}): ComfyTemplate {
+  const parsed = templatesFromApi({ comfyui_reachable: true, templates: [{ ...QWEN, ...patch }] });
+  return parsed.templates[0];
+}
+
+function params(patch: Partial<ComfyParams> = {}): ComfyParams {
+  return { ...defaultParams(qwen()), prompt: "a cabin", ...patch };
+}
+
+test("the templates response parses to camel case, with reachability", () => {
+  const parsed = templatesFromApi({ comfyui_reachable: true, templates: [QWEN] });
+  assert.equal(parsed.reachable, true);
+  const [t] = parsed.templates;
+  assert.equal(t.id, "qwen-image-2.1-t2i");
+  assert.equal(t.supportsLora, true);
+  assert.deepEqual(t.limits.side, [256, 2048]);
+  assert.equal(t.limits.multiple, 16);
+  assert.deepEqual(t.limits.batchSize, [1, 4]);
+  assert.equal(t.defaults.sampler, "euler");
+  assert.deepEqual(t.missingModels, {});
+});
+
+test("missing_models null (ComfyUI down) stays null and lists nothing", () => {
+  const t = qwen({ missing_models: null as unknown as Record<string, never> });
+  assert.equal(t.missingModels, null);
+  assert.deepEqual(missingModelList(t), []);
+});
+
+test("missing models list as folder/name", () => {
+  const t = qwen({ missing_models: { vae: ["vae.safetensors"] } as never });
+  assert.deepEqual(missingModelList(t), ["vae/vae.safetensors"]);
+});
+
+test("junk in the templates response is tolerated", () => {
+  assert.deepEqual(templatesFromApi(null), { reachable: false, templates: [] });
+  const parsed = templatesFromApi({ templates: [null, { id: "" }, { id: "x" }, 4] });
+  assert.deepEqual(parsed.templates.map((t) => t.id), ["x"]);
+  // a template with no limits falls back to the shipped defaults
+  assert.deepEqual(parsed.templates[0].limits.side, [256, 2048]);
+  assert.equal(parsed.templates[0].supportsLora, false);
+});
+
+test("sides snap down to the multiple and stay inside the range", () => {
+  const { limits } = qwen();
+  assert.equal(snapSide(1030, limits), 1024);
+  assert.equal(snapSide(1040, limits), 1040);
+  assert.equal(snapSide(100, limits), 256);
+  assert.equal(snapSide(5000, limits), 2048);
+  assert.equal(snapSide(Number.NaN, limits), 256);
+  // a range whose floor is not a multiple still lands on a multiple
+  assert.equal(snapSide(260, { ...limits, side: [250, 2048] }), 256);
+});
+
+test("clampNumber keeps a value inside its range", () => {
+  assert.equal(clampNumber(150, [1, 100]), 100);
+  assert.equal(clampNumber(-1, [0, 20]), 0);
+  assert.equal(clampNumber(Number.NaN, [1, 100]), 1);
+});
+
+test("defaults come from the template", () => {
+  const p = defaultParams(qwen());
+  assert.equal(p.steps, 25);
+  assert.equal(p.cfg, 1);
+  assert.equal(p.width, 1024);
+  assert.equal(p.sampler, "euler");
+  assert.equal(p.scheduler, "simple");
+  assert.equal(p.seed, "");
+  assert.deepEqual(p.loras, []);
+});
+
+test("reconcile clamps numbers, snaps sides and trims LoRAs", () => {
+  const rows = Array.from({ length: 6 }, (_, i) => ({ name: `l${i}.safetensors`, strength: 1 }));
+  const out = reconcileParams(
+    params({ steps: 500, cfg: 99, width: 1001, height: 99999, batchSize: 9, loras: rows }),
+    qwen(),
+  );
+  assert.equal(out.steps, 100);
+  assert.equal(out.cfg, 20);
+  assert.equal(out.width, 992);
+  assert.equal(out.height, 2048);
+  assert.equal(out.batchSize, 4);
+  assert.equal(out.loras.length, MAX_LORAS);
+  // a template without LoRA support drops them
+  assert.deepEqual(
+    reconcileParams(params({ loras: rows.slice(0, 1) }), qwen({ supports_lora: false })).loras,
+    [],
+  );
+});
+
+test("seed text: empty is random, digits are exact, anything else is invalid", () => {
+  assert.equal(parseSeed(""), null);
+  assert.equal(parseSeed("  "), null);
+  assert.equal(parseSeed("42"), 42);
+  assert.equal(parseSeed("-1"), undefined);
+  assert.equal(parseSeed("1.5"), undefined);
+  assert.equal(parseSeed("abc"), undefined);
+  assert.equal(parseSeed(String(2 ** 53)), undefined);
+});
+
+test("randomize makes a numeric seed the field accepts", () => {
+  assert.equal(randomSeed(() => 0), "0");
+  const seed = randomSeed(() => 0.999999);
+  assert.ok(parseSeed(seed) !== undefined && parseSeed(seed) !== null);
+});
+
+test("the request carries every slot the template binds", () => {
+  const built = buildGenerateRequest(
+    qwen(),
+    params({
+      prompt: "  a cabin  ",
+      negativePrompt: "blurry",
+      seed: "7",
+      steps: 30,
+      cfg: 2,
+      width: 1344,
+      height: 768,
+      batchSize: 2,
+      loras: [{ name: " style.safetensors ", strength: 0.8 }, { name: "", strength: 1 }],
+    }),
+  );
+  assert.ok(built.ok);
+  assert.deepEqual(built.body, {
+    template_id: "qwen-image-2.1-t2i",
+    prompt: "a cabin",
+    negative_prompt: "blurry",
+    width: 1344,
+    height: 768,
+    seed: 7,
+    steps: 30,
+    cfg: 2,
+    sampler: "euler",
+    scheduler: "simple",
+    batch_size: 2,
+    loras: [{ name: "style.safetensors", strength: 0.8 }],
+  });
+});
+
+test("an empty seed is left out so the backend picks one", () => {
+  const built = buildGenerateRequest(qwen(), params({ seed: "" }));
+  assert.ok(built.ok);
+  assert.equal("seed" in built.body, false);
+});
+
+test("slots the template does not bind are not sent", () => {
+  const slim = qwen({ slots: ["prompt", "seed", "steps"] });
+  const built = buildGenerateRequest(
+    slim,
+    params({ negativePrompt: "x", width: 512, cfg: 5, sampler: "heun" }),
+  );
+  assert.ok(built.ok);
+  for (const key of ["negative_prompt", "width", "height", "cfg", "sampler", "scheduler"]) {
+    assert.equal(key in built.body, false, key);
+  }
+  assert.equal(built.body.steps, 25);
+});
+
+test("an empty prompt or a bad seed is refused before any request", () => {
+  assert.deepEqual(buildGenerateRequest(qwen(), params({ prompt: "   " })), {
+    ok: false,
+    error: "Prompt is empty",
+  });
+  const bad = buildGenerateRequest(qwen(), params({ seed: "abc" }));
+  assert.equal(bad.ok, false);
+});
+
+test("the request is clamped to the template limits", () => {
+  const built = buildGenerateRequest(qwen(), params({ steps: 999, width: 5000, cfg: -3 }));
+  assert.ok(built.ok);
+  assert.equal(built.body.steps, 100);
+  assert.equal(built.body.width, 2048);
+  assert.equal(built.body.cfg, 0);
+});
+
+test("LoRA recipe entries split on the last colon", () => {
+  assert.deepEqual(loraRowsFromRecipe(["style.safetensors:0.8", "a:b.safetensors:1.5", "bad", ":2"]), [
+    { name: "style.safetensors", strength: 0.8 },
+    { name: "a:b.safetensors", strength: 1.5 },
+  ]);
+  assert.deepEqual(loraRowsFromRecipe(undefined), []);
+});
+
+test("503 off points at Settings > Engines", () => {
+  const f = describeComfyFailure({
+    status: 503,
+    code: "off",
+    detail: "ComfyUI is off, enable it in Settings > Engines.",
+  });
+  assert.equal(f.kind, "off");
+  assert.equal(f.openSettings, true);
+  assert.match(f.message, /Settings > Engines/);
+});
+
+test("503 admission is a calm retry with the Retry-After seconds and an unload offer", () => {
+  const f = describeComfyFailure({
+    status: 503,
+    code: "admission",
+    detail: "A Studio image model is loaded.",
+    retryAfterS: 15,
+  });
+  assert.equal(f.kind, "busy");
+  assert.equal(f.retryAfterS, 15);
+  assert.equal(f.offerUnload, true);
+  assert.match(f.message, /Try again in about 15 s\./);
+  assert.doesNotMatch(f.message, /\.\./);
+  // no header: the default applies
+  assert.equal(
+    describeComfyFailure({ status: 503, code: "admission", detail: "x", retryAfterS: null }).retryAfterS,
+    15,
+  );
+  assert.equal(
+    describeComfyFailure({ status: 503, code: "admission", detail: "x", retryAfterS: 30 }).retryAfterS,
+    30,
+  );
+});
+
+test("409 busy and 409 cancelled are told apart by the code", () => {
+  assert.equal(describeComfyFailure({ status: 409, code: "busy", detail: "A job is running." }).kind, "busy");
+  const cancelled = describeComfyFailure({ status: 409, code: "cancelled", detail: "Generation cancelled." });
+  assert.equal(cancelled.kind, "cancelled");
+  assert.match(cancelled.message, /Nothing was saved/);
+});
+
+test("422 missing models, 502 not running, 404 template, 504 timeout", () => {
+  assert.equal(
+    describeComfyFailure({ status: 422, code: "missing_models", detail: "ComfyUI is missing model files: vae/x." }).kind,
+    "missing",
+  );
+  const down = describeComfyFailure({ status: 502, code: "not_running", detail: "x" });
+  assert.equal(down.kind, "not_running");
+  assert.equal(down.openSettings, true);
+  const gone = describeComfyFailure({ status: 404, code: "template", detail: "Template not found." });
+  assert.equal(gone.reloadTemplates, true);
+  assert.match(describeComfyFailure({ status: 504, code: "timeout", detail: "Timed out." }).message, /queue/);
+});
+
+test("execution and parameter errors show the backend detail", () => {
+  for (const [status, code] of [
+    [502, "execution"],
+    [422, "params"],
+    [422, "graph"],
+  ] as const) {
+    const f = describeComfyFailure({ status, code, detail: "ComfyUI failed in KSampler: boom" });
+    assert.equal(f.kind, "error");
+    assert.equal(f.message, "ComfyUI failed in KSampler: boom");
+  }
+});
+
+test("an unknown 503 with no code still reads as a retry", () => {
+  const f = describeComfyFailure({ status: 503, code: null, detail: "", retryAfterS: null });
+  assert.equal(f.kind, "busy");
+  assert.match(f.message, /15 s/);
+  assert.equal(describeComfyFailure({ status: 500, code: null, detail: "" }).kind, "error");
+});
+
+test("progress parses to the Images progress shape plus the queue slot", () => {
+  const p = progressFromApi({
+    active: true,
+    step: 3,
+    total_steps: 25,
+    fraction: 0.12,
+    eta_seconds: 40.5,
+    phase: "denoise",
+    preview: null,
+    preview_seq: 2,
+    queue_position: 0,
+    prompt_id: "abc",
+    engine: "comfyui",
+  });
+  assert.equal(p.step, 3);
+  assert.equal(p.phase, "denoise");
+  assert.equal(p.queue_position, 0);
+  assert.equal(p.prompt_id, "abc");
+  const idle = progressFromApi(null);
+  assert.equal(idle.active, false);
+  assert.equal(idle.phase, null);
+  assert.equal(progressFromApi({ phase: "weird", fraction: 4 }).fraction, 1);
+});
+
+test("queue labels only appear for a job that has not started", () => {
+  assert.equal(queueLabel(0), null);
+  assert.equal(queueLabel(null), null);
+  assert.equal(queueLabel(1), "Next in ComfyUI's queue");
+  assert.equal(queueLabel(3), "Position 3 in ComfyUI's queue");
+});
+
+test("graph import accepts an API-format object and rejects the rest", () => {
+  const ok = parseGraphJson('{"1": {"class_type": "KSampler", "inputs": {}}}');
+  assert.ok(ok.ok);
+  assert.deepEqual(Object.keys(ok.graph), ["1"]);
+  assert.equal(parseGraphJson("").ok, false);
+  assert.equal(parseGraphJson("{nope").ok, false);
+  assert.equal(parseGraphJson("[]").ok, false);
+  assert.equal(parseGraphJson("{}").ok, false);
+  const editor = parseGraphJson('{"nodes": [], "links": []}');
+  assert.equal(editor.ok, false);
+  assert.ok(!editor.ok && /API Format/.test(editor.error));
+});
