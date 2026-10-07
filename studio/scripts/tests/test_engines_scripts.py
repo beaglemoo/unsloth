@@ -137,12 +137,221 @@ class TestEnginesLaunch:
         assert read_fail(home, "omlx")["count"] == 1
 
 
+def comfy_layout(home, main=True):
+    """A fake ComfyUI runtime: a python that echoes its argv, and src/main.py."""
+    fake_python(home / "comfyui" / "bin" / "python")
+    if main:
+        (home / "comfyui" / "src").mkdir(parents=True, exist_ok=True)
+        (home / "comfyui" / "src" / "main.py").write_text("")
+
+
+def comfy_cfg(home, port=18844, models=None, host=None, extra=""):
+    lines = ["[comfyui]", f"port = {port}", f'data_dir = "{home}/data"']
+    if host:
+        lines.append(f'host = "{host}"')
+    if models is not None:
+        lines.append("model_dirs = [" + ", ".join(f'"{m}"' for m in models) + "]")
+    lines.append('extra_args = ["--lowvram", "--offline"]')
+    lines += ["", "[comfyui.env]", 'COMFYUI_TEST = "1"']
+    return "\n".join(lines) + "\n" + extra
+
+
+def listen_as(marker_arg, tmp_path):
+    """A listener process whose argv carries marker_arg (short, so it survives the launcher's
+    truncation of the owner's command line). Returns (process, port)."""
+    script = tmp_path / "listener.py"
+    script.write_text(
+        "import socket, time\n"
+        "s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n"
+        "print(s.getsockname()[1], flush=True); time.sleep(60)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "listener.py", marker_arg], cwd=tmp_path, stdout=subprocess.PIPE, text=True)
+    return proc, int(proc.stdout.readline())
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="engines_launch needs tomllib")
+class TestComfyuiLaunch:
+    def test_print_shows_the_argv_cwd_and_env_and_writes_nothing(self, home):
+        comfy_layout(home)
+        result = launch(home, "comfyui", comfy_cfg(home, models=[str(home / "models")]), "--print")
+        assert result.returncode == 0, result.stderr
+        shown = json.loads(result.stdout)
+        src = home / "comfyui" / "src"
+        assert shown["argv"] == [
+            str(home / "comfyui" / "bin" / "python"), str(src / "main.py"),
+            "--listen", "127.0.0.1", "--port", "18844",
+            "--base-directory", str(home / "data"),
+            "--extra-model-paths-config", str(home / "data" / "extra_model_paths.unsloth.yaml"),
+            "--disable-auto-launch", "--lowvram", "--offline",
+        ]
+        assert shown["cwd"] == str(src)
+        assert shown["env"]["PYTORCH_ENABLE_MPS_FALLBACK"] == "1" and shown["env"]["COMFYUI_TEST"] == "1"
+        assert not (home / "data").exists() and not (home / "comfyui.fail").exists()
+
+    def test_the_default_data_dir_is_under_the_engines_home(self, home):
+        comfy_layout(home)
+        result = launch(home, "comfyui", "[comfyui]\nport = 18844\n", "--print")
+        argv = json.loads(result.stdout)["argv"]
+        assert argv[argv.index("--base-directory") + 1] == str(home / "comfyui-data")
+
+    def test_yaml_for_zero_dirs_is_an_empty_mapping(self, home):
+        comfy_layout(home)
+        result = launch(home, "comfyui", comfy_cfg(home, models=[]))
+        assert result.returncode == 0, result.stderr
+        text = (home / "data" / "extra_model_paths.unsloth.yaml").read_text()
+        assert text.splitlines()[1:] == ["{}"]  # an empty file would load as None and crash ComfyUI
+        yaml = pytest.importorskip("yaml")
+        assert yaml.safe_load(text) == {}
+
+    def test_yaml_for_one_dir_is_exact(self, home):
+        comfy_layout(home)
+        models = home.parent / "weights"
+        models.mkdir()
+        assert launch(home, "comfyui", comfy_cfg(home, models=[str(models)])).returncode == 0
+        text = (home / "data" / "extra_model_paths.unsloth.yaml").read_text()
+        assert text.splitlines()[1:] == [
+            "unsloth_shared_0:",
+            f'  base_path: "{models}"',
+            "  is_default: false",
+            '  checkpoints: "checkpoints"',
+            '  diffusion_models: "diffusion_models\\nunet"',
+            '  text_encoders: "text_encoders\\nclip"',
+            '  vae: "vae"',
+            '  loras: "loras"',
+            '  clip_vision: "clip_vision"',
+            '  controlnet: "controlnet"',
+            '  upscale_models: "upscale_models"',
+            '  embeddings: "embeddings"',
+            '  latent_upscale_models: "latent_upscale_models"',
+            '  model_patches: "model_patches"',
+        ]
+
+    def test_yaml_for_two_dirs_parses_like_comfyuis_loader_expects(self, home):
+        yaml = pytest.importorskip("yaml")
+        comfy_layout(home)
+        a, b = home.parent / "a", home.parent / "b"
+        a.mkdir(), b.mkdir()
+        assert launch(home, "comfyui", comfy_cfg(home, models=[str(a), str(b)])).returncode == 0
+        config = yaml.safe_load((home / "data" / "extra_model_paths.unsloth.yaml").read_text())
+        assert list(config) == ["unsloth_shared_0", "unsloth_shared_1"]
+        for name, base in zip(config, (a, b)):
+            conf = config[name]
+            assert conf.pop("base_path") == str(base) and conf.pop("is_default") is False
+            # what comfy's extra_config does with each remaining key
+            assert all(isinstance(v, str) for v in conf.values())
+            assert conf["diffusion_models"].split("\n") == ["diffusion_models", "unet"]
+            assert conf["text_encoders"].split("\n") == ["text_encoders", "clip"]
+
+    def test_a_tilde_in_model_dirs_is_expanded_before_it_is_written(self, home):
+        comfy_layout(home)
+        assert launch(home, "comfyui", comfy_cfg(home, models=["~/nowhere"])).returncode == 0
+        text = (home / "data" / "extra_model_paths.unsloth.yaml").read_text()
+        assert f'base_path: "{Path.home()}/nowhere"' in text
+
+    def test_a_missing_model_dir_warns_and_still_execs(self, home):
+        comfy_layout(home)
+        gone = home.parent / "not-there"
+        result = launch(home, "comfyui", comfy_cfg(home, models=[str(gone)]))
+        assert result.returncode == 0, result.stderr
+        assert "model dir not found" in result.stderr and str(gone) in result.stderr
+        assert "fake-engine" in result.stdout and "--extra-model-paths-config" in result.stdout
+        assert str(gone) in (home / "data" / "extra_model_paths.unsloth.yaml").read_text()
+        assert not (home / "comfyui.fail").exists()
+
+    @pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.5", "::"])
+    def test_a_non_loopback_host_writes_the_marker(self, home, host):
+        comfy_layout(home)
+        result = launch(home, "comfyui", comfy_cfg(home, host=host, models=[]))
+        assert result.returncode == 78
+        assert "not loopback" in read_fail(home, "comfyui")["reason"]
+        assert not (home / "data").exists()
+
+    @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1"])
+    def test_loopback_hosts_are_accepted(self, home, host):
+        comfy_layout(home)
+        result = launch(home, "comfyui", comfy_cfg(home, host=host, models=[]), "--print")
+        assert result.returncode == 0, result.stderr
+        argv = json.loads(result.stdout)["argv"]
+        assert argv[argv.index("--listen") + 1] == host
+
+    def test_a_port_held_by_storypress_names_it(self, home):
+        comfy_layout(home)
+        holder, port = listen_as("StoryPressRuntime/ComfyUI/main.py", home.parent)
+        try:
+            result = launch(home, "comfyui", comfy_cfg(home, port=port, models=[]))
+        finally:
+            holder.kill()
+            holder.wait()
+        assert result.returncode == 78
+        fail = read_fail(home, "comfyui")
+        assert f"port {port} (ComfyUI) is held by StoryPress's ComfyUI (pid {holder.pid})" in fail["reason"]
+        assert "stop it or change [comfyui] port" in fail["reason"]
+        assert not (home / "data").exists()
+
+    def test_a_port_held_by_another_process_names_its_command(self, home):
+        comfy_layout(home)
+        holder, port = listen_as("some-other-service", home.parent)
+        try:
+            result = launch(home, "comfyui", comfy_cfg(home, port=port, models=[]))
+        finally:
+            holder.kill()
+            holder.wait()
+        assert result.returncode == 78
+        reason = read_fail(home, "comfyui")["reason"]
+        assert f"port {port} (ComfyUI) is held by " in reason and "some-other-service" in reason
+        assert f"(pid {holder.pid})" in reason and "StoryPress" not in reason
+
+    def test_the_owner_is_named_for_omlx_too(self, home):
+        fake_python(home / "omlx" / "bin" / "python")
+        holder, port = listen_as("some-other-service", home.parent)
+        try:
+            result = launch(home, "omlx", f"[omlx]\nport = {port}\n")
+        finally:
+            holder.kill()
+            holder.wait()
+        assert result.returncode == 78
+        assert f"port {port} (oMLX) is held by " in read_fail(home, "omlx")["reason"]
+
+    def test_print_ignores_a_busy_port(self, home):
+        comfy_layout(home)
+        holder, port = listen_as("some-other-service", home.parent)
+        try:
+            result = launch(home, "comfyui", comfy_cfg(home, port=port, models=[]), "--print")
+        finally:
+            holder.kill()
+            holder.wait()
+        assert result.returncode == 0 and not (home / "comfyui.fail").exists()
+
+    @pytest.mark.parametrize("what", ["python", "main"])
+    def test_a_missing_venv_or_source_writes_the_marker(self, home, what):
+        comfy_layout(home, main=what != "main")
+        if what == "python":
+            (home / "comfyui" / "bin" / "python").unlink()
+        result = launch(home, "comfyui", comfy_cfg(home, models=[]))
+        assert result.returncode == 78
+        reason = read_fail(home, "comfyui")["reason"]
+        assert "ComfyUI venv missing" in reason and "build-engines-mac.sh" in reason
+
+    def test_a_successful_start_clears_the_marker(self, home):
+        comfy_layout(home)
+        launch(home, "comfyui", comfy_cfg(home, host="0.0.0.0", models=[]))
+        assert read_fail(home, "comfyui")["count"] == 1
+        result = launch(home, "comfyui", comfy_cfg(home, models=[]))
+        assert result.returncode == 0, result.stderr
+        assert not (home / "comfyui.fail").exists()
+        assert "fake-engine" in result.stdout
+
+    def test_the_usage_names_both_engines(self, home):
+        result = run([sys.executable, str(ENGINES / "engines_launch.py"), "bogus"], env_for(home))
+        assert result.returncode == 78 and "omlx|comfyui" in result.stderr
+
+
 # --- wrappers --------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "wrapper,name,log",
-    [("omlx-launch", "omlx", "omlx.log")],
+    [("omlx-launch", "omlx", "omlx.log"), ("comfyui-launch", "comfyui", "comfyui.log")],
 )
 class TestWrappers:
     def test_missing_venv_writes_the_marker_and_the_log(self, home, wrapper, name, log):
@@ -182,6 +391,21 @@ class TestWrappers:
         run(["bash", str(ENGINES / wrapper)], env_for(home))
         assert (logs / log).read_text().startswith("x" * 1000)
         assert not (logs / f"{log}.1").exists()
+
+
+def test_comfyui_launch_is_executable_and_runs_the_launcher_with_the_comfyui_venv(home):
+    wrapper = ENGINES / "comfyui-launch"
+    assert wrapper.stat().st_mode & stat.S_IXUSR
+    text = wrapper.read_text()
+    assert 'PY="$ENGINES_HOME/comfyui/bin/python"' in text
+    assert 'exec "$PY" "$HERE/engines_launch.py" comfyui "$@"' in text
+    assert "comfyui.log" in text
+    # a venv python that echoes its argv is exec'd with the launcher script and the engine name
+    fake_python(home / "comfyui" / "bin" / "python")
+    result = run(["bash", str(wrapper)], env_for(home))
+    assert result.returncode == 0
+    log = (home.parent / "logs" / "comfyui.log").read_text()
+    assert "engines_launch.py comfyui" in log
 
 
 def test_build_engines_stages_the_common_helper():
@@ -346,7 +570,7 @@ def git(cwd, *args):
 @pytest.fixture
 def repo_with_submodules(tmp_path):
     subs = tmp_path / "subs"
-    for name in ("omlx",):
+    for name in ("omlx", "comfyui"):
         d = subs / name
         d.mkdir(parents=True)
         git(d, "init", "-q", "-b", "main")
@@ -356,14 +580,14 @@ def repo_with_submodules(tmp_path):
     repo = tmp_path / "repo"
     (repo / "studio" / "engines").mkdir(parents=True)
     git(repo, "init", "-q", "-b", "main")
-    for name in ("omlx",):
+    for name in ("omlx", "comfyui"):
         git(repo, "submodule", "add", "-q", str(subs / name), f"studio/engines/{name}")
     git(repo, "commit", "-q", "-m", "pin")
     return repo
 
 
-def pins(repo, home):
-    return build_fn(home, f'REPO="{repo}"; ENGINES_SRC="{repo}/studio/engines"; check_submodule_pins; echo pins-ok')
+def pins(repo, home, **env):
+    return build_fn(home, f'REPO="{repo}"; ENGINES_SRC="{repo}/studio/engines"; check_submodule_pins; echo pins-ok', **env)
 
 
 def test_pin_check_passes_on_a_clean_pinned_checkout(repo_with_submodules, home):
@@ -383,6 +607,62 @@ def test_pin_check_fails_on_an_uninitialised_submodule(repo_with_submodules, hom
     git(repo_with_submodules, "submodule", "deinit", "-f", "studio/engines/omlx")
     result = pins(repo_with_submodules, home)
     assert result.returncode != 0 and "pin mismatch" in result.stderr
+
+
+def test_pin_check_fails_on_a_moved_comfyui_submodule(repo_with_submodules, home):
+    sub = repo_with_submodules / "studio" / "engines" / "comfyui"
+    (sub / "f").write_text("2")
+    git(sub, "commit", "-qam", "two")
+    result = pins(repo_with_submodules, home)
+    assert result.returncode != 0 and "pin mismatch" in result.stderr and "comfyui" in result.stderr
+
+
+def test_pin_check_fails_on_a_dirty_comfyui_submodule(repo_with_submodules, home):
+    (repo_with_submodules / "studio" / "engines" / "comfyui" / "f").write_text("dirty")
+    result = pins(repo_with_submodules, home)
+    assert result.returncode != 0 and "studio/engines/comfyui has local changes" in result.stderr
+
+
+def test_pin_check_fails_on_an_uninitialised_comfyui_submodule(repo_with_submodules, home):
+    git(repo_with_submodules, "submodule", "deinit", "-f", "studio/engines/comfyui")
+    result = pins(repo_with_submodules, home)
+    assert result.returncode != 0 and "pin mismatch" in result.stderr
+
+
+@pytest.mark.parametrize("how", ["moved", "dirty", "uninitialised"])
+def test_unsloth_build_comfyui_0_ignores_the_comfyui_submodule(repo_with_submodules, home, how):
+    sub = repo_with_submodules / "studio" / "engines" / "comfyui"
+    if how == "moved":
+        (sub / "f").write_text("2")
+        git(sub, "commit", "-qam", "two")
+    elif how == "dirty":
+        (sub / "f").write_text("dirty")
+    else:
+        git(repo_with_submodules, "submodule", "deinit", "-f", "studio/engines/comfyui")
+    skipped = pins(repo_with_submodules, home, UNSLOTH_BUILD_COMFYUI="0")
+    assert skipped.returncode == 0 and "pins-ok" in skipped.stdout, skipped.stderr
+    assert pins(repo_with_submodules, home).returncode != 0
+
+
+def test_init_submodules_initialises_and_reads_both_commits(repo_with_submodules, home):
+    git(repo_with_submodules, "submodule", "deinit", "-f", "studio/engines/comfyui")
+    snippet = (
+        f'REPO="{repo_with_submodules}"; ENGINES_SRC="{repo_with_submodules}/studio/engines"; '
+        'git() { echo "git $*" >&2; command git -c protocol.file.allow=always "$@"; }; '
+        'init_submodules; echo "omlx=${OMLX_COMMIT:0:7} comfyui=${COMFYUI_COMMIT:0:7}"'
+    )
+    result = build_fn(home, snippet)
+    assert result.returncode == 0, result.stderr
+    assert "initialising submodule studio/engines/comfyui" in result.stdout
+    assert "initialising submodule studio/engines/omlx" not in result.stdout
+    assert "submodule update --init --depth 1 studio/engines/comfyui" in result.stderr
+    omlx, comfyui = result.stdout.split()[-2:]
+    assert len(omlx.split("=")[1]) == 7 and len(comfyui.split("=")[1]) == 7
+
+
+def test_the_submodule_list_follows_unsloth_build_comfyui(home):
+    assert build_fn(home, 'echo "${ENGINE_SUBMODULES[*]}"').stdout.strip() == "omlx comfyui"
+    assert build_fn(home, 'echo "${ENGINE_SUBMODULES[*]}"', UNSLOTH_BUILD_COMFYUI="0").stdout.strip() == "omlx"
 
 
 # --- update-engines-mac.sh against fake engines and a fake launchctl ----------------------------
@@ -464,7 +744,7 @@ class Rig:
         label = "ai.unsloth.studio.ds4"
         # detached like the fake CLI starts engines, so a kill is reaped by init and `kill -0` ends
         subprocess.run(
-            ["bash", "-c", '"$FAKE_PY" "$0/fake_engine.py" ds4 "$FAKE_HOME" "$FAKE_DS4_PORT" >/dev/null 2>&1 & echo $! >"$FAKE_LC/$1.pid"; disown', str(FAKES), label],
+            ["bash", "-c", '"$FAKE_PY" "$0/fake_engine.py" ds4 "$FAKE_HOME" "$FAKE_DS4_PORT" >/dev/null 2>&1 & echo $! >"$FAKE_LC/$1.pid"; echo $! >>"$FAKE_LC/spawned.pids"; disown', str(FAKES), label],
             env={**os.environ, **self.env},
             check=True,
         )
@@ -521,13 +801,35 @@ class Rig:
         return self.launchctl("print", f"gui/501/{label}").returncode == 0
 
     def close(self):
+        """Stop every fake engine this rig started: TERM, then KILL for one that ignored it. The
+        fakes are detached, and a label.pid overwritten by a restart hides the earlier instance, so
+        spawned.pids (every pid the fake CLI and start_legacy_ds4 started) is read as well."""
         import signal
+        import time
 
-        for pid_file in self.lc.glob("*.pid"):
+        pids = set()
+        for pid_file in [*self.lc.glob("*.pid"), self.lc / "spawned.pids"]:
             try:
-                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+                pids.update(int(p) for p in pid_file.read_text().split())
             except (OSError, ValueError):
                 pass
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for pid in pids:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+            deadline = time.time() + 2
+            while time.time() < deadline and any(_alive(pid) for pid in pids):
+                time.sleep(0.05)
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 @pytest.fixture
@@ -1054,6 +1356,189 @@ def test_an_up_to_date_omlx_venv_discards_a_stale_staged_one(home):
     assert marker(home) == {"omlx": key}
 
 
+def make_comfy_venv(path: Path, version: str, staged=None):
+    """A fake ComfyUI swap unit: the venv and src/ together."""
+    make_venv(path, version, staged)
+    (path / "src").mkdir()
+    (path / "src" / "main.py").write_text(f"# {version}\n")
+
+
+def test_comfyui_swap_moves_the_venv_and_src_together(home):
+    make_comfy_venv(home / "comfyui", "old")
+    (home / ".provisioned").write_text("comfyui=old-key\n")
+    make_comfy_venv(home / "comfyui.new", "new", ["comfyui", "new-key"])
+    result = build_fn(home, 'venv_in_use() { return 1; }; swap_venv "$ENGINES_HOME/comfyui"')
+    assert result.returncode == 0, result.stderr
+    assert (home / "comfyui" / "src" / "main.py").read_text() == "# new\n"
+    assert (home / "comfyui.old" / "src" / "main.py").read_text() == "# old\n"
+    assert marker(home) == {"comfyui": "new-key"}
+
+
+def test_comfyui_swap_refuses_while_it_is_in_use(home):
+    make_comfy_venv(home / "comfyui", "old")
+    make_comfy_venv(home / "comfyui.new", "new", ["comfyui", "new-key"])
+    result = build_fn(home, 'venv_in_use() { return 0; }; swap_venv "$ENGINES_HOME/comfyui"; echo pending=$PENDING_SWAPS')
+    assert result.returncode == 0 and "pending=1" in result.stdout
+    assert (home / "comfyui" / "src" / "main.py").read_text() == "# old\n" and (home / "comfyui.new").exists()
+
+
+def test_comfyui_rollback_restores_the_old_unit_and_markers(home):
+    make_comfy_venv(home / "comfyui", "old")
+    (home / ".provisioned").write_text("comfyui=old-key\nomlx=keep\n")
+    make_comfy_venv(home / "comfyui.new", "new", ["comfyui", "new-key"])
+    assert build_fn(home, 'venv_in_use() { return 1; }; swap_venv "$ENGINES_HOME/comfyui"').returncode == 0
+    result = build_fn(home, 'venv_in_use() { return 1; }; rollback_venv "$ENGINES_HOME/comfyui"')
+    assert result.returncode == 0, result.stderr
+    assert (home / "comfyui" / "src" / "main.py").read_text() == "# old\n"
+    assert (home / "comfyui.failed" / "src" / "main.py").read_text() == "# new\n"
+    assert marker(home) == {"comfyui": "old-key", "omlx": "keep"}
+
+
+def test_a_comfyui_process_running_from_the_unit_is_detected_by_its_source_path(home):
+    make_comfy_venv(home / "comfyui", "live")
+    # the venv python resolves to its base interpreter in `ps`, so only src/main.py names the venv
+    stray = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)", f"{home}/comfyui/src/main.py"],
+        cwd=home / "comfyui" / "src",
+    )
+    try:
+        import time
+
+        for _ in range(50):
+            if build_fn(home, 'venv_in_use "$ENGINES_HOME/comfyui"').returncode == 0:
+                break
+            time.sleep(0.1)
+        assert build_fn(home, 'venv_in_use "$ENGINES_HOME/comfyui"').returncode == 0
+        assert build_fn(home, 'venv_in_use "$ENGINES_HOME/omlx"').returncode != 0
+    finally:
+        stray.kill()
+        stray.wait()
+    assert build_fn(home, 'venv_in_use "$ENGINES_HOME/comfyui"').returncode != 0
+
+
+STAGE_STUBS = (
+    'HAVE_UV=0; FORCE=0; COMFYUI_PYTHON=3.13; COMFYUI_COMMIT=abc; BUILD_COMFYUI=1; '
+    'make_venv() { mkdir -p "$1/bin"; printf "#!/bin/sh\\n" >"$1/bin/python"; chmod +x "$1/bin/python"; echo "make_venv $2" >>"$ENGINES_HOME/calls"; }; '
+    'export_tree() { mkdir -p "$2"; : >"$2/requirements.txt"; echo "export_tree $1 $2" >>"$ENGINES_HOME/calls"; }; '
+    'pip_install() { shift; echo "pip_install $*" >>"$ENGINES_HOME/calls"; }; '
+    'validate_comfyui() { echo "validate $1" >>"$ENGINES_HOME/calls"; }; '
+)
+
+
+def constraints_key(path: Path):
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
+
+
+def stage_comfyui(home, constraints_text, **env):
+    src = home.parent / "src-engines"
+    src.mkdir(exist_ok=True)
+    (src / "comfyui-constraints.txt").write_text(constraints_text)
+    result = build_fn(home, f'ENGINES_SRC="{src}"; mkdir -p "$BUILD_ROOT"; {STAGE_STUBS} stage_comfyui', **env)
+    return result, src / "comfyui-constraints.txt"
+
+
+def test_the_comfyui_stage_key_includes_the_commit_python_and_constraints_hash(home):
+    result, constraints = stage_comfyui(home, "torch==1\n")
+    assert result.returncode == 0, result.stderr
+    staged = (home / "comfyui.new" / ".staged").read_text().splitlines()
+    assert staged == ["comfyui", f"abc:py3.13:constraints-{constraints_key(constraints)}"]
+    calls = (home / "calls").read_text().splitlines()
+    assert calls[0] == "make_venv 3.13" and calls[1].startswith("export_tree ") and calls[1].endswith("/comfyui.new/src")
+    assert calls[2] == f"pip_install -r {home}/comfyui.new/src/requirements.txt -c {constraints}"
+    assert calls[3] == f"validate {home}/comfyui.new"
+    # the log of the install goes to the build root, not the terminal
+    assert (home / ".build").is_dir()
+
+
+def test_changing_the_constraints_restages_but_an_unchanged_file_does_not(home):
+    first, constraints = stage_comfyui(home, "torch==1\n")
+    assert first.returncode == 0
+    (home / "calls").unlink()
+    again, _ = stage_comfyui(home, "torch==1\n")
+    assert again.returncode == 0 and "already staged" in again.stdout and not (home / "calls").exists()
+    changed, constraints = stage_comfyui(home, "torch==2\n")
+    assert changed.returncode == 0 and (home / "calls").exists()
+    assert (home / "comfyui.new" / ".staged").read_text().splitlines()[1].endswith(constraints_key(constraints))
+
+
+def test_an_up_to_date_comfyui_venv_is_not_rebuilt_and_a_stale_staged_one_is_discarded(home):
+    make_comfy_venv(home / "comfyui", "live")
+    src = home.parent / "src-engines"
+    src.mkdir()
+    (src / "comfyui-constraints.txt").write_text("torch==1\n")
+    key = f"abc:py3.13:constraints-{constraints_key(src / 'comfyui-constraints.txt')}"
+    (home / ".provisioned").write_text(f"comfyui={key}\n")
+    make_comfy_venv(home / "comfyui.new", "stale", ["comfyui", "other-key"])
+    result = build_fn(home, f'ENGINES_SRC="{src}"; mkdir -p "$BUILD_ROOT"; {STAGE_STUBS} stage_comfyui')
+    assert result.returncode == 0, result.stderr
+    assert "up to date" in result.stdout and not (home / "comfyui.new").exists() and not (home / "calls").exists()
+
+
+def test_a_failed_comfyui_install_stops_the_build_and_swaps_nothing(home):
+    src = home.parent / "src-engines"
+    src.mkdir()
+    (src / "comfyui-constraints.txt").write_text("torch==1\n")
+    stubs = STAGE_STUBS + 'pip_install() { echo "resolver said no" >&2; return 1; }; '
+    result = build_fn(home, f'ENGINES_SRC="{src}"; mkdir -p "$BUILD_ROOT"; {stubs} stage_comfyui')
+    assert result.returncode != 0 and "comfyui install failed" in result.stderr
+    assert not (home / "comfyui").exists() and not (home / "comfyui.new" / ".staged").exists()
+
+
+def full_main(home, build_comfyui, snippet="main", **env):
+    """main() with the oMLX and ComfyUI stages stubbed; records what ran."""
+    stubs = (
+        'stage_omlx() { echo stage_omlx >>"$ENGINES_HOME/order"; }; stage_comfyui() { echo stage_comfyui >>"$ENGINES_HOME/order"; }; '
+        'swap_venv() { echo "swap $(basename "$1")" >>"$ENGINES_HOME/order"; }; init_submodules() { :; }; check_submodule_pins() { :; }; '
+        'stage_wrappers() { :; }; write_default_config() { :; }; '
+    )
+    return build_fn(home, f"{stubs} {snippet}", UNSLOTH_BUILD_COMFYUI=build_comfyui, **env)
+
+
+def test_a_full_run_stages_then_swaps_comfyui_after_omlx(home):
+    assert full_main(home, "1").returncode == 0
+    assert (home / "order").read_text().split("\n")[:-1] == ["stage_omlx", "stage_comfyui", "swap omlx", "swap comfyui"]
+
+
+def test_stage_only_stages_both_and_swaps_neither(home):
+    assert full_main(home, "1", "MODE=stage; main").returncode == 0
+    assert (home / "order").read_text().split("\n")[:-1] == ["stage_omlx", "stage_comfyui"]
+
+
+def test_swap_only_swaps_both(home):
+    assert full_main(home, "1", "MODE=swap; main").returncode == 0
+    assert (home / "order").read_text().split("\n")[:-1] == ["swap omlx", "swap comfyui"]
+
+
+def test_unsloth_build_comfyui_0_skips_the_stage_and_the_swap_and_says_so(home):
+    result = full_main(home, "0")
+    assert result.returncode == 0 and "comfyui: skipped (UNSLOTH_BUILD_COMFYUI=0)" in result.stdout
+    assert (home / "order").read_text().split("\n")[:-1] == ["stage_omlx", "swap omlx"]
+    (home / "order").unlink()
+    assert full_main(home, "0", "MODE=swap; main").returncode == 0
+    assert (home / "order").read_text().split("\n")[:-1] == ["swap omlx"]
+
+
+def test_the_default_rollback_covers_both_venvs(home):
+    for name in ("omlx", "comfyui"):
+        make_venv(home / name, "new")
+        make_venv(home / f"{name}.old", "old")
+    result = build_fn(home, 'venv_in_use() { return 1; }; MODE=rollback; ROLLBACK_NAMES=(); main')
+    assert result.returncode == 0, result.stderr
+    assert all((home / name / "VERSION").read_text() == "old" for name in ("omlx", "comfyui"))
+
+
+def test_rollback_names_accept_comfyui_on_the_command_line(home):
+    make_venv(home / "comfyui", "new")
+    make_venv(home / "comfyui.old", "old")
+    make_venv(home / "omlx", "new")
+    make_venv(home / "omlx.old", "old")
+    result = run(["bash", str(SCRIPTS / "build-engines-mac.sh"), "--rollback-venvs", "comfyui"], {"UNSLOTH_ENGINES_HOME": str(home)})
+    assert result.returncode == 0, result.stderr
+    assert (home / "comfyui" / "VERSION").read_text() == "old" and (home / "omlx" / "VERSION").read_text() == "new"
+
+
 # --- engines.toml migration ---------------------------------------------------------------------
 
 def code_lines(path: Path) -> str:
@@ -1345,30 +1830,103 @@ def config_migrate(home, text):
     return config, result
 
 
-def test_generated_config_has_only_omlx():
+def test_generated_config_has_omlx_and_comfyui():
     import tomllib
     config = tomllib.loads((ENGINES / "engines.default.toml").read_text())
-    assert set(config) == {"omlx"}
+    assert set(config) == {"omlx", "comfyui"}
     assert "OMLX_PEER_EVICT_URLS" not in config["omlx"]["env"]
+    comfy = config["comfyui"]
+    assert comfy["port"] == 8844 and "host" not in comfy
+    assert comfy["extra_args"] == ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline"]
+    assert comfy["env"] == {"PYTORCH_ENABLE_MPS_FALLBACK": "1"}
+    assert comfy["model_dirs"] == ["~/Library/Application Support/StoryPressRuntime/ComfyUI/models"]
+    # the migration copies from "# ComfyUI (bundled helper" to the end of the file
+    assert (ENGINES / "engines.default.toml").read_text().count("# ComfyUI (bundled helper") == 1
+
+
+DEFAULT_TEXT = (ENGINES / "engines.default.toml").read_text()
+COMFYUI_BLOCK = DEFAULT_TEXT[DEFAULT_TEXT.index("# ComfyUI (bundled helper"):]
+
+
+def test_the_comfyui_section_is_appended_once_after_one_blank_line_with_a_backup(home):
+    import tomllib
+    original = '# saved\n[omlx]\nport = 9000\n'
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    assert "appended [comfyui] section" in result.stdout
+    assert config.read_text() == original + "\n" + COMFYUI_BLOCK
+    assert tomllib.loads(config.read_text())["comfyui"]["port"] == 8844
+    backups = list(home.glob("engines.toml.bak-*"))
+    assert len(backups) == 1 and backups[0].read_text() == original
+    before = config.stat().st_mtime_ns
+    again = build_fn(home, "migrate_config")
+    assert again.returncode == 0 and "nothing to migrate" in again.stdout
+    assert config.stat().st_mtime_ns == before and list(home.glob("engines.toml.bak-*")) == backups
+    assert config.read_text().count("[comfyui]") == 1
+
+
+def test_the_appended_block_is_byte_identical_to_the_default_files(home):
+    config, result = config_migrate(home, "[omlx]\nport = 1\n")
+    assert result.returncode == 0
+    assert config.read_text().endswith(COMFYUI_BLOCK)
+
+
+@pytest.mark.parametrize("original,joined", [
+    ("[omlx]\nport = 1", "[omlx]\nport = 1\n\n"),      # no final newline
+    ("[omlx]\nport = 1\n\n", "[omlx]\nport = 1\n\n"),  # already a blank line: not doubled
+])
+def test_the_blank_line_before_the_appended_section_is_exactly_one(home, original, joined):
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == joined + COMFYUI_BLOCK
+
+
+@pytest.mark.parametrize("text", [
+    '[omlx]\nport = 1\n[comfyui]\nport = 9999\n',
+    '[omlx]\nport = 1\n[comfyui.env]\nX = "1"\n',
+    '[ comfyui ]\nport = 5\n',
+])
+def test_an_existing_comfyui_section_is_left_untouched(home, text):
+    config = home / "engines.toml"
+    config.write_text(text)
+    before = config.stat().st_mtime_ns
+    result = build_fn(home, "migrate_config")
+    assert result.returncode == 0 and config.read_text() == text and config.stat().st_mtime_ns == before
+    assert not list(home.glob("engines.toml.bak-*"))
+
+
+def test_both_migrations_apply_in_one_pass_and_one_backup(home):
+    peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
+    original = f'[omlx.env]\nOMLX_NAX = "1"\n{peer}\n'
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == '[omlx.env]\nOMLX_NAX = "1"\n\n' + COMFYUI_BLOCK
+    assert [b.read_text() for b in home.glob("engines.toml.bak-*")] == [original]
+
+
+def test_a_fresh_install_gets_the_default_file_with_the_comfyui_section(home, tmp_path):
+    result = build_fn(home, f'WRAPPERS="{ENGINES}"; write_default_config')
+    assert result.returncode == 0, result.stderr
+    assert (home / "engines.toml").read_text() == DEFAULT_TEXT
 
 
 def test_peer_url_removal_also_removes_the_comment_the_old_migration_wrote(home):
     note = "# oMLX asks the ds4 launcher to unload when it needs memory (added by the engines.toml migration)."
     peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
-    config, result = config_migrate(home, f'[omlx.env]\nOMLX_NAX = "1"\n{note}\n{peer}\n[ds4]\nhost = "0.0.0.0"\n')
+    config, result = config_migrate(home, f'[omlx.env]\nOMLX_NAX = "1"\n{note}\n{peer}\n[ds4]\nhost = "0.0.0.0"\n[comfyui]\n')
     assert result.returncode == 0, result.stderr
-    assert config.read_text() == '[omlx.env]\nOMLX_NAX = "1"\n[ds4]\nhost = "0.0.0.0"\n'
+    assert config.read_text() == '[omlx.env]\nOMLX_NAX = "1"\n[ds4]\nhost = "0.0.0.0"\n[comfyui]\n'
 
 
 def test_peer_url_removal_keeps_other_comments_and_a_non_adjacent_note(home):
     note = "# oMLX asks the ds4 launcher to unload."
     peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
-    config, result = config_migrate(home, f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n{peer}\n')
+    config, result = config_migrate(home, f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n{peer}\n[comfyui]\n')
     assert result.returncode == 0, result.stderr
-    assert config.read_text() == f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n'
-    other = 'x = 1\n# oMLX asks something else\n' + f'[omlx.env]\n# oMLX asks something else\n{peer}\n'
+    assert config.read_text() == f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n[comfyui]\n'
+    other = 'x = 1\n# oMLX asks something else\n' + f'[omlx.env]\n# oMLX asks something else\n{peer}\n[comfyui]\n'
     config, result = config_migrate(home, other)
-    assert config.read_text() == 'x = 1\n# oMLX asks something else\n[omlx.env]\n# oMLX asks something else\n'
+    assert config.read_text() == 'x = 1\n# oMLX asks something else\n[omlx.env]\n# oMLX asks something else\n[comfyui]\n'
 
 
 def test_peer_url_removal_preserves_config_and_backs_up_once(home):
@@ -1389,9 +1947,9 @@ def test_peer_url_removal_preserves_config_and_backs_up_once(home):
 
 
 @pytest.mark.parametrize("text", [
-    '[omlx]\nport = 9000\n',
-    '[omlx.env]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:9999"\n',
-    '[other]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"\n',
+    '[omlx]\nport = 9000\n[comfyui]\n',
+    '[omlx.env]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:9999"\n[comfyui]\n',
+    '[other]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"\n[comfyui]\n',
     '[omlx.env\ninvalid TOML',
 ])
 def test_config_noop_never_writes_or_backs_up(home, text):
@@ -1409,7 +1967,8 @@ def test_staging_removes_previous_engine_resources(home):
     (staging / "obsolete-resource").write_text("old")
     result = build_fn(home, 'STAGING="$ENGINES_HOME/staging"; stage_wrappers')
     assert result.returncode == 0, result.stderr
-    assert {p.name for p in staging.iterdir()} == {"omlx-launch", "engines-common.sh", "engines_launch.py"}
+    assert {p.name for p in staging.iterdir()} == {"omlx-launch", "comfyui-launch", "engines-common.sh", "engines_launch.py"}
+    assert all(os.access(staging / p.name, os.X_OK) for p in staging.iterdir())
 
 
 def test_install_unregisters_using_old_bundle_before_swap():
