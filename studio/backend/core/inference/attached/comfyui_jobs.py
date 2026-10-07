@@ -115,8 +115,8 @@ class _State:
     prompt_id: Optional[str] = None
     queue_position: Optional[int] = None
     cancel_requested: bool = False
-    # Set when cancel() removed a still-queued job: ComfyUI sends no message for that.
-    removed_pending: bool = False
+    # Set once the job is confirmed gone from ComfyUI's queue after a cancel (ComfyUI sends no message for a removed pending job).
+    cancel_confirmed: bool = False
     admitted: bool = False
     stage: str = "starting"
     misses: int = 0
@@ -181,6 +181,9 @@ class ComfyJobRunner:
     poll_interval = 1.0
     ws_safety_poll = 5.0
     history_retries = 20
+    # How long a cancel keeps retrying until ComfyUI no longer lists the job, and the pause between attempts.
+    cancel_wait = 20.0
+    cancel_poll = 0.5
 
     def __init__(self, *, connect: Optional[Callable[..., Any]] = None, sleep: Callable[..., Any] = asyncio.sleep):
         self._connect = connect
@@ -289,7 +292,7 @@ class ComfyJobRunner:
                 raise ComfyGraphError(_graph_error_text(exc), exc.node_errors) from exc
             st.prompt_id, st.stage = prompt_id, "queued"
             if st.cancel_requested:
-                await self._cancel_remote(client, st)
+                st.cancel_confirmed = await self._cancel_and_confirm(client, prompt_id)
             await self._watch(client, graph, st, ws, prompt_id, timeout)
 
         st.stage, st.phase = "saving", "decode"
@@ -322,8 +325,9 @@ class ComfyJobRunner:
 
         due = next_poll()
         while True:
-            if st.removed_pending:
-                raise ComfyCancelled(_cancelled_message())
+            if st.cancel_confirmed:
+                await self._resolve_cancel(client, prompt_id)
+                return
             now = loop.time()
             if now >= deadline:
                 with contextlib.suppress(Exception):
@@ -499,26 +503,66 @@ class ComfyJobRunner:
     # ------------------------------------------------------------- cancel
 
     async def cancel(self) -> bool:
-        """Stop Studio's own job: interrupt it when running, drop it when queued. False when none is active."""
+        """Stop Studio's own job and wait (bounded) until ComfyUI no longer has it.
+
+        True when the job is confirmed gone from the queue, or has not been submitted yet (``run`` then cancels
+        it right after submission). False when nothing is active, or when ComfyUI still shows the job after
+        ``cancel_wait`` seconds: it stays owned by the runner and Cancel can be retried.
+        """
         st, client = self._state, self._client
         if st is None or client is None:
             return False
         st.cancel_requested = True
-        if st.prompt_id is not None:
-            await self._cancel_remote(client, st)
-        return True
+        if st.prompt_id is None:
+            return True
+        if await self._cancel_and_confirm(client, st.prompt_id):
+            st.cancel_confirmed = True
+            return True
+        return False
 
-    async def _cancel_remote(self, client: ComfyuiClient, st: _State) -> None:
-        pid = st.prompt_id
-        try:
+    async def _cancel_and_confirm(self, client: ComfyuiClient, prompt_id: str) -> bool:
+        """Cancel one prompt of ours until it is absent from ComfyUI's queue; False if it still is after ``cancel_wait``.
+
+        The pinned ComfyUI cancels atomically (``/api/jobs/{id}/cancel``: a pending prompt that started in the
+        meantime is interrupted instead). Without that endpoint the fallback is queue delete or ``/interrupt``
+        by the state seen in the latest ``/queue``; the loop re-reads the queue after every action, so a delete
+        that raced with the start is followed by an interrupt on the next pass. Absent from the queue means
+        terminal: ComfyUI writes a prompt to its history before it leaves the running list. A ComfyUI that
+        is down holds nothing. Only ever names ``prompt_id``.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.cancel_wait
+        use_endpoint = True
+        while True:
             queue = await client.queue()
-            if pid in queue.running_ids:
-                await client.interrupt(pid)
-            elif pid in queue.pending_ids:
-                await client.delete_pending([pid])
-                st.removed_pending = True
-        except ComfyuiError as exc:
-            logger.warning("ComfyUI cancel failed: %s", exc)
+            if queue.state == "down":
+                return True
+            if queue.state != "unknown":
+                if prompt_id not in queue.running_ids and prompt_id not in queue.pending_ids:
+                    return True
+                try:
+                    acted = await client.cancel_job(prompt_id) if use_endpoint else None
+                    if acted is None:
+                        use_endpoint = False
+                        if prompt_id in queue.pending_ids:
+                            await client.delete_pending([prompt_id])
+                        else:
+                            await client.interrupt(prompt_id)
+                except ComfyuiError as exc:
+                    logger.warning("ComfyUI cancel failed: %s", exc)
+            if loop.time() >= deadline:
+                return False
+            await self._sleep(self.cancel_poll)
+
+    async def _resolve_cancel(self, client: ComfyuiClient, prompt_id: str) -> None:
+        """After a confirmed cancel: a job that finished anyway is kept, anything else is a cancellation."""
+        try:
+            entry = await client.history(prompt_id)
+        except ComfyuiError:
+            entry = None
+        if entry is not None and _history_outcome(entry):
+            return
+        raise ComfyCancelled(_cancelled_message())
 
 
 def _cancelled_message() -> str:
