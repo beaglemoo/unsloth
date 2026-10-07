@@ -11905,14 +11905,16 @@ async def _admit_attached_local_load():
     return result
 
 
-async def _attached_omlx_proxy(payload, request, current_subject):
-    from core.inference.attached.arbiter import before_omlx_use
+async def _admit_attached_omlx_provider(provider_type, base_url) -> None:
+    """Gate a provider request that reaches the attached oMLX, whatever connection named it."""
+    from core.inference.attached.arbiter import before_omlx_use, targets_omlx
 
+    if not targets_omlx(provider_type, base_url):
+        return
     result = await before_omlx_use()
     if result.error:
         raise HTTPException(status_code = 503, detail = result.error,
                             headers = {"Retry-After": "15"})
-    return await _proxy_to_external_provider(payload, request, current_subject)
 
 
 def release_chat_gpu_claim() -> bool:
@@ -23879,6 +23881,7 @@ async def _external_tts_speech(body: AudioSpeechRequest, request: Request) -> Re
         base_url = validate_provider_base_url(base_url)
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from None
+    await _admit_attached_omlx_provider(config["provider_type"], base_url)
     async with provider_config_guard(provider_id):
         current = await asyncio.to_thread(providers_db.get_provider, provider_id)
         routing_fields = ("provider_type", "base_url", "is_enabled")
@@ -24129,6 +24132,7 @@ async def _external_stt_transcription(
         base_url = validate_provider_base_url(base_url)
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from None
+    await _admit_attached_omlx_provider(config["provider_type"], base_url)
 
     async with provider_config_guard(provider_id):
         current = await asyncio.to_thread(providers_db.get_provider, provider_id)
@@ -28176,6 +28180,8 @@ async def _proxy_to_external_provider(
             base_url = validate_provider_base_url(base_url)
         except ValueError as exc:
             raise HTTPException(status_code = 400, detail = str(exc)) from None
+        # Every route to the attached oMLX is admitted here, once the effective type and destination are known.
+        await _admit_attached_omlx_provider(provider_type, base_url)
 
     if provider_type == "openai_codex":
         from core.inference.openai_codex_auth import (
@@ -30082,10 +30088,6 @@ async def produce_openai_chat_completions(
                 status_code = 400,
                 detail = "Audio input is only supported on a local model with audio support.",
             )
-        from core.inference.attached import ATTACHED_OMLX_ID
-
-        if payload.provider_id == ATTACHED_OMLX_ID:
-            return await _attached_omlx_proxy(payload, request, current_subject)
         return await _proxy_to_external_provider(payload, request, current_subject)
 
     _mcp_image = await _request_mcp_image(payload, _ui_events)

@@ -316,6 +316,12 @@ async def _connection_decide(
         base_url = await asyncio.to_thread(validate_provider_base_url, config["base_url"])
     except ValueError as exc:
         raise _error(503, "api_usage_error", str(exc)) from None
+    from core.inference.attached.arbiter import before_omlx_use, targets_omlx
+
+    if targets_omlx(config["provider_type"], base_url):
+        admitted = await before_omlx_use()
+        if admitted.error:
+            raise _error(503, "api_usage_error", admitted.error, retry_after = 15)
     api_key = await arun_as(OWNER, _connection_key(provider_id, config))
     client = ExternalProviderClient(config["provider_type"], base_url, api_key)
     try:
