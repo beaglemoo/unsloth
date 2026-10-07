@@ -127,6 +127,16 @@ def _no_real_mxc_drive_aliases(monkeypatch):
 
 
 @pytest.fixture(autouse = True)
+def _no_real_comfyui_or_engine_state(monkeypatch, tmp_path):
+    # Empty means "no ComfyUI to free": a test that reaches the arbiter must never POST /free to the
+    # developer's own ComfyUI (Studio's on 8844 or a peer such as StoryPress on 8188). Tests of the
+    # ComfyUI paths delenv it and inject a transport. The engines home is a scratch dir, so
+    # desktop.json and the *.fail markers are never read from ~/.unsloth.
+    monkeypatch.setenv("STUDIO_COMFYUI_URL", "")
+    monkeypatch.setenv("UNSLOTH_ENGINES_HOME", str(tmp_path / "engines-home"))
+
+
+@pytest.fixture(autouse = True)
 def _forget_mxc_isolation_settings():
     # Held for a second across tests that each get their own Studio home; only when already imported.
     def _forget():
