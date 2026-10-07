@@ -3,6 +3,8 @@
 
 import { authFetch } from "@/features/auth";
 import { readFastApiError } from "@/lib/format-fastapi-error";
+import { comfyuiFromApi } from "./comfyui-wire";
+import { EngineBusyError, EngineHttpError, parseRetryAfter } from "./engine-errors";
 import { failureFromApi } from "./failure";
 import type {
   AttachedEnginesSettings,
@@ -85,20 +87,41 @@ export async function fetchAttachedStatus(
   const body = (await res.json()) as Obj;
   return {
     omlx: body.omlx ? omlxFromApi(body.omlx as Obj) : null,
+    comfyui: comfyuiFromApi(body.comfyui),
     modelsHash: typeof body.models_hash === "string" ? body.models_hash : "",
     notices: arr(body.notices).map((row) => noticeFromApi(row as Obj)),
     receivedAt: Date.now(),
   };
 }
 
-async function post(path: string, body?: unknown, fallback = "Request failed") {
+/** Throws for a non-2xx reply: an `EngineBusyError` for 503 (retry shortly), else a plain Error. */
+export async function throwForEngineResponse(
+  res: Response,
+  fallback: string,
+): Promise<never> {
+  const detail = await readFastApiError(res, fallback);
+  if (res.status === 503) {
+    throw new EngineBusyError(detail, parseRetryAfter(res.headers.get("Retry-After")));
+  }
+  throw new EngineHttpError(detail, res.status);
+}
+
+export async function engineRequest(
+  path: string,
+  init: { method: "GET" | "POST"; body?: unknown },
+  fallback = "Request failed",
+): Promise<Response> {
   const res = await authFetch(`/api/engines/attached${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    method: init.method,
+    headers: init.body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
   });
-  if (!res.ok) throw new Error(await readFastApiError(res, fallback));
+  if (!res.ok) await throwForEngineResponse(res, fallback);
   return res;
+}
+
+async function post(path: string, body?: unknown, fallback = "Request failed") {
+  return engineRequest(path, { method: "POST", body }, fallback);
 }
 
 /** Upsert (or, with the flag off, delete) the saved provider rows the picker is built from. */
@@ -171,6 +194,12 @@ function settingsFromApi(raw: Obj): AttachedEnginesSettings {
       (entry): entry is string => typeof entry === "string",
     ),
     arbitrateLocalLoads: raw.arbitrate_local_loads !== false,
+    comfyuiUrl: typeof raw.comfyui_url === "string" ? raw.comfyui_url : "",
+    comfyuiPeerUrls: arr(raw.comfyui_peer_urls).filter(
+      (entry): entry is string => typeof entry === "string",
+    ),
+    arbitrateComfyui: raw.arbitrate_comfyui !== false,
+    comfyuiIdleFreeS: num(raw.comfyui_idle_free_s, 300),
   };
 }
 
@@ -190,6 +219,10 @@ const UPDATE_KEYS = {
   omlxUrl: "omlx_url",
   scanDenylist: "scan_denylist",
   arbitrateLocalLoads: "arbitrate_local_loads",
+  comfyuiUrl: "comfyui_url",
+  comfyuiPeerUrls: "comfyui_peer_urls",
+  arbitrateComfyui: "arbitrate_comfyui",
+  comfyuiIdleFreeS: "comfyui_idle_free_s",
 } as const;
 
 /** A partial write: an omitted field keeps its stored value. */
