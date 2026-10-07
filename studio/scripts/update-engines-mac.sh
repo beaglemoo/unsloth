@@ -156,18 +156,42 @@ healthy() {
   wait_engines_healthy "$HEALTH_TIMEOUT" "$want_omlx" "$want_comfyui"
 }
 
+# True while <label> is in STOPPED_HELPERS (this run took it down and owes it a restart).
+label_owed() {
+  local owed
+  for owed in ${STOPPED_HELPERS[@]+"${STOPPED_HELPERS[@]}"}; do
+    [ "$owed" != "$1" ] || return 0
+  done
+  return 1
+}
+
+# Restore the previous venvs, one engine at a time so a stuck one cannot strand the other: every
+# step here warns and goes on, nothing dies (this runs inside the EXIT handler, where a die would
+# end the shell before the venvs are restored and the helpers restarted). An engine whose helper
+# could not be stopped (still loaded, or its port still held) keeps its current venv: swapping it
+# back underneath a live process would break it. It is named in a warning with the manual steps.
 rollback_swap() {
   log "rolling back: restoring the previous venvs"
-  local labels=()
-  while IFS= read -r _l; do labels+=("$_l"); done < <(swap_labels)
-  if [ "${#labels[@]}" -gt 0 ]; then
-    helpers_stop "${labels[@]}"
-    wait_ports_free "${labels[@]}"
-  fi
-  local name args=()
+  local label name was_loaded blocked=() args=() stuck
+  while IFS= read -r label; do
+    name="${label##*.}"
+    was_loaded=0
+    helper_loaded "$label" && was_loaded=1
+    helpers_stop "$label" || warn "could not stop the $name helper cleanly"
+    if [ "$was_loaded" = 1 ] && { helper_loaded "$label" || ! ports_free_wait "$label"; }; then
+      blocked+=("$name")
+      warn "the $name helper is still running (its stop failed or its port $(label_port "$label") is still held); not touching its venv"
+    fi
+  done < <(swap_labels)
   for name in ${SWAPPED[@]+"${SWAPPED[@]}"}; do
+    stuck=0
+    for label in ${blocked[@]+"${blocked[@]}"}; do [ "$label" != "$name" ] || stuck=1; done
+    if [ "$stuck" = 1 ]; then
+      warn "left the new $name venv in place; once its process is gone, restore it with: $BUILD_ENGINES --rollback-venvs $name"
     # only venvs this run actually replaced (their .new is gone and a .old exists)
-    if [ ! -d "$ENGINES_HOME/$name.new" ] && [ -d "$ENGINES_HOME/$name.old" ]; then args+=("$name"); fi
+    elif [ ! -d "$ENGINES_HOME/$name.new" ] && [ -d "$ENGINES_HOME/$name.old" ]; then
+      args+=("$name")
+    fi
   done
   if [ "${#args[@]}" -gt 0 ]; then
     run "$BUILD_ENGINES" --rollback-venvs "${args[@]}" || warn "venv rollback failed; restore $ENGINES_HOME/*.old by hand"
@@ -175,6 +199,8 @@ rollback_swap() {
   helpers_start || warn "helpers did not restart after the rollback"
   if [ "$HELPERS_LEFT_STOPPED" = 1 ]; then
     log "rolled back; the helpers stay stopped until Unsloth registers them at its next launch"
+  elif [ "${#blocked[@]}" -gt 0 ]; then
+    warn "rolled back what could be; ${blocked[*]} could not be stopped and keeps its new venv"
   elif healthy; then
     log "rolled back; the previous engines are serving again"
   else
