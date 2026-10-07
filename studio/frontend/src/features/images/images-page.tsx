@@ -3176,6 +3176,12 @@ export function ImagesPage({
   const restoreFromRecipe = useCallback(
     (image: GalleryImage) => {
       const comfyRecall = recallFromImage(image);
+      if (comfyRecall && !comfyAvailable) {
+        // Parked, so it applies once ComfyUI is on and the owner picks the engine.
+        useComfyPanelStore.getState().requestRecall(comfyRecall);
+        toast.info("Turn ComfyUI on in Settings > Engines to restore this image.");
+        return;
+      }
       if (comfyRecall) {
         setEngine("comfyui");
         setWorkflow("create");
@@ -3186,7 +3192,7 @@ export function ImagesPage({
       setEngine("studio");
       restoreSettings(image);
     },
-    [restoreSettings, setEngine, setWorkflow],
+    [comfyAvailable, restoreSettings, setEngine, setWorkflow],
   );
 
   // A locked ratio keeps the paired dimension in step; "custom" frees both, Flip swaps W/H. ratioHW is h/w for [a,b].
@@ -5409,7 +5415,8 @@ export function ImagesPage({
   );
   const handleComfyRunState = useCallback((run: ComfyRunState) => {
     setComfyRunning(run.running);
-    setBusy(run.running ? "generating" : null);
+    // Only this panel's own "generating" is released; an unload or load in flight keeps its state.
+    setBusy((prev) => (run.running ? "generating" : prev === "generating" ? null : prev));
     setGenStep(run.progress);
   }, []);
 
