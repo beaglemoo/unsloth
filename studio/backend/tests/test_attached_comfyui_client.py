@@ -18,6 +18,7 @@ from core.inference.attached.comfyui_client import (
     ComfyuiClient,
     ComfyuiError,
     parse_queue,
+    system_version,
 )
 
 
@@ -110,9 +111,9 @@ def test_system_stats_degrades_to_none(response):
 
 
 def test_version_missing_or_blank():
-    assert ComfyuiClient.version_from({"system": {}}) is None
-    assert ComfyuiClient.version_from({"system": {"comfyui_version": ""}}) is None
-    assert ComfyuiClient.version_from(None) is None
+    assert system_version({"system": {}}) is None
+    assert system_version({"system": {"comfyui_version": ""}}) is None
+    assert system_version(None) is None
 
 
 def test_folders_and_models():

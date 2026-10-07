@@ -24,6 +24,7 @@ import routes.attached_engines as routes  # noqa: E402
 from auth import policy  # noqa: E402
 from auth.authentication import get_current_subject  # noqa: E402
 from core.inference.attached import ATTACHED_OMLX_ID, arbiter  # noqa: E402
+from core.inference.attached.comfyui_client import ComfyuiClient  # noqa: E402
 from core.inference.attached.omlx_client import OmlxClient  # noqa: E402
 from routes.provider_credentials import provider_config_guard  # noqa: E402
 from storage import providers_db  # noqa: E402
@@ -65,6 +66,13 @@ class Fake:
         self.models_fail = False
         self.ctx_setting = 131072
         self.native = 262144
+        # Studio's ComfyUI (8844) and the StoryPress peer (8188); nothing here ever reaches a real port.
+        self.comfy = {
+            8844: dict(up = True, running = [], pending = [], free_status = 200),
+            8188: dict(up = True, running = [], pending = [], free_status = 200),
+        }
+        self.comfy_calls: list[tuple[int, str, str, object]] = []
+        self.comfy_models = {"diffusion_models": ["qwen.safetensors"], "loras": ["a.safetensors"]}
 
     def omlx(self, request: httpx.Request) -> httpx.Response:
         self.calls.append(f"omlx {request.method} {request.url.raw_path.decode()}")
@@ -129,6 +137,41 @@ class Fake:
         return httpx.Response(404)
 
 
+def _comfy_handler(state: "Fake"):
+    def handle(request: httpx.Request) -> httpx.Response:
+        port = request.url.port
+        body = json.loads(request.content) if request.content else None
+        state.comfy_calls.append((port, request.method, request.url.path, body))
+        comfy = state.comfy[port]
+        if not comfy["up"]:
+            raise httpx.ConnectError("refused", request = request)
+        path = request.url.path
+        item = lambda pid, n, extra: [n, pid, {}, extra, []]  # noqa: E731
+        if path == "/queue" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json = {
+                    "queue_running": [item(pid, i, {"unsloth": {"template": "t"}} if pid == "mine" else {}) for i, pid in enumerate(comfy["running"])],
+                    "queue_pending": [item(pid, 10 + i, {}) for i, pid in enumerate(comfy["pending"])],
+                },
+            )
+        if path == "/system_stats":
+            return httpx.Response(
+                200,
+                json = {
+                    "system": {"comfyui_version": "0.39.0", "ram_total": 64, "ram_free": 20},
+                    "devices": [{"name": "mps", "type": "mps", "vram_total": 64, "vram_free": 20}],
+                },
+            )
+        if path.startswith("/models/"):
+            return httpx.Response(200, json = state.comfy_models.get(path.rsplit("/", 1)[-1], []))
+        if request.method == "POST" and path in {"/free", "/interrupt", "/queue"}:
+            return httpx.Response(comfy["free_status"] if path == "/free" else 200)
+        return httpx.Response(404)
+
+    return handle
+
+
 def _config(**over) -> AttachedEnginesConfig:
     base = dict(
         enabled = True,
@@ -153,9 +196,19 @@ def fake(monkeypatch, tmp_path):
             "OmlxClient",
             lambda url: OmlxClient(url, transport = httpx.MockTransport(state.omlx)),
         )
+    monkeypatch.delenv("STUDIO_COMFYUI_URL", raising = False)
+    monkeypatch.setenv("UNSLOTH_ENGINES_HOME", str(tmp_path / "engines"))
+    state.engines_home = tmp_path / "engines"
+    state.engines_home.mkdir()
+    comfy_transport = httpx.MockTransport(_comfy_handler(state))
+    for module in (routes, arbiter):
+        monkeypatch.setattr(
+            module, "ComfyuiClient", lambda url, transport = None: ComfyuiClient(url, transport = comfy_transport)
+        )
     monkeypatch.setattr(providers_db, "studio_db_path", lambda: tmp_path / "studio.db")
     providers_db.reset_schema_state_for_tests()
     arbiter._notices.clear()
+    arbiter._busy_cache.clear()
     return state
 
 
@@ -187,10 +240,14 @@ def test_every_route_but_sync_is_404_when_flag_off(client, fake):
         ("post", "/omlx/context/get", {"model_id": "x"}),
         ("post", "/omlx/context", {"model_id": "x", "max_context_window": 8192}),
         ("post", "/prepare", {"provider": "omlx"}),
+        ("post", "/comfyui/free", None),
+        ("get", "/comfyui/queue", None),
+        ("post", "/comfyui/queue/cancel", {"prompt_id": "x"}),
+        ("get", "/comfyui/models", None),
     ):
         response = client.request(method.upper(), f"/api/engines/attached{path}", json = body)
         assert response.status_code == 404, path
-    assert fake.calls == []
+    assert fake.calls == [] and fake.comfy_calls == []
 
 
 def test_routes_require_owner_and_authentication(fake):
@@ -208,7 +265,14 @@ def test_routes_require_owner_and_authentication(fake):
     with TestClient(app) as test_client:
         assert test_client.get("/api/engines/attached/status").status_code == 403
         assert test_client.post("/api/engines/attached/sync").status_code == 403
-    assert fake.calls == []
+        for method, path in (
+            ("post", "/comfyui/free"),
+            ("get", "/comfyui/queue"),
+            ("post", "/comfyui/queue/cancel"),
+            ("get", "/comfyui/models"),
+        ):
+            assert test_client.request(method.upper(), f"/api/engines/attached{path}").status_code == 403
+    assert fake.calls == [] and fake.comfy_calls == []
 
 
 def test_status_reports_omlx_hash_and_notices(client, fake):
@@ -520,3 +584,163 @@ def test_legacy_provider_type_can_be_listed_before_sync(fake, monkeypatch):
     )
     monkeypatch.setattr(providers.credential_secrets, "has_secret", lambda *args: False)
     assert providers._provider_response(providers_db.get_provider(legacy_id)).display_name == "Legacy"
+
+
+# --- ComfyUI ----------------------------------------------------------------------------------
+
+BASE = "/api/engines/attached"
+
+
+def test_status_comfyui_block_when_up(client, fake):
+    fake.comfy[8844]["running"] = ["mine"]
+    fake.comfy[8844]["pending"] = ["a", "b"]
+    fake.comfy[8188]["pending"] = ["sp"]
+    body = client.get(f"{BASE}/status").json()["comfyui"]
+    assert body["url"] == "http://127.0.0.1:8844" and body["reachable"] is True
+    assert body["version"] == "0.39.0"
+    assert (body["queue_running"], body["queue_pending"]) == (1, 2)
+    assert body["devices"][0]["name"] == "mps" and body["ram_free"] == 20 and body["ram_total"] == 64
+    assert body["failure"] is None and body["helper_wanted"] is None
+    assert body["peers"] == [{"url": "http://127.0.0.1:8188", "reachable": True, "busy": True}]
+
+
+def test_status_comfyui_block_when_down_never_errors(client, fake):
+    fake.comfy[8844]["up"] = False
+    fake.comfy[8188]["up"] = False
+    response = client.get(f"{BASE}/status")
+    assert response.status_code == 200
+    body = response.json()["comfyui"]
+    assert body["reachable"] is False and body["version"] is None
+    assert (body["queue_running"], body["queue_pending"], body["devices"]) == (0, 0, [])
+    assert body["peers"] == [{"url": "http://127.0.0.1:8188", "reachable": False, "busy": False}]
+    assert response.json()["omlx"]["reachable"] is True
+
+
+def test_status_comfyui_down_and_omlx_down_are_independent(client, fake):
+    fake.omlx_up = False
+    body = client.get(f"{BASE}/status").json()
+    assert body["omlx"]["reachable"] is False and body["comfyui"]["reachable"] is True
+
+
+def test_status_comfyui_failure_marker_and_helper_wanted(client, fake):
+    fake.comfy[8844]["up"] = False
+    (fake.engines_home / "comfyui.fail").write_text(
+        json.dumps({"reason": "port 8844 (ComfyUI) is held by StoryPress's ComfyUI (pid 7)", "ts": 5, "count": 2})
+    )
+    (fake.engines_home / "desktop.json").write_text(
+        json.dumps({"engines_enabled": True, "helpers": {"comfyui": True}})
+    )
+    body = client.get(f"{BASE}/status").json()["comfyui"]
+    assert body["failure"]["count"] == 2 and "StoryPress" in body["failure"]["reason"]
+    assert body["helper_wanted"] is True and body["reachable"] is False
+
+
+def test_status_comfyui_probes_the_configured_urls_and_only_reads(client, fake):
+    fake.config["value"] = _config(comfyui_peer_urls = ())
+    body = client.get(f"{BASE}/status").json()["comfyui"]
+    assert body["peers"] == []
+    assert {(c[1], c[2]) for c in fake.comfy_calls} == {("GET", "/queue"), ("GET", "/system_stats")}
+    assert all(c[0] == 8844 for c in fake.comfy_calls)
+
+
+def test_status_never_writes_to_the_peer(client, fake):
+    client.get(f"{BASE}/status")
+    assert {(c[1], c[2]) for c in fake.comfy_calls if c[0] == 8188} == {("GET", "/queue")}
+
+
+def test_comfyui_free(client, fake):
+    response = client.post(f"{BASE}/comfyui/free")
+    assert response.status_code == 200 and response.json() == {"freed": True, "deferred": False}
+    assert (8844, "POST", "/free", {"unload_models": True, "free_memory": True}) in fake.comfy_calls
+    fake.comfy[8844]["running"] = ["x"]
+    assert client.post(f"{BASE}/comfyui/free").json() == {"freed": True, "deferred": True}
+    assert not any(c[0] == 8188 for c in fake.comfy_calls)
+
+
+def test_comfyui_free_unreachable_and_refused(client, fake):
+    fake.comfy[8844]["free_status"] = 500
+    assert client.post(f"{BASE}/comfyui/free").status_code == 502
+    fake.comfy[8844]["up"] = False
+    response = client.post(f"{BASE}/comfyui/free")
+    assert response.status_code == 502 and response.json()["detail"] == "ComfyUI is not reachable."
+
+
+def test_comfyui_queue_lists_jobs_with_the_studio_marker(client, fake):
+    fake.comfy[8844]["running"] = ["mine"]
+    fake.comfy[8844]["pending"] = ["web1"]
+    body = client.get(f"{BASE}/comfyui/queue").json()
+    assert body["running"] == [{"prompt_id": "mine", "number": 0, "state": "running", "studio": {"template": "t"}}]
+    assert body["pending"] == [{"prompt_id": "web1", "number": 10, "state": "pending", "studio": None}]
+
+
+def test_comfyui_queue_unreachable_is_502(client, fake):
+    fake.comfy[8844]["up"] = False
+    assert client.get(f"{BASE}/comfyui/queue").status_code == 502
+
+
+def test_cancel_interrupts_a_running_job_by_id(client, fake):
+    fake.comfy[8844]["running"] = ["mine"]
+    fake.comfy[8844]["pending"] = ["web1"]
+    response = client.post(f"{BASE}/comfyui/queue/cancel", json = {"prompt_id": "mine"})
+    assert response.json() == {"cancelled": "mine", "state": "running"}
+    posts = [c for c in fake.comfy_calls if c[1] == "POST"]
+    assert posts == [(8844, "POST", "/interrupt", {"prompt_id": "mine"})]
+
+
+def test_cancel_deletes_a_pending_job(client, fake):
+    fake.comfy[8844]["running"] = ["mine"]
+    fake.comfy[8844]["pending"] = ["web1"]
+    response = client.post(f"{BASE}/comfyui/queue/cancel", json = {"prompt_id": "web1"})
+    assert response.json() == {"cancelled": "web1", "state": "pending"}
+    assert [c for c in fake.comfy_calls if c[1] == "POST"] == [(8844, "POST", "/queue", {"delete": ["web1"]})]
+
+
+def test_cancel_unknown_job_is_404_and_peer_jobs_are_never_touched(client, fake):
+    fake.comfy[8188]["running"] = ["sp"]
+    assert client.post(f"{BASE}/comfyui/queue/cancel", json = {"prompt_id": "sp"}).status_code == 404
+    assert [c for c in fake.comfy_calls if c[1] == "POST"] == []
+    assert client.post(f"{BASE}/comfyui/queue/cancel", json = {"prompt_id": ""}).status_code == 422
+    fake.comfy[8844]["up"] = False
+    assert client.post(f"{BASE}/comfyui/queue/cancel", json = {"prompt_id": "x"}).status_code == 502
+
+
+def test_comfyui_models_lists_the_fixed_folders(client, fake):
+    body = client.get(f"{BASE}/comfyui/models").json()
+    assert list(body["folders"]) == ["diffusion_models", "checkpoints", "text_encoders", "vae", "loras"]
+    assert body["folders"]["diffusion_models"] == ["qwen.safetensors"]
+    assert body["folders"]["loras"] == ["a.safetensors"] and body["folders"]["vae"] == []
+
+
+def test_comfyui_models_unreachable_is_502(client, fake):
+    fake.comfy[8844]["up"] = False
+    assert client.get(f"{BASE}/comfyui/models").status_code == 502
+
+
+def test_omlx_load_frees_idle_comfyui_first(client, fake):
+    response = client.post(f"{BASE}/omlx/load", json = {"model_id": "swift-1.5-27b"})
+    assert response.status_code == 200
+    assert "Freed ComfyUI memory" in " ".join(response.json()["actions"])
+    assert [c[0] for c in fake.comfy_calls if c[1] == "POST"] == [8844, 8188]
+
+
+def test_omlx_load_is_a_retryable_503_while_comfyui_generates(client, fake):
+    fake.comfy[8844]["running"] = ["mine"]
+    response = client.post(f"{BASE}/omlx/load", json = {"model_id": "swift-1.5-27b"})
+    assert response.status_code == 503 and response.headers["Retry-After"] == "15"
+    assert "ComfyUI is generating" in response.json()["detail"]
+    assert not any(c.startswith("omlx POST") for c in fake.calls)
+    assert [c for c in fake.comfy_calls if c[1] == "POST"] == []
+
+
+def test_prepare_frees_idle_comfyui_and_is_refused_while_it_generates(client, fake):
+    response = client.post(f"{BASE}/prepare", json = {"provider": "omlx"})
+    assert response.status_code == 200 and response.json()["actions"]
+    arbiter._busy_cache.clear()
+    fake.comfy[8844]["pending"] = ["a"]
+    assert client.post(f"{BASE}/prepare", json = {"provider": "omlx"}).status_code == 503
+
+
+def test_context_calls_are_refused_while_comfyui_generates_but_never_free_it(client, fake):
+    fake.comfy[8844]["running"] = ["mine"]
+    response = client.post(f"{BASE}/omlx/context/get", json = {"model_id": "swift-1.5-27b"})
+    assert response.status_code == 503
