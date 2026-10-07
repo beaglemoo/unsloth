@@ -94,7 +94,7 @@ async def _probe_comfyui(config: AttachedEnginesConfig) -> dict:
 
     async def peer(url: str) -> dict:
         queue = await ComfyuiClient(url).queue()
-        return {"url": url, "reachable": queue.reachable, "busy": queue.busy}
+        return {"url": url, "reachable": queue.reachable, "busy": queue.busy, "state": queue.state}
 
     queue, stats, peers = await asyncio.gather(
         own.queue(), own.system_stats(), asyncio.gather(*(peer(url) for url in peer_urls))
@@ -105,6 +105,7 @@ async def _probe_comfyui(config: AttachedEnginesConfig) -> dict:
     return {
         "url": config.comfyui_url,
         "reachable": queue.reachable,
+        "state": queue.state,
         "version": system_version(stats),
         "queue_running": len(queue.running_ids),
         "queue_pending": len(queue.pending_ids),
@@ -358,6 +359,8 @@ def _comfyui_unreachable(exc: Exception) -> HTTPException:
 
 async def _comfyui_queue(client: ComfyuiClient):
     queue = await client.queue()
+    if queue.state == "unknown":
+        raise HTTPException(status_code = 502, detail = "ComfyUI did not report its queue.")
     if not queue.reachable:
         raise HTTPException(status_code = 502, detail = "ComfyUI is not reachable.")
     return queue
