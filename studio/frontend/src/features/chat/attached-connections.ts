@@ -2,7 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 // The attached engine (oMLX) is a seeded connection row, managed on the
-// oMLX settings tab. Settings > Connections hides them; the model picker keeps them.
+// Engines settings tab. Settings > Connections hides them; the model picker keeps them.
 
 import { attachedProviderKind } from "./external-providers.ts";
 
@@ -13,7 +13,7 @@ type ConnectionLike = {
 };
 
 export const ATTACHED_CONNECTIONS_NOTICE = "oMLX is managed in Settings >";
-export const ATTACHED_CONNECTIONS_LINK = "oMLX";
+export const ATTACHED_CONNECTIONS_LINK = "Engines";
 
 export function isAttachedConnection(
   provider: Pick<ConnectionLike, "id" | "providerType">,
