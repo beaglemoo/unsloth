@@ -115,6 +115,9 @@ def world(monkeypatch, tmp_path):
     return w
 
 
+_REAL_MEDIA_PROBE = arbiter._studio_media_resident
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -579,6 +582,155 @@ def test_media_probe_never_imports_or_constructs(monkeypatch):
         monkeypatch.delitem(sys.modules, name, raising = False)
     assert arbiter._studio_media_resident() is None
     assert not any(n in sys.modules for n in ("core.inference.diffusion", "core.inference.video"))
+
+
+# --- oMLX is refused beside a Studio image or video model, resident, loading or about to load --
+
+
+@pytest.mark.parametrize("media", ["has an image model loaded", "has a video model loaded", "is loading an image model"])
+def test_omlx_use_and_load_are_refused_while_studio_has_media(world, media):
+    world.media = media
+    for admit in (arbiter.before_omlx_use, arbiter.before_omlx_load):
+        arbiter._busy_cache.clear()
+        result = run(admit())
+        assert result.error and media in result.error and "to use oMLX" in result.error
+    assert world.posts(OWN) == [] and world.posts(PEER) == [] and world.calls == []
+
+
+def test_the_media_refusal_follows_the_local_arbitration_setting(world):
+    world.media = "has an image model loaded"
+    set_config(world, arbitrate_local_loads = False)
+    run(arbiter.before_omlx_use()).require_clear()
+
+
+def test_a_media_load_replacing_a_media_model_is_not_refused_by_it(world):
+    world.media = "has an image model loaded"
+    run(arbiter.free_for_local("local_load", media_hold = arbiter.new_media_hold("image"))).require_clear()
+
+
+def test_a_slow_media_probe_is_a_refusal_not_an_admission(world, monkeypatch):
+    import time
+
+    monkeypatch.setattr(arbiter, "_MEDIA_PROBE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(arbiter, "_studio_media_resident", lambda: time.sleep(0.3))
+    assert run(arbiter.before_omlx_use()).error
+
+
+def _backend(loaded, loading = None, *, boom = False):
+    class Backend:
+        def status(self):
+            return {"loaded": loaded}
+
+        if loading is not None:
+            def loading_repo_ids(self):
+                if boom:
+                    raise RuntimeError("boom")
+                return loading
+
+    return Backend()
+
+
+@pytest.fixture
+def backends(monkeypatch):
+    for name in ("core.inference.diffusion", "core.inference.sd_cpp_backend", "core.inference.video"):
+        monkeypatch.setitem(sys.modules, name, types.SimpleNamespace(
+            _diffusion_backend = None, _sd_cpp_backend = None, _backend = None))
+    monkeypatch.setattr(arbiter, "_studio_media_resident", _REAL_MEDIA_PROBE)
+    arbiter._media_holds.clear()
+    yield sys.modules
+    arbiter._media_holds.clear()
+
+
+def test_the_probe_reports_a_loading_image_or_video_model(backends):
+    assert _REAL_MEDIA_PROBE() is None
+    backends["core.inference.diffusion"]._diffusion_backend = _backend(False, ())
+    assert _REAL_MEDIA_PROBE() is None
+    backends["core.inference.diffusion"]._diffusion_backend = _backend(False, ("org/model",))
+    assert _REAL_MEDIA_PROBE() == "is loading an image model"
+    backends["core.inference.diffusion"]._diffusion_backend = None
+    backends["core.inference.sd_cpp_backend"]._sd_cpp_backend = _backend(False, ("org/model",))
+    assert _REAL_MEDIA_PROBE() == "is loading an image model"
+    backends["core.inference.sd_cpp_backend"]._sd_cpp_backend = None
+    backends["core.inference.video"]._backend = _backend(False, ("org/video",))
+    assert _REAL_MEDIA_PROBE() == "is loading a video model"
+
+
+def test_the_probe_prefers_loaded_and_survives_a_backend_that_cannot_say(backends):
+    backends["core.inference.video"]._backend = _backend(True, ("x",))
+    assert _REAL_MEDIA_PROBE() == "has a video model loaded"
+    backends["core.inference.video"]._backend = _backend(False, ("x",), boom = True)
+    assert _REAL_MEDIA_PROBE() is None
+
+
+def test_omlx_is_refused_while_a_media_backend_is_loading(world, backends):
+    backends["core.inference.diffusion"]._diffusion_backend = _backend(False, ("org/model",))
+    result = run(arbiter.before_omlx_use())
+    assert result.error and "is loading an image model" in result.error
+
+
+def test_an_admitted_media_load_holds_omlx_out_until_released(world, backends):
+    hold = arbiter.new_media_hold("image")
+    result = run(arbiter.free_for_local("local_load", media_hold = hold))
+    result.require_clear()
+    assert world.omlx_calls == ["unload_all"]
+    assert "is loading an image model" in run(arbiter.before_omlx_use()).error
+    assert "is loading an image model" in run(arbiter.before_omlx_load()).error
+    assert "ComfyUI job" in run(arbiter.before_comfyui_job()).error
+    hold.release()
+    hold.release()
+    run(arbiter.before_omlx_use()).require_clear()
+
+
+def test_a_video_hold_names_the_video_model(world, backends):
+    hold = arbiter.new_media_hold("video")
+    run(arbiter.free_for_local("local_load", media_hold = hold)).require_clear()
+    assert "is loading a video model" in run(arbiter.before_omlx_use()).error
+
+
+def test_a_refused_media_admission_takes_no_claim(world, backends):
+    world.comfy[OWN]["running"] = 1
+    hold = arbiter.new_media_hold("image")
+    assert run(arbiter.free_for_local("local_load", media_hold = hold)).error
+    assert not hold.active and arbiter._media_holds == set()
+    world.comfy[OWN]["running"] = 0
+    run(arbiter.before_omlx_use()).require_clear()
+
+
+def test_a_media_admission_that_fails_to_unload_omlx_gives_the_claim_back(world, backends):
+    world.omlx_error = AttachedEngineError("oMLX models are still loaded or loading: x")
+    hold = arbiter.new_media_hold("image")
+    assert run(arbiter.free_for_local("local_load", media_hold = hold)).error
+    assert not hold.active and arbiter._media_holds == set()
+
+
+def test_arbitration_off_takes_no_claim(world, backends):
+    set_config(world, arbitrate_local_loads = False)
+    hold = arbiter.new_media_hold("image")
+    assert run(arbiter.free_for_local("local_load", media_hold = hold)).skipped == "arbitration_off"
+    assert arbiter._media_holds == set()
+
+
+def test_a_concurrent_omlx_request_cannot_slip_in_after_a_media_admission(world, backends):
+    async def go(order):
+        hold = arbiter.new_media_hold("image")
+        coros = {
+            "media": arbiter.free_for_local("local_load", media_hold = hold),
+            "omlx": arbiter.before_omlx_use(),
+        }
+        tasks = {name: asyncio.ensure_future(coros[name]) for name in order}
+        return {name: await task for name, task in tasks.items()}, hold
+
+    results, hold = run(go(["media", "omlx"]))
+    results["media"].require_clear()
+    assert results["omlx"].error and "is loading an image model" in results["omlx"].error
+    hold.release()
+    world.omlx_calls.clear()
+    # oMLX first: it was admitted before the media load existed, and the media load then unloads it.
+    results, hold = run(go(["omlx", "media"]))
+    results["omlx"].require_clear()
+    results["media"].require_clear()
+    assert world.omlx_calls == ["unload_all"]
+    hold.release()
 
 
 # --- idle free --------------------------------------------------------------------------------
