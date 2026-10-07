@@ -92,13 +92,16 @@ class Server:
         self.raw_paths: list[str] = []
         self.timeouts: list[dict] = []
         self.post_status = 200
+        self.post_json = {"success": True}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.calls.append((request.method, request.url.path))
         self.raw_paths.append(request.url.raw_path.decode())
         self.timeouts.append(dict(request.extensions.get("timeout", {})))
         if request.method == "POST":
-            return httpx.Response(self.post_status, json = {"success": True})
+            if self.post_json is None:
+                return httpx.Response(self.post_status, text = "busy")
+            return httpx.Response(self.post_status, json = self.post_json)
         if request.url.path == "/v1/models/status":
             return httpx.Response(200, json = self.status)
         if request.url.path == "/v1/models":
@@ -217,6 +220,49 @@ def test_unload_quotes_colon_ids():
     server = Server()
     run(server.client().unload("swift-1.5-27b:fast"))
     assert server.raw_paths == ["/v1/models/swift-1.5-27b%3Afast/unload"]
+
+
+def test_unload_waits_longer_than_other_calls():
+    server = Server()
+    run(server.client().unload(EMBED_ID))
+    run(server.client().status())
+    assert server.timeouts[0]["read"] == 25.0
+    assert server.timeouts[0]["connect"] == 2.0
+    assert server.timeouts[1]["read"] == 5.0
+
+
+def _busy_server():
+    server = Server()
+    server.post_status = 409
+    server.post_json = {"error": {"type": "model_busy", "message": "busy"}}
+    return server
+
+
+def test_unload_409_model_busy_is_a_busy_error_with_a_clear_message():
+    from core.inference.attached import AttachedEngineBusy
+
+    with pytest.raises(AttachedEngineBusy, match = "busy serving another client; retry shortly"):
+        run(_busy_server().client().unload(EMBED_ID))
+
+
+def test_unload_409_other_type_stays_a_plain_error():
+    from core.inference.attached import AttachedEngineBusy
+
+    server = _busy_server()
+    server.post_json = {"error": {"type": "model_loading"}}
+    with pytest.raises(AttachedEngineError, match = "HTTP 409") as caught:
+        run(server.client().unload(EMBED_ID))
+    assert not isinstance(caught.value, AttachedEngineBusy)
+    server.post_json = None
+    with pytest.raises(AttachedEngineError, match = "HTTP 409"):
+        run(server.client().unload(EMBED_ID))
+
+
+def test_unload_all_surfaces_a_busy_model():
+    from core.inference.attached import AttachedEngineBusy
+
+    with pytest.raises(AttachedEngineBusy):
+        run(_busy_server().client().unload_all())
 
 
 def test_load_and_unload_raise_on_failure():
