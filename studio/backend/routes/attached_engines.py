@@ -383,6 +383,7 @@ async def comfyui_free():
         await client.free()
     except ComfyuiError as exc:
         raise _comfyui_unreachable(exc) from exc
+    arbiter.cancel_comfyui_idle_free()
     return {"freed": True, "deferred": queue.busy}
 
 
