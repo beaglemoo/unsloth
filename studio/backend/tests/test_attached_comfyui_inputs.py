@@ -185,7 +185,7 @@ def test_the_temp_dir_falls_back_to_the_default(tmp_path, body):
         path = tmp_path / "engines" / "engines.toml"
         path.parent.mkdir(parents = True)
         path.write_text(body)
-    assert inputs.temp_inputs_dir() == tmp_path / "home" / ".unsloth" / "engines" / "comfyui-data" / "temp" / "unsloth-inputs"
+    assert inputs.temp_inputs_dir() == tmp_path / "engines" / "comfyui-data" / "temp" / "unsloth-inputs"
 
 
 def stage(tmp_path):
