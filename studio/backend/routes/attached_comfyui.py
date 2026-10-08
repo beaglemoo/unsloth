@@ -8,6 +8,12 @@ Mounted by ``routes.attached_engines`` inside its gated router, so every route i
 header next to the human ``detail``: ``busy``, ``off``, ``not_running``, ``admission``,
 ``missing_models``, ``params``, ``graph``, ``execution``, ``cancelled``, ``timeout``,
 ``unreachable`` or ``template``.
+
+Image templates (``kind`` ``img2img`` or ``edit``, listed with their ``image_slots``) take their inputs in
+``POST /comfyui/generate`` as ``input_images: {slot: {data} | {gallery_id}}`` (a data URL or base64, or the
+id of a gallery image), plus ``denoise`` (img2img) and ``reference_resolution`` (edit). The inputs travel
+inline and are uploaded to ComfyUI's temp folder only once the job is admitted; Studio deletes them when
+the job ends. A bad image answers 422 ``params`` before anything is unloaded.
 """
 
 import asyncio
@@ -16,7 +22,7 @@ import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from core.inference.attached import AttachedEngineError
 from core.inference.attached import comfyui_jobs as jobs
@@ -40,6 +46,25 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+# One inline image is capped at 32 MiB of base64 text, and the whole request at 128 MiB (as the native Images page).
+MAX_INPUT_DATA_CHARS = 32 * 1024 * 1024
+MAX_TOTAL_INPUT_DATA_CHARS = 128 * 1024 * 1024
+
+
+class ComfyInputImage(BaseModel):
+    """One input image: inline ``data`` (a data URL or raw base64) or the ``gallery_id`` of a gallery image."""
+
+    data: Optional[str] = Field(default = None, max_length = MAX_INPUT_DATA_CHARS)
+    # The gallery's own id syntax (image_gallery._ID_RE); an unknown id is a 422 from the job, not here.
+    gallery_id: Optional[str] = Field(default = None, pattern = r"^[A-Za-z0-9_-]{1,128}$")
+
+    @model_validator(mode = "after")
+    def _exactly_one(self):
+        if (self.data is None) == (self.gallery_id is None):
+            raise ValueError("Give either data or gallery_id for an input image, not both and not neither.")
+        return self
+
+
 class ComfyLora(BaseModel):
     name: str = Field(min_length = 1, max_length = 256)
     strength: float = Field(default = 1.0, ge = -4.0, le = 4.0)
@@ -59,6 +84,18 @@ class ComfyGenerateRequest(BaseModel):
     scheduler: Optional[str] = Field(default = None, max_length = 64)
     batch_size: int = Field(default = 1, ge = 1, le = 4)
     loras: list[ComfyLora] = Field(default_factory = list, max_length = 4)
+    # Image templates: one entry per template image slot (see ``image_slots`` in GET /comfyui/templates).
+    input_images: dict[str, ComfyInputImage] = Field(default_factory = dict, max_length = 4)
+    # img2img: how far from the input image the result may drift (1 = ignore it). Clamped by the template.
+    denoise: Optional[float] = Field(default = None, gt = 0.0, le = 1.0)
+    # edit: references are resized to about this many pixels per side; the template snaps and clamps it.
+    reference_resolution: Optional[int] = Field(default = None, ge = 0, le = 4096)
+
+    @model_validator(mode = "after")
+    def _inputs_fit(self):
+        if sum(len(image.data or "") for image in self.input_images.values()) > MAX_TOTAL_INPUT_DATA_CHARS:
+            raise ValueError("The input images are too large (128 MiB in total).")
+        return self
 
 
 class ComfyGenerateResponse(BaseModel):
