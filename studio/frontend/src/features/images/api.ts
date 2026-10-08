@@ -370,6 +370,8 @@ export interface GalleryImage {
   // Set on images made by an attached engine (ComfyUI), where `engine` above reads "comfyui": the template
   // that ran and its scheduler (sampler above carries the ComfyUI sampler there).
   comfyui_template?: string | null;
+  // Per ComfyUI image slot: the gallery id of the input when it came from the gallery, else null (uploads are not kept).
+  comfyui_inputs?: Record<string, string | null> | null;
   scheduler?: string | null;
   created_at: number;
   pinned?: boolean;

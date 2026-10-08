@@ -126,3 +126,63 @@ test("the page routes a ComfyUI record to the panel and any other to Studio", ()
   const restore = page.slice(page.indexOf("const restoreSettings = useCallback"), start);
   assert.doesNotMatch(restore, /recallFromImage|setEngine|ComfyPanel/);
 });
+
+// ---------------------------------------------------------------- phase 7: image inputs
+
+test("an img2img record restores denoise and its gallery input", () => {
+  const recall = recallFromImage(
+    record({ workflow: "img2img", strength: 0.55, comfyui_inputs: { image: "fox_1" } }),
+  );
+  assert.ok(recall);
+  assert.equal(recall.params.denoise, 0.55);
+  assert.equal(recall.params.referenceResolution, undefined);
+  assert.deepEqual(recall.inputs, { image: "fox_1" });
+});
+
+test("an edit record restores the reference resolution", () => {
+  const recall = recallFromImage(
+    record({ workflow: "edit", reference_resolution: 768, comfyui_inputs: { image: "fox_1" } }),
+  );
+  assert.ok(recall);
+  assert.equal(recall.params.referenceResolution, 768);
+  assert.equal(recall.params.denoise, undefined);
+});
+
+test("an upload record has no gallery id to re-attach", () => {
+  const recall = recallFromImage(record({ workflow: "img2img", strength: 0.6, comfyui_inputs: { image: null } }));
+  assert.deepEqual(recall?.inputs, { image: null });
+});
+
+test("a text-to-image record carries no image state", () => {
+  const recall = recallFromImage(record());
+  assert.ok(recall);
+  assert.deepEqual(recall.inputs, {});
+  assert.equal("denoise" in recall.params, false);
+  assert.equal("referenceResolution" in recall.params, false);
+});
+
+test("the panel store keeps inputs by slot and revokes a replaced gallery preview", async () => {
+  const revoked: string[] = [];
+  const original = URL.revokeObjectURL;
+  URL.revokeObjectURL = (u: string) => void revoked.push(u);
+  try {
+    const { useComfyPanelStore } = await import("../src/features/images/comfyui/comfyui-panel-store.ts");
+    const store = useComfyPanelStore.getState();
+    const a = { kind: "gallery", galleryId: "a", previewUrl: "blob:a", width: 1, height: 1 } as const;
+    const b = { kind: "data", dataUrl: "data:x", width: 1, height: 1 } as const;
+    store.setInput("image", a);
+    store.setInput("image", b);
+    assert.deepEqual(revoked, ["blob:a"]);
+    assert.equal(useComfyPanelStore.getState().inputs.image, b);
+    store.setInput("image", { ...a, previewUrl: "blob:c" });
+    store.clearInputs();
+    assert.deepEqual(revoked, ["blob:a", "blob:c"]);
+    assert.deepEqual(useComfyPanelStore.getState().inputs, {});
+    store.requestInput({ galleryId: "g", url: "/u", width: 2, height: 3 });
+    assert.equal(useComfyPanelStore.getState().pendingInput?.galleryId, "g");
+    store.clearPendingInput();
+    assert.equal(useComfyPanelStore.getState().pendingInput, null);
+  } finally {
+    URL.revokeObjectURL = original;
+  }
+});
