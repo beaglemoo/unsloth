@@ -686,6 +686,21 @@ def test_comfyui_free(client, fake):
     assert not any(c[0] == 8188 for c in fake.comfy_calls)
 
 
+def test_comfyui_free_removes_the_idle_marker(client, fake):
+    marker = fake.engines_home / arbiter.IDLE_MARKER
+    marker.write_text('{"free_at": 9999999999}')
+    assert client.post(f"{BASE}/comfyui/free").status_code == 200
+    assert not marker.exists() and arbiter.comfyui_idle_free_at() is None
+
+
+def test_comfyui_free_that_fails_keeps_the_idle_marker(client, fake):
+    marker = fake.engines_home / arbiter.IDLE_MARKER
+    marker.write_text('{"free_at": 9999999999}')
+    fake.comfy[8844]["free_status"] = 500
+    assert client.post(f"{BASE}/comfyui/free").status_code == 502
+    assert marker.exists()
+
+
 def test_comfyui_free_unreachable_and_refused(client, fake):
     fake.comfy[8844]["free_status"] = 500
     assert client.post(f"{BASE}/comfyui/free").status_code == 502
