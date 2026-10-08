@@ -286,6 +286,18 @@ class ComfyuiClient:
         except httpx.HTTPError as exc:
             raise ComfyuiError(f"ComfyUI is unreachable ({type(exc).__name__})") from exc
 
+    async def sampler_options(self) -> tuple[list[str], list[str]]:
+        """``(samplers, schedulers)`` ComfyUI's ``KSampler`` node accepts, from ``/object_info/KSampler``."""
+        body = await self._get_json("/object_info/KSampler", _SUBMIT_TIMEOUT)
+        try:
+            required = body["KSampler"]["input"]["required"]
+            samplers, schedulers = required["sampler_name"][0], required["scheduler"][0]
+        except (KeyError, IndexError, TypeError):
+            raise ComfyuiError("ComfyUI returned an unexpected /object_info/KSampler payload") from None
+        if not all(isinstance(v, list) and v and all(isinstance(x, str) and x for x in v) for v in (samplers, schedulers)):
+            raise ComfyuiError("ComfyUI returned an unexpected /object_info/KSampler payload")
+        return list(samplers), list(schedulers)
+
     async def object_info(self) -> dict:
         """The node catalogue (large; used only to validate imported graphs)."""
         body = await self._get_json("/object_info", _SUBMIT_TIMEOUT)
