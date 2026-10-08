@@ -268,6 +268,36 @@ class ComfyuiClient:
             raise ComfyuiError("ComfyUI returned an unexpected /prompt payload")
         return prompt_id, number if isinstance(number, int) and not isinstance(number, bool) else 0
 
+    async def upload_image(self, filename: str, data: bytes, *, subfolder: str, type: str = "temp") -> dict:
+        """Store an input image through ``POST /upload/image`` and return ComfyUI's ``{name, subfolder, type}``.
+
+        ``overwrite`` is on so ComfyUI never renames the file; a reply that names anything else than what
+        was sent raises ``ComfyuiError``, because the graph refers to the file by the name Studio chose.
+        """
+        try:
+            async with self._client(_SUBMIT_TIMEOUT) as client:
+                response = await client.post(
+                    "/upload/image",
+                    files = {"image": (filename, data, "image/png")},
+                    data = {"type": type, "subfolder": subfolder, "overwrite": "true"},
+                )
+        except httpx.HTTPError as exc:
+            raise ComfyuiError(f"ComfyUI is unreachable ({exc.__class__.__name__})") from exc
+        if response.status_code >= 400:
+            raise ComfyuiError(f"ComfyUI returned HTTP {response.status_code} for /upload/image")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ComfyuiError("ComfyUI returned an unexpected /upload/image payload") from exc
+        if not (
+            isinstance(body, dict)
+            and body.get("name") == filename
+            and (body.get("subfolder") or "") == subfolder
+            and body.get("type") == type
+        ):
+            raise ComfyuiError("ComfyUI stored the input under an unexpected name")
+        return body
+
     async def history(self, prompt_id: str) -> Optional[dict]:
         body = await self._get_json(f"/history/{quote(prompt_id, safe = '')}", _SUBMIT_TIMEOUT)
         entry = body.get(prompt_id) if isinstance(body, dict) else None
