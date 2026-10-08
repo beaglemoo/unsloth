@@ -41,6 +41,19 @@ def png(size = (64, 48)) -> bytes:
     return buf.getvalue()
 
 
+def multipart_fields(request: httpx.Request) -> dict:
+    """``{field name: (filename or None, bytes)}`` of a multipart request body."""
+    boundary = request.headers["content-type"].split("boundary=")[1].encode()
+    fields = {}
+    for part in request.content.split(b"--" + boundary)[1:-1]:
+        head, _, body = part.strip(b"\r\n").partition(b"\r\n\r\n")
+        disposition = head.decode().split("\r\n")[0]
+        name = disposition.split('name="')[1].split('"')[0]
+        filename = disposition.split('filename="')[1].split('"')[0] if 'filename="' in disposition else None
+        fields[name] = (filename, body)
+    return fields
+
+
 class FakeComfy:
     """A ComfyUI that answers the endpoints the runner uses."""
 
@@ -66,6 +79,12 @@ class FakeComfy:
         self.has_cancel_endpoint = False
         self.cancel_calls: list[str] = []
         self.interrupts: list[dict] = []
+        # /upload/image: the files land in ``input_dir`` (ComfyUI's temp/unsloth-inputs) like the real server's.
+        self.uploads: list[dict] = []
+        self.upload_status = 200
+        self.input_dir: Path | None = None
+        # Names present in ``input_dir`` at the moment /prompt arrived.
+        self.inputs_at_submit: list[str] | None = None
 
     def finish(self, pid = PID, *, status = None):
         self.running = [i for i in self.running if i != pid]
@@ -114,9 +133,21 @@ class FakeComfy:
             return httpx.Response(200, json = {"cancelled": self.interrupt_running(pid)})
         if path.startswith("/models/"):
             return httpx.Response(200, json = self.models.get(path.split("/")[-1], []))
+        if path == "/upload/image" and method == "POST":
+            fields = multipart_fields(request)
+            name = fields["image"][0]
+            self.uploads.append({"name": name, "bytes": fields["image"][1], **{k: v[1].decode() for k, v in fields.items() if k != "image"}})
+            if self.input_dir is not None:
+                self.input_dir.mkdir(parents = True, exist_ok = True)
+                (self.input_dir / name).write_bytes(fields["image"][1])
+            if self.upload_status != 200:
+                return httpx.Response(self.upload_status)
+            return httpx.Response(200, json = {"name": name, "subfolder": fields["subfolder"][1].decode(), "type": fields["type"][1].decode()})
         if path == "/prompt":
             body = json.loads(request.content)
             self.submitted.append(body)
+            if self.input_dir is not None:
+                self.inputs_at_submit = sorted(p.name for p in self.input_dir.glob("*")) if self.input_dir.exists() else []
             if self.submit_error is not None:
                 if self.queue_before_submit_error:
                     self.pending.append(body["prompt_id"])
@@ -206,7 +237,11 @@ async def _no_sleep(_seconds = 0):
 def world(tmp_path, monkeypatch):
     monkeypatch.setenv("UNSLOTH_STUDIO_HOME", str(tmp_path / "studio"))
     monkeypatch.setenv("UNSLOTH_COMFYUI_TEMPLATES_DIR", str(tmp_path / "templates"))
+    # Studio finds ComfyUI's temp folder through engines.toml; keep it inside the test.
+    (tmp_path / "engines.toml").write_text(f'[comfyui]\ndata_dir = "{tmp_path / "data"}"\n')
+    monkeypatch.setenv("UNSLOTH_ENGINES_CONFIG", str(tmp_path / "engines.toml"))
     fake = FakeComfy()
+    fake.input_dir = tmp_path / "data" / "temp" / "unsloth-inputs"
     spy = type("Spy", (), {})()
     spy.admissions, spy.scheduled, spy.result = 0, 0, ArbiterResult(acted = True, actions = ("Unloaded oMLX: swift",))
 
@@ -1236,3 +1271,269 @@ def test_a_refusal_before_admission_never_reserves(real):
     with pytest.raises(jobs.ComfyModelsMissing):
         go(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = real.client()))
     assert not arbiter._comfyui_held()
+
+
+# ------------------------------------------------------------ image inputs
+
+IMG2IMG = "qwen-image-2.1-img2img"
+EDIT = "qwen-image-2.1-edit"
+
+
+def data_url(size = (40, 30), color = (30, 120, 220)) -> str:
+    import base64
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, color).save(buf, format = "PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def with_image(**extra) -> dict:
+    return {**PARAMS, "input_images": {"image": {"data": data_url(), "gallery_id": None}}, **extra}
+
+
+def finish_when_submitted(world):
+    original = world.fake.handle
+
+    def handle(request):
+        response = original(request)
+        if request.url.path == "/prompt":
+            world.fake.finish()
+        return response
+
+    world.fake.handle = handle
+
+
+def input_files(world) -> list[str]:
+    directory = world.fake.input_dir
+    return sorted(p.name for p in directory.glob("*")) if directory.exists() else []
+
+
+def test_img2img_job_uploads_after_admission_submits_the_annotated_name_and_cleans_up(world):
+    order = []
+
+    async def on_admit():
+        order.append("admission")
+
+    world.on_admit = on_admit
+    original = world.fake.handle
+
+    def handle(request):
+        path = request.url.path
+        if path in ("/queue", "/upload/image", "/prompt") or path.startswith("/models/"):
+            order.append("models" if path.startswith("/models/") else path)
+        return original(request)
+
+    world.fake.handle = handle
+    finish_when_submitted(world)
+    result = go(runner(FakeConnect(FakeWS([msg("execution_success")]))).run(
+        IMG2IMG, with_image(denoise = 0.45, width = 1248, height = 832), client = world.fake.client()))
+
+    firsts = [order.index(x) for x in ("/queue", "models", "admission", "/upload/image", "/prompt")]
+    assert firsts == sorted(firsts) and order.count("/upload/image") == 1 and order.count("admission") == 1
+    [upload] = world.fake.uploads
+    assert upload["subfolder"] == "unsloth-inputs" and upload["type"] == "temp" and upload["overwrite"] == "true"
+    assert re.fullmatch(r"[0-9a-f]{32}-image\.png", upload["name"])
+    assert Image.open(io.BytesIO(upload["bytes"])).size == (40, 30)
+    graph = world.fake.submitted[0]["prompt"]
+    assert graph["5"]["inputs"]["image"] == f"unsloth-inputs/{upload['name']} [temp]"
+    assert (graph["6"]["inputs"]["width"], graph["6"]["inputs"]["height"]) == (1248, 832)
+    assert graph["8"]["inputs"]["denoise"] == 0.45 and graph["10"]["class_type"] == "PreviewImage"
+    assert world.fake.inputs_at_submit == [upload["name"]], "the file is on disk while ComfyUI may read it"
+    assert input_files(world) == [] and world.scheduled == 1
+
+    [record] = result.images
+    assert (record["workflow"], record["strength"], record["comfyui_inputs"]) == ("img2img", 0.45, {"image": None})
+    assert record["comfyui_template"] == IMG2IMG and "reference_resolution" not in record
+    assert GalleryImage(**record).comfyui_inputs == {"image": None}
+
+
+def test_edit_job_records_the_reference_resolution_and_no_strength(world):
+    finish_when_submitted(world)
+    result = go(runner(FakeConnect(FakeWS([msg("execution_success")]))).run(
+        EDIT, with_image(reference_resolution = 768), client = world.fake.client()))
+    graph = world.fake.submitted[0]["prompt"]
+    assert graph["5"]["inputs"]["resolution"] == 768 and graph["4"]["inputs"]["image"].startswith("unsloth-inputs/")
+    assert graph["6"]["inputs"]["latent_image"] == ["5", 2]
+    [record] = result.images
+    assert (record["workflow"], record["reference_resolution"], record["comfyui_inputs"]) == ("edit", 768, {"image": None})
+    assert "strength" not in record and "reference_image_count" not in record
+    assert input_files(world) == []
+
+
+def test_a_text_to_image_record_is_unchanged(world):
+    finish_when_submitted(world)
+    result = go(runner(FakeConnect(FakeWS([msg("execution_success")]))).run(
+        "qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client()))
+    [record] = result.images
+    for key in ("comfyui_inputs", "strength", "reference_resolution", "reference_image_count"):
+        assert key not in record
+    assert record["workflow"] == "create" and GalleryImage(**record).comfyui_inputs is None
+    assert world.fake.uploads == []
+
+
+def test_a_gallery_input_is_read_from_the_gallery_and_recorded(world):
+    from core.inference import image_gallery
+
+    source = Image.new("RGB", (96, 64), (200, 10, 10))
+    made = image_gallery.save(source, {"prompt": "fox", "width": 96, "height": 64, "steps": 1, "guidance": 1.0, "seed": 1, "created_at": 1.0})
+    finish_when_submitted(world)
+    params = {**PARAMS, "input_images": {"image": {"data": None, "gallery_id": made["id"]}}}
+    result = go(runner(FakeConnect(FakeWS([msg("execution_success")]))).run(IMG2IMG, params, client = world.fake.client()))
+    [upload] = world.fake.uploads
+    sent = Image.open(io.BytesIO(upload["bytes"]))
+    assert sent.size == (96, 64) and sent.getpixel((0, 0)) == (200, 10, 10)
+    assert result.images[0]["comfyui_inputs"] == {"image": made["id"]}
+
+
+def test_a_bad_image_fails_before_models_admission_and_upload(world):
+    for bad in ({"data": "%%% not base64", "gallery_id": None}, {"data": None, "gallery_id": "nosuchimage"}):
+        r = runner()
+        with pytest.raises(ComfyParamError):
+            go(r.run(IMG2IMG, {**PARAMS, "input_images": {"image": bad}}, client = world.fake.client()))
+        assert not r.is_running()
+    assert world.admissions == 0 and world.fake.uploads == [] and world.fake.submitted == []
+    assert not [c for c in world.fake.calls if c[1].startswith("/models/")]
+    assert world.scheduled == 0
+
+
+def test_a_missing_or_unknown_slot_fails_before_any_request(world):
+    with pytest.raises(ComfyParamError, match = "needs an input image"):
+        go(runner().run(IMG2IMG, dict(PARAMS), client = world.fake.client()))
+    with pytest.raises(ComfyParamError, match = "no input image 'image_2'"):
+        go(runner().run(IMG2IMG, {**with_image(), "input_images": {"image": {"data": data_url()}, "image_2": {"data": data_url()}}}, client = world.fake.client()))
+    with pytest.raises(ComfyParamError, match = "no input image 'image'"):
+        go(runner().run("qwen-image-2.1-t2i", with_image(), client = world.fake.client()))
+    assert world.fake.calls == []
+
+
+def test_an_admission_refusal_uploads_nothing(world):
+    world.result = ArbiterResult(skipped = "error", error = "Cannot free shared memory for a ComfyUI job: oMLX is busy")
+    with pytest.raises(AttachedAdmissionError):
+        go(runner().run(IMG2IMG, with_image(), client = world.fake.client()))
+    assert world.fake.uploads == [] and world.fake.submitted == [] and input_files(world) == []
+
+
+def test_a_failed_upload_submits_nothing_and_deletes_the_partial_file(world):
+    world.fake.upload_status = 500
+    r = runner()
+    with pytest.raises(ComfyuiError):
+        go(r.run(IMG2IMG, with_image(), client = world.fake.client()))
+    assert len(world.fake.uploads) == 1 and world.fake.submitted == []
+    assert input_files(world) == [] and not r.is_running() and world.scheduled == 1
+
+
+def test_an_execution_error_deletes_the_input(world):
+    frames = [msg("execution_start"), msg("execution_error", exception_message = "out of memory", node_type = "KSampler")]
+    with pytest.raises(jobs.ComfyJobError):
+        go(runner(FakeConnect(FakeWS(frames))).run(IMG2IMG, with_image(), client = world.fake.client()))
+    assert world.fake.inputs_at_submit and input_files(world) == []
+
+
+def test_an_interrupt_deletes_the_input(world):
+    with pytest.raises(jobs.ComfyCancelled):
+        go(runner(FakeConnect(FakeWS([msg("execution_start"), msg("execution_interrupted", node_id = "8")]))).run(
+            EDIT, with_image(), client = world.fake.client()))
+    assert input_files(world) == []
+
+
+def test_a_user_cancel_deletes_the_input_once_comfyui_let_go(world):
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([msg("execution_start")])))
+        r.ws_safety_poll = 60
+        task = asyncio.create_task(r.run(IMG2IMG, with_image(), client = world.fake.client()))
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if r.progress()["prompt_id"]:
+                break
+        assert input_files(world), "the input stays while the job is running"
+        assert await r.cancel() is True
+        with pytest.raises(jobs.ComfyCancelled):
+            await task
+        assert not r.is_running()
+
+    go(scenario())
+    assert input_files(world) == []
+
+
+def test_a_task_cancelled_during_the_upload_deletes_the_input(world):
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([])))
+        gate = asyncio.Event()
+        original = world.fake.client
+
+        def client():
+            c = original()
+            real_upload = c.upload_image
+
+            async def slow_upload(*args, **kwargs):
+                await real_upload(*args, **kwargs)
+                await gate.wait()
+
+            c.upload_image = slow_upload
+            return c
+
+        task = asyncio.create_task(r.run(IMG2IMG, with_image(), client = client()))
+        assert await _until(lambda: world.fake.uploads)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not r.is_running()
+
+    go(scenario())
+    assert input_files(world) == [] and world.fake.submitted == []
+
+
+def test_the_input_stays_while_the_reaper_owns_the_prompt_and_goes_when_it_ends(world):
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([msg("execution_start")])))
+        r.cancel_wait = 0.05
+        real = world.fake.interrupt_running
+        world.fake.interrupt_running = lambda pid: False
+        with pytest.raises(jobs.ComfyTimeout, match = "may still be running"):
+            await r.run(IMG2IMG, with_image(), client = world.fake.client(), timeout_s = 0.05)
+        assert r.is_running() and len(input_files(world)) == 1, "ComfyUI may still read the file"
+        world.fake.interrupt_running = real
+        assert await _until(lambda: not r.is_running())
+        assert input_files(world) == []
+
+    go(scenario())
+
+
+def test_a_submit_timeout_keeps_the_input_until_the_prompt_is_confirmed_gone(world):
+    world.fake.has_cancel_endpoint = True
+    world.fake.submit_error = httpx.ReadTimeout("timed out")
+    world.fake.queue_before_submit_error = True
+    r = runner()
+    r.cancel_wait = r.reap_wait = 0.0
+    stuck = []
+    original = world.fake.handle
+
+    def handle(req):
+        if req.url.path.startswith("/api/jobs/"):
+            stuck.append(req.url.path)
+            return httpx.Response(200, json = {"cancelled": False})
+        return original(req)
+
+    world.fake.handle = handle
+
+    async def main():
+        with pytest.raises(ComfyuiError):
+            await r.run(IMG2IMG, with_image(), client = world.fake.client())
+        assert r._reaper is not None and len(input_files(world)) == 1
+        await r._reaper
+
+    go(main())
+    assert stuck and input_files(world) == []
+
+
+def test_stale_inputs_are_swept_at_the_next_image_job_but_foreign_files_stay(world):
+    directory = world.fake.input_dir
+    directory.mkdir(parents = True)
+    stale = ["a" * 32 + "-image.png", "b" * 32 + "-image_2.png"]
+    for name in stale + ["mine.png"]:
+        (directory / name).write_bytes(b"old")
+    finish_when_submitted(world)
+    go(runner(FakeConnect(FakeWS([msg("execution_success")]))).run(IMG2IMG, with_image(), client = world.fake.client()))
+    assert len(world.fake.inputs_at_submit) == 2 and "mine.png" in world.fake.inputs_at_submit
+    assert not set(stale) & set(world.fake.inputs_at_submit)
+    assert input_files(world) == ["mine.png"]
