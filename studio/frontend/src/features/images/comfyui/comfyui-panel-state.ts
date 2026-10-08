@@ -93,6 +93,29 @@ export const SCHEDULER_OPTIONS = [
   "linear_quadratic",
 ];
 
+export type SamplerOptions = { samplers: readonly string[]; schedulers: readonly string[] };
+
+/** What the panel offers until ComfyUI's own lists arrive (and when they cannot). */
+export const FALLBACK_SAMPLER_OPTIONS: SamplerOptions = {
+  samplers: SAMPLER_OPTIONS,
+  schedulers: SCHEDULER_OPTIONS,
+};
+
+function nameList(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const names = [...new Set(raw.filter((v): v is string => typeof v === "string" && v.length > 0))];
+  return names.length > 0 ? names : null;
+}
+
+/** GET /comfyui/samplers. A list that is missing or empty falls back to the built-in one. */
+export function samplerOptionsFromApi(raw: unknown): SamplerOptions {
+  const body = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    samplers: nameList(body.samplers) ?? FALLBACK_SAMPLER_OPTIONS.samplers,
+    schedulers: nameList(body.schedulers) ?? FALLBACK_SAMPLER_OPTIONS.schedulers,
+  };
+}
+
 /** [label, width, height]; every side is a multiple of 16. */
 export const SIZE_PRESETS: ReadonlyArray<readonly [string, number, number]> = [
   ["1:1", 1024, 1024],
