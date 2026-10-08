@@ -46,6 +46,8 @@ test("the /status comfyui block parses to camel case", () => {
     failure: null,
     helperWanted: true,
     jobActive: true,
+    idleFreeAt: null,
+    idleFreeInS: null,
     peers: [{ url: "http://127.0.0.1:8188", reachable: true, busy: false, state: "idle" }],
   });
 });
@@ -69,6 +71,15 @@ test("a down ComfyUI with a failure marker keeps the marker", () => {
   assert.equal(parsed?.helperWanted, null);
   assert.equal(parsed?.ramFree, null);
   assert.equal(parsed?.jobActive, true);
+});
+
+test("the idle-free deadline parses from the status block", () => {
+  const parsed = comfyuiFromApi({ ...LIVE, idle_free_at: 1_700_000_300.5, idle_free_in_s: 252 });
+  assert.equal(parsed?.idleFreeAt, 1_700_000_300.5);
+  assert.equal(parsed?.idleFreeInS, 252);
+  const none = comfyuiFromApi({ ...LIVE, idle_free_at: null, idle_free_in_s: "soon" });
+  assert.equal(none?.idleFreeAt, null);
+  assert.equal(none?.idleFreeInS, null);
 });
 
 test("junk is tolerated: an unknown state reads as unknown, missing fields as empty", () => {

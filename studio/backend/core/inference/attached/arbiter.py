@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import os
 import sys
 import threading
@@ -19,6 +20,7 @@ from urllib.parse import urlsplit
 
 from core.inference.attached import AttachedEngineBusy, AttachedEngineError, desktop_settings
 from core.inference.attached.comfyui_client import ComfyuiClient
+from core.inference.attached.failures import engines_home
 from core.inference.attached.omlx_client import OmlxClient
 from loggers import get_logger
 from utils.attached_engines_settings import AttachedEnginesConfig, get_config
@@ -472,6 +474,33 @@ async def before_comfyui_job(hold: Optional[ComfyJobHold] = None) -> ArbiterResu
 
 _IDLE_SLEEP = asyncio.sleep
 _idle_free: Optional[asyncio.Task] = None
+# Epoch seconds at which the pending idle free next looks at ComfyUI (None when none is pending). The
+# desktop tray cannot ask the authenticated backend, so the same value is published as a marker file,
+# like the engines' ``*.fail`` markers: ``{"free_at": epoch seconds}``.
+_idle_free_at: Optional[float] = None
+IDLE_MARKER = "comfyui-idle.json"
+
+
+def _publish_idle_deadline(at: Optional[float]) -> None:
+    global _idle_free_at
+    _idle_free_at = at
+    try:
+        path = engines_home() / IDLE_MARKER
+        if at is None:
+            path.unlink(missing_ok = True)
+            return
+        path.parent.mkdir(parents = True, exist_ok = True)
+        tmp = path.with_name(f".{IDLE_MARKER}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps({"free_at": at}), encoding = "utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.debug("ComfyUI idle marker not updated: %s", type(exc).__name__)
+
+
+def comfyui_idle_free_at() -> Optional[float]:
+    """Epoch seconds of the next idle free, or None when none is pending."""
+    task = _idle_free
+    return _idle_free_at if task is not None and not task.done() else None
 
 
 def cancel_comfyui_idle_free() -> None:
@@ -480,6 +509,8 @@ def cancel_comfyui_idle_free() -> None:
     task, _idle_free = _idle_free, None
     if task is not None and not task.done():
         task.get_loop().call_soon_threadsafe(task.cancel)
+    if task is not None:
+        _publish_idle_deadline(None)
 
 
 async def _idle_free_after(seconds: int) -> None:
@@ -487,6 +518,7 @@ async def _idle_free_after(seconds: int) -> None:
     global _idle_free
     try:
         while True:
+            _publish_idle_deadline(time.time() + seconds)
             await _IDLE_SLEEP(seconds)
             async with _lock():
                 config = get_config()
@@ -508,6 +540,7 @@ async def _idle_free_after(seconds: int) -> None:
     finally:
         if _idle_free is asyncio.current_task():
             _idle_free = None
+            _publish_idle_deadline(None)
 
 
 def schedule_comfyui_idle_free() -> bool:
@@ -518,6 +551,7 @@ def schedule_comfyui_idle_free() -> bool:
     if not config.enabled or not config.arbitrate_comfyui or config.comfyui_idle_free_s <= 0:
         return False
     _idle_free = asyncio.get_running_loop().create_task(_idle_free_after(config.comfyui_idle_free_s))
+    _publish_idle_deadline(time.time() + config.comfyui_idle_free_s)
     return True
 
 

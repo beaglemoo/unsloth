@@ -81,6 +81,10 @@ export type ComfyuiStatus = {
   helperWanted: boolean | null;
   /** A Studio image job is running through ComfyUI right now (absent from an older backend). */
   jobActive?: boolean;
+  /** Epoch seconds at which Studio next frees ComfyUI's models after idle; null when no timer is pending. */
+  idleFreeAt?: number | null;
+  /** Seconds left on that timer as of the poll (counted down client-side from `receivedAt`). */
+  idleFreeInS?: number | null;
   peers: ComfyuiPeer[];
 };
 
