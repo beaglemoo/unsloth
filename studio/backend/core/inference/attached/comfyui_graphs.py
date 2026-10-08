@@ -47,6 +47,8 @@ SLOT_NAMES = (
     "width",
     "height",
     "batch_size",
+    "denoise",
+    "reference_resolution",
 )
 _PLACEHOLDER_DEFAULTS: dict[str, Any] = {
     "prompt": "",
@@ -57,13 +59,26 @@ _PLACEHOLDER_DEFAULTS: dict[str, Any] = {
     "steps": 25,
     "cfg": 1.0,
     "batch_size": 1,
+    "denoise": 1.0,
+    "reference_resolution": 1024,
 }
+# Other spellings of a slot in {{placeholders}} (PicturePress calls the edit resolution edit_resolution).
+_PLACEHOLDER_ALIASES = {"edit_resolution": "reference_resolution"}
+# Placeholders that name a LoadImage's image input; they become the image slot "image".
+_IMAGE_PLACEHOLDERS = ("reference_image", "image")
+MAX_IMAGE_SLOTS = 4
+IMAGE_SLOT_NAMES = ("image", "image_2", "image_3", "image_4")
+_IMAGE_SLOT_RE = re.compile(r"^image(_[2-4])?$")
+_KIND_RANK = {"t2i": 0, "img2img": 1, "edit": 2}
 DEFAULT_LIMITS: dict[str, Any] = {
     "steps": [1, 100],
     "cfg": [0, 20],
     "side": [256, 2048],
     "multiple": 16,
     "batch_size": [1, 4],
+    "denoise": [0.01, 1.0],
+    "reference_resolution": [256, 2048],
+    "reference_multiple": 32,
 }
 _SAMPLERS = ("KSampler", "KSamplerAdvanced")
 # Loader node -> (input holding the file name, ComfyUI model folder).
@@ -98,6 +113,8 @@ class Template:
     required_models: dict
     source: str = "shipped"
     path: Optional[Path] = field(default = None, compare = False)
+    # ``{"image": {"label": ..., "targets": [{"node", "input"}]}}``: the LoadImage inputs a job fills with an uploaded file.
+    image_slots: dict = field(default_factory = dict)
 
     def to_file(self) -> dict:
         return {
@@ -111,6 +128,7 @@ class Template:
             "defaults": self.defaults,
             "limits": self.limits,
             "required_models": self.required_models,
+            "image_slots": self.image_slots,
         }
 
     def summary(self) -> dict:
@@ -124,6 +142,9 @@ class Template:
             "slots": [name for name in SLOT_NAMES if self.slots.get(name)],
             "supports_lora": bool(self.lora),
             "required_models": self.required_models,
+            "image_slots": [
+                {"name": name, "label": spec["label"], "required": True} for name, spec in self.image_slots.items()
+            ],
         }
 
 
@@ -188,6 +209,34 @@ def _check_slots(graph: dict, slots: Any) -> dict:
     return clean
 
 
+def _check_image_slots(graph: dict, raw: Any) -> dict:
+    """The validated ``image_slots`` block; a missing one (older files) is ``{}``."""
+    if raw in (None, {}):
+        return {}
+    if not isinstance(raw, dict):
+        raise ComfyTemplateError("image_slots must be an object.")
+    if len(raw) > MAX_IMAGE_SLOTS:
+        raise ComfyTemplateError(f"A template can have at most {MAX_IMAGE_SLOTS} input images.")
+    clean: dict[str, dict] = {}
+    for name, spec in raw.items():
+        if not isinstance(name, str) or not _IMAGE_SLOT_RE.match(name):
+            raise ComfyTemplateError(f"Unknown image slot {name!r}.")
+        targets = spec.get("targets") if isinstance(spec, dict) else None
+        if not isinstance(targets, list) or not targets:
+            raise ComfyTemplateError(f"Image slot {name!r} needs targets.")
+        label = spec.get("label")
+        entry = {"label": label.strip()[:80] if isinstance(label, str) and label.strip() else "Input image", "targets": []}
+        for target in targets:
+            node, key = (target.get("node"), target.get("input")) if isinstance(target, dict) else (None, None)
+            if node not in graph or graph[node]["class_type"] != "LoadImage" or key != "image" or key not in graph[node]["inputs"]:
+                raise ComfyTemplateError(f"Image slot {name!r} must point at a LoadImage image input ({node!r}.{key!r}).")
+            if _is_link(graph[node]["inputs"][key]):
+                raise ComfyTemplateError(f"Image slot {name!r} points at a linked input ({node!r}.{key!r}).")
+            entry["targets"].append({"node": node, "input": key})
+        clean[name] = entry
+    return clean
+
+
 def _check_lora(graph: dict, lora: Any) -> Optional[dict]:
     if lora in (None, {}):
         return None
@@ -227,6 +276,7 @@ def _template_from_dict(raw: Any, *, source: str, path: Optional[Path] = None, t
         required_models = {str(k): [str(f) for f in v] for k, v in required.items() if isinstance(v, list)},
         source = source,
         path = path,
+        image_slots = _check_image_slots(graph, raw.get("image_slots")),
     )
 
 
@@ -259,8 +309,15 @@ def _load_dir(directory: Path, *, source: str) -> list[Template]:
 
 
 def load_templates() -> list[Template]:
-    """Shipped templates first, then the user's. A bad file is skipped and logged."""
-    return _load_dir(SHIPPED_DIR, source = "shipped") + _load_dir(user_templates_dir(), source = "user")
+    """Shipped templates first (text to image, image to image, edit; then by file name), then the user's.
+
+    A bad file is skipped and logged. ``qwen-image-2.1-t2i`` stays first: it is the default.
+    """
+    shipped = sorted(
+        _load_dir(SHIPPED_DIR, source = "shipped"),
+        key = lambda t: (_KIND_RANK.get(t.kind, len(_KIND_RANK)), t.path.name if t.path else t.id),
+    )
+    return shipped + _load_dir(user_templates_dir(), source = "user")
 
 
 def get_template(template_id: str) -> Optional[Template]:
@@ -292,19 +349,24 @@ def save_user_template(name: str, graph: Any, slots: Optional[dict] = None) -> T
     graph = copy.deepcopy(validate_api_graph(graph))
     detected = detect_slots(graph)
     chosen = _check_slots(graph, slots) if slots is not None else detected["slots"]
+    # Image-input graphs run one image at a time for now, whatever the graph's latent says.
+    limits = dict(DEFAULT_LIMITS)
+    if detected["image_slots"]:
+        limits["batch_size"] = [1, 1]
     directory = user_templates_dir()
     slug = _unique_slug(directory, name)
     template = Template(
         id = f"{USER_PREFIX}{slug}",
         name = name,
-        kind = "t2i",
+        kind = detected["kind"],
         graph = graph,
         slots = chosen,
         lora = detected["lora"],
         defaults = detected["defaults"],
-        limits = dict(DEFAULT_LIMITS),
+        limits = limits,
         required_models = detected["required_models"],
         source = "user",
+        image_slots = detected["image_slots"],
     )
     try:
         directory.mkdir(parents = True, exist_ok = True)
@@ -351,7 +413,8 @@ def build_graph(template: Template, params: dict) -> tuple[dict, dict]:
 
     Values outside ``limits`` are clamped, sizes snap down to ``limits.multiple``, a seed of ``None`` or
     below zero becomes a random one, and every ``SaveImage`` becomes a ``PreviewImage`` so ComfyUI keeps
-    no copy of the output. ``params`` keys: the slot names plus ``loras`` (a list of ``{name, strength}``).
+    no copy of the output. ``params`` keys: the slot names plus ``loras`` (a list of ``{name, strength}``)
+    and ``images`` (``{image slot: file name as ComfyUI's LoadImage reads it}``, one for every image slot).
     """
     graph = copy.deepcopy(template.graph)
     limits, defaults, slots = template.limits, template.defaults, template.slots
@@ -394,6 +457,17 @@ def build_graph(template: Template, params: dict) -> tuple[dict, dict]:
     batch = 1 if batch is None else batch
     values["batch_size"] = resolved["batch_size"] = int(_clamp(_num(batch, "batch_size"), limits["batch_size"]))
 
+    if slots.get("denoise"):
+        denoise = params.get("denoise")
+        denoise = defaults.get("denoise", 1.0) if denoise is None else denoise
+        bounds = limits.get("denoise", DEFAULT_LIMITS["denoise"])
+        values["denoise"] = resolved["denoise"] = round(float(_clamp(_num(denoise, "denoise"), bounds)), 4)
+
+    if slots.get("reference_resolution"):
+        values["reference_resolution"] = resolved["reference_resolution"] = _reference_resolution(
+            params.get("reference_resolution"), defaults, limits
+        )
+
     for name in ("sampler", "scheduler"):
         value = params.get(name)
         value = defaults.get(name) if value is None else value
@@ -406,14 +480,44 @@ def build_graph(template: Template, params: dict) -> tuple[dict, dict]:
         for target in slots.get(name, []):
             graph[target["node"]]["inputs"][target["input"]] = value
 
+    images = params.get("images") or {}
+    if not isinstance(images, dict):
+        raise ComfyParamError("images must be an object.")
+    for name in images:
+        if name not in template.image_slots:
+            raise ComfyParamError(f"This template has no input image {name!r}.")
+    for name, spec in template.image_slots.items():
+        filename = images.get(name)
+        if not isinstance(filename, str) or not filename:
+            raise ComfyParamError(f"This template needs an input image ({spec['label']}).")
+        for target in spec["targets"]:
+            graph[target["node"]]["inputs"][target["input"]] = filename
+
     applied = _splice_loras(graph, template, params.get("loras"))
     resolved["loras"] = [f"{name}:{strength:g}" for name, strength in applied]
+    resolved["kind"] = template.kind
 
     for node in graph.values():
         if node["class_type"] == "SaveImage":
             node["class_type"] = "PreviewImage"
             node["inputs"].pop("filename_prefix", None)
     return graph, resolved
+
+
+def _reference_resolution(value: Any, defaults: dict, limits: dict) -> int:
+    """The edit reference resolution: clamped, snapped down to ``reference_multiple``; 0 (keep the input's
+    size) only when the template itself defaults to it."""
+    default = defaults.get("reference_resolution", 1024)
+    value = default if value is None else value
+    number = _num(value, "reference_resolution")
+    if number == 0:
+        if default != 0:
+            raise ComfyParamError("reference_resolution 0 (keep the input size) is not available for this template.")
+        return 0
+    lo, hi = limits.get("reference_resolution", DEFAULT_LIMITS["reference_resolution"])
+    multiple = int(limits.get("reference_multiple", DEFAULT_LIMITS["reference_multiple"]))
+    snapped = int(_clamp(number, (lo, hi))) // multiple * multiple
+    return max(snapped, -(-lo // multiple) * multiple)
 
 
 def _splice_loras(graph: dict, template: Template, loras: Any) -> list[tuple[str, float]]:
@@ -481,8 +585,11 @@ def _natural(value: str) -> tuple:
 def detect_slots(graph: dict) -> dict:
     """Find the parameter-bearing inputs of an API-format graph.
 
-    Returns ``{"slots", "lora", "defaults", "required_models"}`` and raises ``ComfyTemplateError`` when
-    the graph has no prompt input or no image output. ``{{prompt}}``-style placeholders (the StoryPress
+    Returns ``{"slots", "lora", "defaults", "required_models", "image_slots", "kind"}`` and raises
+    ``ComfyTemplateError`` when the graph has no prompt input, no image output, a mask input or more than
+    four input images. Every ``LoadImage`` with a literal file name becomes an image slot (its value is
+    cleared in ``graph``); the kind is ``edit`` (a Qwen 2.1 text encode takes the images), ``img2img``
+    (any other graph with input images, typically a ``VAEEncode`` feeding the sampler) or ``t2i``. ``{{prompt}}``-style placeholders (the StoryPress
     convention) win; they are replaced by a default value in ``graph`` (in place) and become slots.
     Otherwise a ``KSampler`` / ``KSamplerAdvanced`` and the nodes it links to are inspected.
     """
@@ -495,7 +602,9 @@ def detect_slots(graph: dict) -> dict:
             match = PLACEHOLDER_RE.match(value) if isinstance(value, str) else None
             if not match:
                 continue
-            name = match.group(1)
+            name = _PLACEHOLDER_ALIASES.get(match.group(1), match.group(1))
+            if name in _IMAGE_PLACEHOLDERS and node["class_type"] == "LoadImage" and key == "image":
+                continue  # an image slot, handled below
             if name not in _PLACEHOLDER_DEFAULTS:
                 raise ComfyTemplateError(f"Unknown placeholder {{{{{name}}}}} at node {node_id!r}.")
             node["inputs"][key] = _PLACEHOLDER_DEFAULTS[name]
@@ -503,17 +612,23 @@ def detect_slots(graph: dict) -> dict:
             if name not in ("prompt", "negative_prompt", "seed"):
                 defaults[name] = _PLACEHOLDER_DEFAULTS[name]
 
+    if any(n["class_type"] == "LoadImageMask" for n in graph.values()):
+        raise ComfyTemplateError("Mask inputs are not supported yet.")
+    image_slots = _detect_image_slots(graph)
+
+    def bind(name: str, node_id: str, key: str, *, record_default: bool = True) -> None:
+        if name in slots or key not in graph[node_id]["inputs"] or _is_link(graph[node_id]["inputs"][key]):
+            return
+        slots[name] = [{"node": node_id, "input": key}]
+        if record_default and name not in ("prompt", "negative_prompt", "seed"):
+            defaults[name] = graph[node_id]["inputs"][key]
+
     sampler_id = _pick_sampler(graph)
     lora = None
+    kind = "t2i"
+    positive_id = None
     if sampler_id is not None:
         sampler = graph[sampler_id]["inputs"]
-
-        def bind(name: str, node_id: str, key: str, *, record_default: bool = True) -> None:
-            if name in slots or key not in graph[node_id]["inputs"] or _is_link(graph[node_id]["inputs"][key]):
-                return
-            slots[name] = [{"node": node_id, "input": key}]
-            if record_default and name not in ("prompt", "negative_prompt", "seed"):
-                defaults[name] = graph[node_id]["inputs"][key]
 
         for name, key in (
             ("seed", "seed"), ("seed", "noise_seed"), ("steps", "steps"), ("cfg", "cfg"),
@@ -543,6 +658,20 @@ def detect_slots(graph: dict) -> dict:
                 "consumers": [{"node": sampler_id, "input": "model"}],
             }
 
+    if image_slots:
+        encoders = sorted((i for i, n in graph.items() if n["class_type"] == "TextEncodeQwenImage21"), key = _natural)
+        with_images = [
+            i for i in encoders if any(k.startswith("images.image_") and _is_link(v) for k, v in graph[i]["inputs"].items())
+        ]
+        if with_images:
+            kind = "edit"
+            encoder = positive_id if positive_id in with_images else with_images[0]
+            bind("reference_resolution", encoder, "resolution")
+        else:
+            kind = "img2img"
+        if kind == "img2img" and sampler_id is not None:
+            bind("denoise", sampler_id, "denoise")
+
     if "seed" not in slots:
         for node_id, node in graph.items():
             if node["class_type"] == "RandomNoise" and not _is_link(node["inputs"].get("noise_seed")):
@@ -556,8 +685,6 @@ def detect_slots(graph: dict) -> dict:
         )
     if not any(n["class_type"] in _OUTPUT_NODES for n in graph.values()):
         raise ComfyTemplateError("The graph needs a SaveImage or PreviewImage node.")
-    if any(n["class_type"] in ("LoadImage", "LoadImageMask") for n in graph.values()):
-        raise ComfyTemplateError("Graphs that load an input image are not supported yet.")
 
     required: dict[str, list[str]] = {}
     for node in graph.values():
@@ -566,7 +693,44 @@ def detect_slots(graph: dict) -> dict:
             required.setdefault(loader[1], [])
             if node["inputs"][loader[0]] not in required[loader[1]]:
                 required[loader[1]].append(node["inputs"][loader[0]])
-    return {"slots": slots, "lora": lora, "defaults": defaults, "required_models": required}
+    return {
+        "slots": slots,
+        "lora": lora,
+        "defaults": defaults,
+        "required_models": required,
+        "image_slots": image_slots,
+        "kind": kind,
+    }
+
+
+def _detect_image_slots(graph: dict) -> dict:
+    """``image_slots`` for every ``LoadImage`` with a literal image input; clears each value in ``graph``.
+
+    A ``{{reference_image}}`` / ``{{image}}`` placeholder is the slot ``image``; the rest take the lowest
+    free name (``image``, ``image_2``, ...) in node order.
+    """
+    nodes = sorted((i for i, n in graph.items() if n["class_type"] == "LoadImage" and _is_text(n["inputs"].get("image"))), key = _natural)
+    if len(nodes) > MAX_IMAGE_SLOTS:
+        raise ComfyTemplateError(f"The graph loads {len(nodes)} input images; at most {MAX_IMAGE_SLOTS} are supported.")
+    placeholder = {
+        i for i in nodes
+        if (m := PLACEHOLDER_RE.match(graph[i]["inputs"]["image"])) and m.group(1) in _IMAGE_PLACEHOLDERS
+    }
+    names: dict[str, str] = {}
+    for i in sorted(placeholder, key = _natural)[:1]:
+        names[i] = IMAGE_SLOT_NAMES[0]
+    free = iter(n for n in IMAGE_SLOT_NAMES if n not in names.values())
+    for i in nodes:
+        if i not in names:
+            names[i] = next(free)
+    slots: dict[str, dict] = {}
+    for i in sorted(nodes, key = lambda n: IMAGE_SLOT_NAMES.index(names[n])):
+        title = (graph[i].get("_meta") or {}).get("title") if isinstance(graph[i].get("_meta"), dict) else None
+        number = IMAGE_SLOT_NAMES.index(names[i]) + 1
+        label = title.strip()[:80] if isinstance(title, str) and title.strip() else f"Input image {number}"
+        slots[names[i]] = {"label": label, "targets": [{"node": i, "input": "image"}]}
+        graph[i]["inputs"]["image"] = ""
+    return slots
 
 
 def graph_class_types(graph: dict) -> list[str]:
