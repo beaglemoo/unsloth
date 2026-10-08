@@ -127,3 +127,9 @@ test("the ComfyUI panel offers the sampler lists ComfyUI reports, not the static
   assert.doesNotMatch(panel, /options=\{SAMPLER_OPTIONS\}|options=\{SCHEDULER_OPTIONS\}/);
   assert.match(readSrc("features/images/comfyui/api.ts"), /\/samplers/);
 });
+
+test("the Engines tab ticks the idle-free countdown only while one is pending", () => {
+  const section = readSrc("features/attached-engines/comfyui-section.tsx");
+  assert.match(section, /useNow\(comfyui\?\.state === "idle" && comfyui\.idleFreeInS != null\)/);
+  assert.match(section, /receivedAt: status\?\.receivedAt/);
+});
