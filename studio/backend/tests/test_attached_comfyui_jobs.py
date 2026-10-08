@@ -662,13 +662,13 @@ def test_cancel_interrupts_a_running_job_and_only_with_its_own_prompt_id(world):
     async def scenario():
         r = runner(FakeConnect(FakeWS([msg("execution_start")])))
         r.ws_safety_poll = 60
-        assert await r.cancel() is False
+        assert await r.cancel() == "none"
         task = asyncio.create_task(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client()))
         for _ in range(100):
             await asyncio.sleep(0.01)
             if r.progress()["prompt_id"]:
                 break
-        assert await r.cancel() is True
+        assert await r.cancel() == "confirmed"
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -727,7 +727,7 @@ def test_cancel_removes_a_queued_job_from_the_queue(world):
             await asyncio.sleep(0.01)
             if r.progress()["prompt_id"]:
                 break
-        assert await r.cancel() is True
+        assert await r.cancel() == "confirmed"
         with pytest.raises(jobs.ComfyCancelled):
             await task
 
@@ -838,7 +838,7 @@ def test_cancel_endpoint_is_atomic_for_a_pending_prompt_and_for_a_running_one(wo
     async def pending_case():
         r = runner(FakeConnect(FakeWS([])))
         task = await _start(r, world.fake)
-        assert await r.cancel() is True
+        assert await r.cancel() == "confirmed"
         with pytest.raises(jobs.ComfyCancelled):
             await task
 
@@ -852,7 +852,7 @@ def test_cancel_endpoint_is_atomic_for_a_pending_prompt_and_for_a_running_one(wo
     async def running_case():
         r = runner(FakeConnect(FakeWS([msg("execution_start")])))
         task = await _start(r, world.fake)
-        assert await r.cancel() is True
+        assert await r.cancel() == "confirmed"
         with pytest.raises(jobs.ComfyCancelled):
             await task
 
@@ -881,7 +881,7 @@ def test_cancel_that_races_with_the_start_falls_through_to_an_interrupt(world):
     async def scenario():
         r = runner(FakeConnect(FakeWS([])))
         task = await _start(r, world.fake)
-        assert await r.cancel() is True
+        assert await r.cancel() == "confirmed"
         assert PID not in world.fake.running, "the cancel only returns once ComfyUI has let go of the prompt"
         with pytest.raises(jobs.ComfyCancelled):
             await task
@@ -892,19 +892,40 @@ def test_cancel_that_races_with_the_start_falls_through_to_an_interrupt(world):
     assert world.fake.interrupts == [{"prompt_id": PID}]
 
 
-def test_cancel_reports_false_and_keeps_ownership_while_comfyui_still_runs_the_job(world):
+def test_cancel_with_a_slow_comfyui_is_pending_not_false_and_the_job_still_ends_cancelled(world):
+    """A denoise step can take minutes on a swapping Mac, so ComfyUI honours the interrupt late. The cancel
+    was requested, so it must not answer "nothing cancelled"; the job then ends as cancelled by itself."""
+
     async def scenario():
         r = runner(FakeConnect(FakeWS([msg("execution_start")])))
         r.cancel_wait = 0.05
         real = world.fake.interrupt_running
-        world.fake.interrupt_running = lambda pid: False  # ComfyUI ignores the interrupt for now
+        world.fake.interrupt_running = lambda pid: False  # mid-step: ComfyUI ignores the interrupt for now
         task = await _start(r, world.fake)
-        assert await r.cancel() is False
+        assert await r.cancel() == "pending"
         assert r.is_running() and not task.done(), "the runner still owns a job that is still running remotely"
         with pytest.raises(jobs.ComfyBusyError):
             await r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client())
+        # The step ends and ComfyUI acts on the interrupt it was sent: nobody calls cancel again.
         world.fake.interrupt_running = real
-        assert await r.cancel() is True
+        real(PID)
+        with pytest.raises(jobs.ComfyCancelled):
+            await asyncio.wait_for(task, 5)
+        assert not r.is_running()
+
+    go(scenario())
+
+
+def test_cancel_again_after_a_pending_one_confirms(world):
+    async def scenario():
+        r = runner(FakeConnect(FakeWS([msg("execution_start")])))
+        r.cancel_wait = 0.05
+        real = world.fake.interrupt_running
+        world.fake.interrupt_running = lambda pid: False
+        task = await _start(r, world.fake)
+        assert await r.cancel() == "pending"
+        world.fake.interrupt_running = real
+        assert await r.cancel() == "confirmed"
         with pytest.raises(jobs.ComfyCancelled):
             await task
         assert not r.is_running()
@@ -926,7 +947,7 @@ def test_cancel_after_the_job_finished_keeps_the_images(world):
         r = runner(FakeConnect(GateWS([msg("execution_success")])))
         task = await _start(r, world.fake)
         world.fake.finish()  # completed before the cancel arrives: the endpoint answers cancelled=false
-        assert await r.cancel() is True
+        assert await r.cancel() == "confirmed"
         gate.set()
         return await task
 
@@ -948,7 +969,7 @@ def test_cancel_before_submission_cancels_right_after_it(world):
         world.on_admit = on_admit
         task = asyncio.create_task(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client()))
         await admitted.wait()
-        assert await r.cancel() is True
+        assert await r.cancel() == "confirmed"
         with pytest.raises(jobs.ComfyCancelled):
             await task
 
@@ -1237,10 +1258,10 @@ def test_a_user_cancel_releases_the_reservation_only_once_comfyui_has_let_go(rea
         real_interrupt = real.interrupt_running
         real.interrupt_running = lambda pid: False
         task = await _start(r, real)
-        assert await r.cancel() is False
+        assert await r.cancel() == "pending"
         assert arbiter._comfyui_held() and (await arbiter.before_omlx_use()).error
         real.interrupt_running = real_interrupt
-        assert await r.cancel() is True
+        assert await r.cancel() == "confirmed"
         with pytest.raises(jobs.ComfyCancelled):
             await task
         assert not arbiter._comfyui_held()
@@ -1446,7 +1467,7 @@ def test_a_user_cancel_deletes_the_input_once_comfyui_let_go(world):
             if r.progress()["prompt_id"]:
                 break
         assert input_files(world), "the input stays while the job is running"
-        assert await r.cancel() is True
+        assert await r.cancel() == "confirmed"
         with pytest.raises(jobs.ComfyCancelled):
             await task
         assert not r.is_running()
