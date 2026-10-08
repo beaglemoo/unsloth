@@ -16,6 +16,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { ImageDropzone } from "@/components/image-dropzone";
 import { Button } from "@/components/ui/button";
 import { InfoHint } from "@/components/ui/info-hint";
 import { Input } from "@/components/ui/input";
@@ -33,7 +34,7 @@ import { ParamSlider } from "@/features/chat";
 import { useSettingsDialogStore } from "@/features/settings/stores/settings-dialog-store";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-import type { GalleryImage } from "../api";
+import { type GalleryImage, fetchGalleryObjectUrl, galleryThumbnailUrl } from "../api";
 import {
   cancelComfyGeneration,
   comfyFailureOf,
@@ -46,21 +47,26 @@ import {
 import { useComfyPanelStore } from "./comfyui-panel-store";
 import {
   type ComfyFailure,
+  type ComfyInput,
   type ComfyLoraRow,
   type ComfyParams,
   type ComfyProgress,
   type ComfyTemplate,
   MAX_LORAS,
   FALLBACK_SAMPLER_OPTIONS,
+  REFERENCE_RESOLUTION_CHOICES,
   SIZE_PRESETS,
   applyRecall,
   buildGenerateRequest,
   defaultParams,
+  editOutputSize,
   hasSlot,
   missingModelList,
+  pickTemplateForInput,
   queueLabel,
   randomSeed,
   reconcileParams,
+  sizeForInput,
   snapSide,
 } from "./comfyui-panel-state";
 import { ComfyuiImportDialog } from "./comfyui-import-dialog";
@@ -69,6 +75,18 @@ const PROGRESS_POLL_MS = 400;
 
 /** The run state the Images page mirrors into its own progress card and gallery strip. */
 export type ComfyRunState = { running: boolean; progress: ComfyProgress | null };
+
+const EDIT_PROMPT_EXAMPLE = "Make the sky stormy and dark, keep everything else the same.";
+
+/** The natural size of an image URL (data or object URL). */
+function measureImage(src: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => reject(new Error("Could not read the image"));
+    img.src = src;
+  });
+}
 
 function PanelField({
   label,
@@ -226,6 +244,8 @@ export function ComfyuiCreatePanel({
   const templateId = useComfyPanelStore((s) => s.templateId);
   const params = useComfyPanelStore((s) => s.params);
   const pendingRecall = useComfyPanelStore((s) => s.pendingRecall);
+  const pendingInput = useComfyPanelStore((s) => s.pendingInput);
+  const inputs = useComfyPanelStore((s) => s.inputs);
   const comfyStatus = useAttachedEnginesStore((s) => s.status?.comfyui ?? null);
   const reachable = comfyStatus?.reachable === true;
 
@@ -296,6 +316,7 @@ export function ComfyuiCreatePanel({
       if (applied) {
         store.setTemplateId(applied.template.id);
         store.setParams(applied.params);
+        void restoreRecalledInputs(applied.template, recall.inputs);
         if (!applied.found) {
           setNotice({
             kind: "error",
@@ -320,6 +341,34 @@ export function ComfyuiCreatePanel({
       seed: store.params?.seed ?? "",
     });
   }, [templates, pendingRecall]);
+
+  // "Use as input" from the gallery viewer: put the image on a template that takes one.
+  useEffect(() => {
+    if (!pendingInput || templates.length === 0) return;
+    const store = useComfyPanelStore.getState();
+    store.clearPendingInput();
+    const current = templates.find((t) => t.id === store.templateId) ?? null;
+    const target = pickTemplateForInput(current, templates);
+    if (!target) {
+      toast.info("No ComfyUI template takes an input image");
+      return;
+    }
+    if (target.id !== current?.id) {
+      applyTemplate(target);
+      toast.info(`Switched to ${target.name} to use the image as input`);
+    }
+    const slot = target.imageSlots[0];
+    void attachGalleryInput(
+      slot.name,
+      { galleryId: pendingInput.galleryId, url: pendingInput.url },
+      { width: pendingInput.width, height: pendingInput.height },
+    ).then((size) => {
+      if (!size) toast.error("Could not load that image as input");
+      else matchInputSize(size, target);
+    });
+    // applyTemplate and the helpers only read the store and stable callbacks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templates, pendingInput]);
 
   useEffect(() => {
     if (!template?.supportsLora) return;
@@ -359,6 +408,81 @@ export function ComfyuiCreatePanel({
     setNotice(null);
   };
 
+  /** Put a gallery image into a slot: fetch a preview (the gallery is auth-protected, so it cannot be
+   *  an <img src>) and keep only the id for the request. */
+  const attachGalleryInput = async (
+    slot: string,
+    source: { galleryId: string; url: string },
+    size?: { width: number; height: number },
+  ): Promise<{ width: number; height: number } | null> => {
+    try {
+      const preview = await fetchGalleryObjectUrl(galleryThumbnailUrl(source.url, 512));
+      const measured = size ?? (await measureImage(preview.url).catch(() => null));
+      if (!measured) {
+        URL.revokeObjectURL(preview.url);
+        return null;
+      }
+      useComfyPanelStore.getState().setInput(slot, {
+        kind: "gallery",
+        galleryId: source.galleryId,
+        previewUrl: preview.url,
+        width: measured.width,
+        height: measured.height,
+      });
+      return measured;
+    } catch {
+      return null;
+    }
+  };
+
+  const restoreRecalledInputs = async (
+    target: ComfyTemplate,
+    recalled: Record<string, string | null>,
+  ) => {
+    useComfyPanelStore.getState().clearInputs();
+    if (target.imageSlots.length === 0) return;
+    let missingInput = false;
+    await Promise.all(
+      target.imageSlots.map(async (slot) => {
+        const id = recalled[slot.name] ?? null;
+        if (!id) {
+          missingInput = true;
+          return;
+        }
+        const url = `/api/inference/images/gallery/${encodeURIComponent(id)}/file`;
+        if (!(await attachGalleryInput(slot.name, { galleryId: id, url }))) missingInput = true;
+      }),
+    );
+    if (missingInput) toast.info("Add the input image again to reproduce this image.");
+  };
+
+  const matchInputSize = (size: { width: number; height: number }, target: ComfyTemplate) => {
+    if (!hasSlot(target, "width") && !hasSlot(target, "height")) return;
+    patch(sizeForInput(size.width, size.height, target));
+  };
+
+  const setSlotInput = async (slot: string, dataUrl: string | null, target: ComfyTemplate) => {
+    if (!dataUrl) {
+      useComfyPanelStore.getState().setInput(slot, null);
+      return;
+    }
+    let measured: { width: number; height: number };
+    try {
+      measured = await measureImage(dataUrl);
+    } catch {
+      toast.error("Could not read the image");
+      return;
+    }
+    const first = !useComfyPanelStore.getState().inputs[slot];
+    useComfyPanelStore.getState().setInput(slot, {
+      kind: "data",
+      dataUrl,
+      width: measured.width,
+      height: measured.height,
+    });
+    if (first) matchInputSize(measured, target);
+  };
+
   const selectTemplate = (id: string) => {
     const next = templates.find((t) => t.id === id);
     if (next) applyTemplate(next);
@@ -390,7 +514,7 @@ export function ComfyuiCreatePanel({
 
   const generate = async () => {
     if (!template || !params || running) return;
-    const built = buildGenerateRequest(template, params);
+    const built = buildGenerateRequest(template, params, inputs);
     if (!built.ok) {
       toast.error(built.error);
       return;
@@ -441,9 +565,13 @@ export function ComfyuiCreatePanel({
   };
 
   const missing = template ? missingModelList(template) : [];
+  const built = template && params ? buildGenerateRequest(template, params, inputs) : null;
+  const generateBlock = built && !built.ok ? built.error : null;
   const waiting = progress ? queueLabel(progress.queue_position) : null;
   const sizeLocked = running;
   const comfyDown = !reachable && comfyStatus?.helperWanted === true;
+  const firstSlot = template?.imageSlots[0]?.name;
+  const firstInput = firstSlot ? (inputs[firstSlot] ?? null) : null;
 
   let body: ReactNode;
   if (loaded === "loading" && templates.length === 0) {
@@ -528,12 +656,32 @@ export function ComfyuiCreatePanel({
           <Notice failure={notice} onOpenSettings={openSettings} onUnload={onUnloadStudioModel} />
         ) : null}
 
+        {template.imageSlots.map((slot) => {
+          const input: ComfyInput | null = inputs[slot.name] ?? null;
+          const shown = input ? (input.kind === "data" ? input.dataUrl : input.previewUrl) : null;
+          return (
+            <PanelField key={slot.name} label={slot.label}>
+              <div className={cn(running && "pointer-events-none opacity-60")}>
+                <ImageDropzone
+                  value={shown}
+                  label="Click or drop an image"
+                  removeLabel={`Remove ${slot.label.toLowerCase()}`}
+                  onChange={(dataUrl) => void setSlotInput(slot.name, dataUrl, template)}
+                />
+              </div>
+              {input?.kind === "gallery" ? (
+                <span className="text-ui-11 text-muted-foreground">From gallery</span>
+              ) : null}
+            </PanelField>
+          );
+        })}
+
         <PanelField label="Prompt">
           <Textarea
             data-type-to-activate="prompt"
             rows={4}
             className="image-prompt-box min-h-32 rounded-lg"
-            placeholder="Describe the image"
+            placeholder={template.kind === "edit" ? EDIT_PROMPT_EXAMPLE : "Describe the image"}
             value={params.prompt}
             onChange={(e) => patch({ prompt: e.target.value })}
           />
@@ -575,6 +723,19 @@ export function ComfyuiCreatePanel({
                   </Button>
                 );
               })}
+              {template.imageSlots.length > 0 ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  className="h-7 px-2.5 text-xs"
+                  disabled={sizeLocked || !firstInput}
+                  title={firstInput ? undefined : "Add an input image first"}
+                  onClick={() => firstInput && matchInputSize(firstInput, template)}
+                >
+                  Match input
+                </Button>
+              ) : null}
             </div>
             <div className="flex gap-2">
               <SideInput
@@ -593,6 +754,63 @@ export function ComfyuiCreatePanel({
               />
             </div>
           </div>
+        ) : null}
+
+        {hasSlot(template, "denoise") ? (
+          <div className="pt-1">
+            <ParamSlider
+              inline={true}
+              label="Strength"
+              info="How far the result may move from the input image. Low keeps it close, 1.0 ignores it."
+              value={params.denoise}
+              min={0.05}
+              max={template.limits.denoise[1]}
+              step={0.05}
+              onChange={(denoise) => patch({ denoise })}
+              disabled={running}
+            />
+          </div>
+        ) : null}
+        {hasSlot(template, "reference_resolution") ? (
+          <PanelField
+            label="Reference resolution"
+            hint="The input is resized to about this many pixels per side before it guides the edit. Lower is faster and uses less memory."
+          >
+            <Select
+              value={String(params.referenceResolution)}
+              onValueChange={(v) => patch({ referenceResolution: Number(v) })}
+              disabled={running}
+            >
+              <SelectTrigger aria-label="Reference resolution" className="h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(
+                  (REFERENCE_RESOLUTION_CHOICES as readonly number[]).includes(
+                    params.referenceResolution,
+                  )
+                    ? [...REFERENCE_RESOLUTION_CHOICES]
+                    : [params.referenceResolution, ...REFERENCE_RESOLUTION_CHOICES]
+                ).map((value) => (
+                  <SelectItem key={value} value={String(value)} className="text-xs">
+                    {value} px
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <span className="text-ui-11 text-muted-foreground">
+              {firstInput
+                ? (() => {
+                    const out = editOutputSize(
+                      firstInput.width,
+                      firstInput.height,
+                      params.referenceResolution,
+                    );
+                    return `Output about ${out.width} x ${out.height}, follows the input's shape`;
+                  })()
+                : "Output follows the input's shape"}
+            </span>
+          </PanelField>
         ) : null}
 
         {hasSlot(template, "steps") ? (
@@ -805,7 +1023,8 @@ export function ComfyuiCreatePanel({
           <Button
             className="h-11 px-8 disabled:bg-muted disabled:text-muted-foreground disabled:opacity-100"
             onClick={() => void generate()}
-            disabled={!template || !params || !params.prompt.trim() || missing.length > 0}
+            disabled={!built || !built.ok || missing.length > 0}
+            title={generateBlock ?? undefined}
           >
             Generate
           </Button>
