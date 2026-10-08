@@ -214,7 +214,7 @@ def test_shipped_image_templates_are_valid_and_ordered():
         assert template.summary()["supports_lora"] is True
     assert set(img2img.slots) == T2I_SLOT_NAMES - {"batch_size"} | {"denoise"}
     assert set(edit.slots) == {"prompt", "negative_prompt", "seed", "steps", "cfg", "sampler", "scheduler", "reference_resolution"}
-    assert img2img.defaults["denoise"] == 0.6 and edit.defaults["reference_resolution"] == 1024
+    assert img2img.defaults["denoise"] == 0.8 and edit.defaults["reference_resolution"] == 1024
     assert shipped().summary()["image_slots"] == [] and shipped().image_slots == {}
 
 
@@ -227,12 +227,12 @@ def test_img2img_build_fills_the_image_denoise_and_size():
     assert template.graph == before
     assert graph["5"]["inputs"]["image"] == "unsloth-inputs/a-image.png [temp]"
     assert (graph["6"]["inputs"]["width"], graph["6"]["inputs"]["height"]) == (1248, 832)
-    assert graph["8"]["inputs"]["denoise"] == 0.6 and resolved["denoise"] == 0.6 and resolved["kind"] == "img2img"
+    assert graph["8"]["inputs"]["denoise"] == 0.8 and resolved["denoise"] == 0.8 and resolved["kind"] == "img2img"
     assert graph["8"]["inputs"]["latent_image"] == ["7", 0] and graph["10"]["class_type"] == "PreviewImage"
     assert "reference_resolution" not in resolved
 
 
-@pytest.mark.parametrize("asked,expected", [(0.0, 0.01), (0.123456, 0.1235), (2, 1.0), (None, 0.6)])
+@pytest.mark.parametrize("asked,expected", [(0.0, 0.01), (0.123456, 0.1235), (2, 1.0), (None, 0.8)])
 def test_img2img_denoise_is_clamped_and_rounded(asked, expected):
     params = {"prompt": "x", "seed": 1, "images": {"image": "a.png"}}
     if asked is not None:
