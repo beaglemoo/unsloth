@@ -4900,6 +4900,10 @@ class GalleryImage(BaseModel):
     comfyui_template: Optional[str] = Field(None, description = "ComfyUI template id that produced it")
     sampler: Optional[str] = Field(None, description = "ComfyUI sampler_name used")
     scheduler: Optional[str] = Field(None, description = "ComfyUI scheduler used")
+    comfyui_inputs: Optional[dict[str, Optional[str]]] = Field(
+        None,
+        description = "Per ComfyUI image slot: the gallery id of the input when it came from the gallery, else null (uploads are not kept)",
+    )
     # Library state, not recipe: stored beside the PNG, so older files simply read as unset.
     pinned: bool = Field(False, description = "Pinned to the front of the gallery")
     archived: bool = Field(False, description = "Moved to the archived shelf, hidden from the strip")
