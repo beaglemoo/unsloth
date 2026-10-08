@@ -699,6 +699,17 @@ export type ComfyProgress = {
   prompt_id: string | null;
 };
 
+/** What the Stop button heard: "none" (no job), "confirmed" (ComfyUI let go) or "pending" (the interrupt
+ *  was sent but ComfyUI is still finishing a step; the job ends as cancelled by itself). */
+export type ComfyCancelOutcome = "none" | "confirmed" | "pending";
+
+export function cancelOutcomeFromApi(raw: unknown): ComfyCancelOutcome {
+  const data = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  if (data.cancelled !== true) return "none";
+  // An older backend sends only `cancelled`, and meant "confirmed".
+  return data.confirmed === false ? "pending" : "confirmed";
+}
+
 const PHASES = ["encode", "denoise", "decode"] as const;
 
 export function progressFromApi(raw: unknown): ComfyProgress {

@@ -272,7 +272,9 @@ async def comfyui_progress():
 
 @router.post("/comfyui/generate/cancel")
 async def comfyui_generate_cancel():
+    # "pending" is still a cancel: the interrupt was sent and the job ends as cancelled once ComfyUI reaches it.
     try:
-        return {"cancelled": await jobs.get_runner().cancel()}
+        outcome = await jobs.get_runner().cancel()
+        return {"cancelled": outcome != "none", "confirmed": outcome == "confirmed"}
     except Exception as exc:
         raise _map_error(exc) from exc

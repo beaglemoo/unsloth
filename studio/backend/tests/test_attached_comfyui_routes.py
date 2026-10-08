@@ -321,15 +321,26 @@ def test_progress_reports_a_running_job(client, monkeypatch):
     assert (body["active"], body["step"], body["total_steps"], body["phase"], body["queue_position"]) == (True, 5, 25, "denoise", 0)
 
 
-def test_cancel_route(client, monkeypatch):
-    assert client.post(url("/generate/cancel")).json() == {"cancelled": False}
-
-    class Active:
+@pytest.mark.parametrize(
+    "outcome,expected",
+    [
+        ("none", {"cancelled": False, "confirmed": False}),
+        ("confirmed", {"cancelled": True, "confirmed": True}),
+        # A slow ComfyUI: the interrupt was sent and the job will end as cancelled; the UI keeps "Stopping".
+        ("pending", {"cancelled": True, "confirmed": False}),
+    ],
+)
+def test_cancel_route(client, monkeypatch, outcome, expected):
+    class Runner:
         async def cancel(self):
-            return True
+            return outcome
 
-    monkeypatch.setattr(jobs, "_runner", Active())
-    assert client.post(url("/generate/cancel")).json() == {"cancelled": True}
+    monkeypatch.setattr(jobs, "_runner", Runner())
+    assert client.post(url("/generate/cancel")).json() == expected
+
+
+def test_cancel_route_without_a_job(client):
+    assert client.post(url("/generate/cancel")).json() == {"cancelled": False, "confirmed": False}
 
 
 # ------------------------------------------------------------------ samplers

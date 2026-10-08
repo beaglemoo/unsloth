@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   FALLBACK_SAMPLER_OPTIONS,
+  cancelOutcomeFromApi,
   SAMPLER_OPTIONS,
   SCHEDULER_OPTIONS,
   type ComfyParams,
@@ -513,4 +514,15 @@ test("reconcileParams clamps denoise and snaps the reference resolution", () => 
   assert.equal(reconcileParams({ ...defaultParams(img), denoise: 3 }, img).denoise, 1);
   assert.equal(reconcileParams({ ...defaultParams(edit), referenceResolution: 1000 }, edit).referenceResolution, 992);
   assert.equal(reconcileParams({ ...defaultParams(edit), referenceResolution: 99999 }, edit).referenceResolution, 2048);
+});
+
+test("the cancel answer separates no job, confirmed and pending (a slow ComfyUI)", () => {
+  assert.equal(cancelOutcomeFromApi({ cancelled: false, confirmed: false }), "none");
+  assert.equal(cancelOutcomeFromApi({ cancelled: true, confirmed: true }), "confirmed");
+  assert.equal(cancelOutcomeFromApi({ cancelled: true, confirmed: false }), "pending");
+  // an older backend: only `cancelled`
+  assert.equal(cancelOutcomeFromApi({ cancelled: true }), "confirmed");
+  assert.equal(cancelOutcomeFromApi({ cancelled: false }), "none");
+  assert.equal(cancelOutcomeFromApi(null), "none");
+  assert.equal(cancelOutcomeFromApi("x"), "none");
 });
