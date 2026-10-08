@@ -1,0 +1,1066 @@
+{
+ "qwen-image-2.1-t2i": {
+  "clamped": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "device": "cpu",
+      "type": "qwen_image"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "negative_prompt": "",
+      "prompt": "x",
+      "resolution": 1024,
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "batch_size": 4,
+      "height": 256,
+      "width": 992
+     }
+    },
+    "6": {
+     "class_type": "KSampler",
+     "inputs": {
+      "cfg": 20.0,
+      "denoise": 1,
+      "latent_image": [
+       "5",
+       0
+      ],
+      "model": [
+       "1",
+       0
+      ],
+      "negative": [
+       "4",
+       1
+      ],
+      "positive": [
+       "4",
+       0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "seed": 1,
+      "steps": 100
+     }
+    },
+    "7": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "6",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "PreviewImage",
+     "inputs": {
+      "images": [
+       "7",
+       0
+      ]
+     }
+    }
+   },
+   "params": {
+    "batch_size": 9,
+    "cfg": 99,
+    "height": 100,
+    "prompt": "x",
+    "seed": 1,
+    "steps": 500,
+    "width": 1000
+   },
+   "resolved": {
+    "batch_size": 4,
+    "cfg": 20.0,
+    "height": 256,
+    "loras": [],
+    "negative_prompt": "",
+    "prompt": "x",
+    "sampler": "euler",
+    "scheduler": "simple",
+    "seed": 1,
+    "steps": 100,
+    "width": 992
+   }
+  },
+  "defaults": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "device": "cpu",
+      "type": "qwen_image"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "negative_prompt": "",
+      "prompt": "x",
+      "resolution": 1024,
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "batch_size": 1,
+      "height": 1024,
+      "width": 1024
+     }
+    },
+    "6": {
+     "class_type": "KSampler",
+     "inputs": {
+      "cfg": 1.0,
+      "denoise": 1,
+      "latent_image": [
+       "5",
+       0
+      ],
+      "model": [
+       "1",
+       0
+      ],
+      "negative": [
+       "4",
+       1
+      ],
+      "positive": [
+       "4",
+       0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "seed": 1,
+      "steps": 25
+     }
+    },
+    "7": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "6",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "PreviewImage",
+     "inputs": {
+      "images": [
+       "7",
+       0
+      ]
+     }
+    }
+   },
+   "params": {
+    "prompt": "x",
+    "seed": 1
+   },
+   "resolved": {
+    "batch_size": 1,
+    "cfg": 1.0,
+    "height": 1024,
+    "loras": [],
+    "negative_prompt": "",
+    "prompt": "x",
+    "sampler": "euler",
+    "scheduler": "simple",
+    "seed": 1,
+    "steps": 25,
+    "width": 1024
+   }
+  },
+  "full": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "device": "cpu",
+      "type": "qwen_image"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "negative_prompt": "blur",
+      "prompt": "a fox",
+      "resolution": 1024,
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "batch_size": 2,
+      "height": 512,
+      "width": 768
+     }
+    },
+    "6": {
+     "class_type": "KSampler",
+     "inputs": {
+      "cfg": 2.5,
+      "denoise": 1,
+      "latent_image": [
+       "5",
+       0
+      ],
+      "model": [
+       "1",
+       0
+      ],
+      "negative": [
+       "4",
+       1
+      ],
+      "positive": [
+       "4",
+       0
+      ],
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "seed": 42,
+      "steps": 30
+     }
+    },
+    "7": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "6",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "PreviewImage",
+     "inputs": {
+      "images": [
+       "7",
+       0
+      ]
+     }
+    }
+   },
+   "params": {
+    "batch_size": 2,
+    "cfg": 2.5,
+    "height": 512,
+    "negative_prompt": "blur",
+    "prompt": "a fox",
+    "sampler": "dpmpp_2m",
+    "scheduler": "karras",
+    "seed": 42,
+    "steps": 30,
+    "width": 768
+   },
+   "resolved": {
+    "batch_size": 2,
+    "cfg": 2.5,
+    "height": 512,
+    "loras": [],
+    "negative_prompt": "blur",
+    "prompt": "a fox",
+    "sampler": "dpmpp_2m",
+    "scheduler": "karras",
+    "seed": 42,
+    "steps": 30,
+    "width": 768
+   }
+  },
+  "loras": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "device": "cpu",
+      "type": "qwen_image"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "negative_prompt": "",
+      "prompt": "x",
+      "resolution": 1024,
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "batch_size": 1,
+      "height": 1024,
+      "width": 1024
+     }
+    },
+    "6": {
+     "class_type": "KSampler",
+     "inputs": {
+      "cfg": 1.0,
+      "denoise": 1,
+      "latent_image": [
+       "5",
+       0
+      ],
+      "model": [
+       "unsloth_lora_1",
+       0
+      ],
+      "negative": [
+       "4",
+       1
+      ],
+      "positive": [
+       "4",
+       0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "seed": 1,
+      "steps": 25
+     }
+    },
+    "7": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "6",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "PreviewImage",
+     "inputs": {
+      "images": [
+       "7",
+       0
+      ]
+     }
+    },
+    "unsloth_lora_0": {
+     "class_type": "LoraLoaderModelOnly",
+     "inputs": {
+      "lora_name": "u0.safetensors",
+      "model": [
+       "1",
+       0
+      ],
+      "strength_model": 0.5
+     }
+    },
+    "unsloth_lora_1": {
+     "class_type": "LoraLoaderModelOnly",
+     "inputs": {
+      "lora_name": "u1.safetensors",
+      "model": [
+       "unsloth_lora_0",
+       0
+      ],
+      "strength_model": 0.7
+     }
+    }
+   },
+   "params": {
+    "loras": [
+     {
+      "name": "u0.safetensors",
+      "strength": 0.5
+     },
+     {
+      "name": "u1.safetensors",
+      "strength": 0.7
+     }
+    ],
+    "prompt": "x",
+    "seed": 1
+   },
+   "resolved": {
+    "batch_size": 1,
+    "cfg": 1.0,
+    "height": 1024,
+    "loras": [
+     "u0.safetensors:0.5",
+     "u1.safetensors:0.7"
+    ],
+    "negative_prompt": "",
+    "prompt": "x",
+    "sampler": "euler",
+    "scheduler": "simple",
+    "seed": 1,
+    "steps": 25,
+    "width": 1024
+   }
+  }
+ },
+ "qwen-image-2.1-t2i-uncensored": {
+  "clamped": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "device": "cpu",
+      "type": "qwen_image"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "negative_prompt": "",
+      "prompt": "x",
+      "resolution": 1024,
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "batch_size": 4,
+      "height": 256,
+      "width": 992
+     }
+    },
+    "6": {
+     "class_type": "KSampler",
+     "inputs": {
+      "cfg": 20.0,
+      "denoise": 1,
+      "latent_image": [
+       "5",
+       0
+      ],
+      "model": [
+       "9",
+       0
+      ],
+      "negative": [
+       "4",
+       1
+      ],
+      "positive": [
+       "4",
+       0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "seed": 1,
+      "steps": 100
+     }
+    },
+    "7": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "6",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "PreviewImage",
+     "inputs": {
+      "images": [
+       "7",
+       0
+      ]
+     }
+    },
+    "9": {
+     "class_type": "LoraLoaderModelOnly",
+     "inputs": {
+      "lora_name": "qwen-image-2.1-uncensored-lora.safetensors",
+      "model": [
+       "1",
+       0
+      ],
+      "strength_model": 1.0
+     }
+    }
+   },
+   "params": {
+    "batch_size": 9,
+    "cfg": 99,
+    "height": 100,
+    "prompt": "x",
+    "seed": 1,
+    "steps": 500,
+    "width": 1000
+   },
+   "resolved": {
+    "batch_size": 4,
+    "cfg": 20.0,
+    "height": 256,
+    "loras": [],
+    "negative_prompt": "",
+    "prompt": "x",
+    "sampler": "euler",
+    "scheduler": "simple",
+    "seed": 1,
+    "steps": 100,
+    "width": 992
+   }
+  },
+  "defaults": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "device": "cpu",
+      "type": "qwen_image"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "negative_prompt": "",
+      "prompt": "x",
+      "resolution": 1024,
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "batch_size": 1,
+      "height": 1024,
+      "width": 1024
+     }
+    },
+    "6": {
+     "class_type": "KSampler",
+     "inputs": {
+      "cfg": 1.0,
+      "denoise": 1,
+      "latent_image": [
+       "5",
+       0
+      ],
+      "model": [
+       "9",
+       0
+      ],
+      "negative": [
+       "4",
+       1
+      ],
+      "positive": [
+       "4",
+       0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "seed": 1,
+      "steps": 25
+     }
+    },
+    "7": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "6",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "PreviewImage",
+     "inputs": {
+      "images": [
+       "7",
+       0
+      ]
+     }
+    },
+    "9": {
+     "class_type": "LoraLoaderModelOnly",
+     "inputs": {
+      "lora_name": "qwen-image-2.1-uncensored-lora.safetensors",
+      "model": [
+       "1",
+       0
+      ],
+      "strength_model": 1.0
+     }
+    }
+   },
+   "params": {
+    "prompt": "x",
+    "seed": 1
+   },
+   "resolved": {
+    "batch_size": 1,
+    "cfg": 1.0,
+    "height": 1024,
+    "loras": [],
+    "negative_prompt": "",
+    "prompt": "x",
+    "sampler": "euler",
+    "scheduler": "simple",
+    "seed": 1,
+    "steps": 25,
+    "width": 1024
+   }
+  },
+  "full": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "device": "cpu",
+      "type": "qwen_image"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "negative_prompt": "blur",
+      "prompt": "a fox",
+      "resolution": 1024,
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "batch_size": 2,
+      "height": 512,
+      "width": 768
+     }
+    },
+    "6": {
+     "class_type": "KSampler",
+     "inputs": {
+      "cfg": 2.5,
+      "denoise": 1,
+      "latent_image": [
+       "5",
+       0
+      ],
+      "model": [
+       "9",
+       0
+      ],
+      "negative": [
+       "4",
+       1
+      ],
+      "positive": [
+       "4",
+       0
+      ],
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "seed": 42,
+      "steps": 30
+     }
+    },
+    "7": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "6",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "PreviewImage",
+     "inputs": {
+      "images": [
+       "7",
+       0
+      ]
+     }
+    },
+    "9": {
+     "class_type": "LoraLoaderModelOnly",
+     "inputs": {
+      "lora_name": "qwen-image-2.1-uncensored-lora.safetensors",
+      "model": [
+       "1",
+       0
+      ],
+      "strength_model": 1.0
+     }
+    }
+   },
+   "params": {
+    "batch_size": 2,
+    "cfg": 2.5,
+    "height": 512,
+    "negative_prompt": "blur",
+    "prompt": "a fox",
+    "sampler": "dpmpp_2m",
+    "scheduler": "karras",
+    "seed": 42,
+    "steps": 30,
+    "width": 768
+   },
+   "resolved": {
+    "batch_size": 2,
+    "cfg": 2.5,
+    "height": 512,
+    "loras": [],
+    "negative_prompt": "blur",
+    "prompt": "a fox",
+    "sampler": "dpmpp_2m",
+    "scheduler": "karras",
+    "seed": 42,
+    "steps": 30,
+    "width": 768
+   }
+  },
+  "loras": {
+   "graph": {
+    "1": {
+     "class_type": "UNETLoader",
+     "inputs": {
+      "unet_name": "qwen_image_2.1_bf16.safetensors",
+      "weight_dtype": "default"
+     }
+    },
+    "2": {
+     "class_type": "CLIPLoader",
+     "inputs": {
+      "clip_name": "qwen3vl_8b_bf16.safetensors",
+      "device": "cpu",
+      "type": "qwen_image"
+     }
+    },
+    "3": {
+     "class_type": "VAELoader",
+     "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+     }
+    },
+    "4": {
+     "class_type": "TextEncodeQwenImage21",
+     "inputs": {
+      "clip": [
+       "2",
+       0
+      ],
+      "negative_prompt": "",
+      "prompt": "x",
+      "resolution": 1024,
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "5": {
+     "class_type": "EmptyLatentImage",
+     "inputs": {
+      "batch_size": 1,
+      "height": 1024,
+      "width": 1024
+     }
+    },
+    "6": {
+     "class_type": "KSampler",
+     "inputs": {
+      "cfg": 1.0,
+      "denoise": 1,
+      "latent_image": [
+       "5",
+       0
+      ],
+      "model": [
+       "unsloth_lora_1",
+       0
+      ],
+      "negative": [
+       "4",
+       1
+      ],
+      "positive": [
+       "4",
+       0
+      ],
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "seed": 1,
+      "steps": 25
+     }
+    },
+    "7": {
+     "class_type": "VAEDecode",
+     "inputs": {
+      "samples": [
+       "6",
+       0
+      ],
+      "vae": [
+       "3",
+       0
+      ]
+     }
+    },
+    "8": {
+     "class_type": "PreviewImage",
+     "inputs": {
+      "images": [
+       "7",
+       0
+      ]
+     }
+    },
+    "9": {
+     "class_type": "LoraLoaderModelOnly",
+     "inputs": {
+      "lora_name": "qwen-image-2.1-uncensored-lora.safetensors",
+      "model": [
+       "1",
+       0
+      ],
+      "strength_model": 1.0
+     }
+    },
+    "unsloth_lora_0": {
+     "class_type": "LoraLoaderModelOnly",
+     "inputs": {
+      "lora_name": "u0.safetensors",
+      "model": [
+       "9",
+       0
+      ],
+      "strength_model": 0.5
+     }
+    },
+    "unsloth_lora_1": {
+     "class_type": "LoraLoaderModelOnly",
+     "inputs": {
+      "lora_name": "u1.safetensors",
+      "model": [
+       "unsloth_lora_0",
+       0
+      ],
+      "strength_model": 0.7
+     }
+    }
+   },
+   "params": {
+    "loras": [
+     {
+      "name": "u0.safetensors",
+      "strength": 0.5
+     },
+     {
+      "name": "u1.safetensors",
+      "strength": 0.7
+     }
+    ],
+    "prompt": "x",
+    "seed": 1
+   },
+   "resolved": {
+    "batch_size": 1,
+    "cfg": 1.0,
+    "height": 1024,
+    "loras": [
+     "u0.safetensors:0.5",
+     "u1.safetensors:0.7"
+    ],
+    "negative_prompt": "",
+    "prompt": "x",
+    "sampler": "euler",
+    "scheduler": "simple",
+    "seed": 1,
+    "steps": 25,
+    "width": 1024
+   }
+  }
+ }
+}
