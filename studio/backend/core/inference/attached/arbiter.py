@@ -104,7 +104,11 @@ async def _free_urls(urls: list[str], transport = None) -> list[str]:
 async def free_comfyui(*, transport = None) -> list[str]:
     """Free Studio's ComfyUI and its peers (StoryPress) where idle; returns the URLs freed. Failures never raise."""
     own, peers = _comfyui_targets(get_config() if os.environ.get("STUDIO_COMFYUI_URL") is None else None)
-    return await _free_urls([url for url in (own, *peers) if url], transport)
+    freed = await _free_urls([url for url in (own, *peers) if url], transport)
+    if own and own in freed:
+        # Nothing is left for a pending idle free to do, and the tray must stop counting down.
+        cancel_comfyui_idle_free()
+    return freed
 
 
 async def _comfyui_state(url: str, *, cached: bool = False) -> str:
@@ -509,8 +513,13 @@ def cancel_comfyui_idle_free() -> None:
     task, _idle_free = _idle_free, None
     if task is not None and not task.done():
         task.get_loop().call_soon_threadsafe(task.cancel)
-    if task is not None:
-        _publish_idle_deadline(None)
+    # Also without a task: a marker left by an earlier process must not keep the tray counting down.
+    _publish_idle_deadline(None)
+
+
+def clear_stale_idle_marker() -> None:
+    """Startup: no timer survives a restart, so a marker on disk is from a previous process."""
+    _publish_idle_deadline(None)
 
 
 async def _idle_free_after(seconds: int) -> None:
