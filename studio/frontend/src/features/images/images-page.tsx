@@ -30,6 +30,7 @@ import {
   Image03Icon,
   ImageAdd02Icon,
   ImageCropIcon,
+  ImageUpload01Icon,
   InformationCircleIcon,
   PlusSignIcon,
   Refresh01Icon,
@@ -162,6 +163,7 @@ import { useImageEditHandoffStore } from "@/stores/image-edit-handoff";
 import { isWorkflowEnabled, useImageWorkflowStore } from "./stores/image-workflow-store";
 import { ComfyuiCreatePanel, type ComfyRunState } from "./comfyui/comfyui-create-panel";
 import { useComfyPanelStore } from "./comfyui/comfyui-panel-store";
+import { requestComfyInput } from "./comfyui/use-as-input";
 import { recallFromImage } from "./comfyui/comfyui-panel-state";
 import { effectiveEngine } from "./comfyui/engine-choice";
 import { useComfyuiAvailable } from "./comfyui/use-comfyui-available";
@@ -7179,6 +7181,17 @@ export function ImagesPage({
                   >
                     <HugeiconsIcon icon={ArrowExpand01Icon} className="size-4" />
                   </Button>
+                  {comfyMode && (
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Use as input"
+                      title="Use as input"
+                      onClick={() => requestComfyInput(selected)}
+                    >
+                      <HugeiconsIcon icon={ImageUpload01Icon} className="size-4" />
+                    </Button>
+                  )}
                   <RecipePopover image={selected} onRestore={restoreFromRecipe} active={active} />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild={true}>
