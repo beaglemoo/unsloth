@@ -1033,3 +1033,80 @@ def test_idle_free_does_not_raise_when_comfyui_vanished(idle):
         assert idle.posts(OWN) == [] and arbiter._idle_free is None
 
     run(go())
+
+
+# --- the idle-free deadline (status block and tray marker) ------------------------------------
+
+
+def _marker() -> Path:
+    from core.inference.attached.failures import engines_home
+
+    return engines_home() / arbiter.IDLE_MARKER
+
+
+def test_idle_deadline_is_published_on_schedule_and_cleared_on_cancel(idle, monkeypatch):
+    monkeypatch.setattr(arbiter.time, "time", lambda: 1_000.0)
+
+    async def go():
+        idle.gate["release"] = asyncio.Event()
+        assert arbiter.comfyui_idle_free_at() is None and not _marker().exists()
+        assert arbiter.schedule_comfyui_idle_free()
+        # Visible at once, before the timer task has run its first step.
+        assert arbiter.comfyui_idle_free_at() == 1_300.0
+        assert json.loads(_marker().read_text()) == {"free_at": 1_300.0}
+        await _settle()
+        assert arbiter.comfyui_idle_free_at() == 1_300.0
+        arbiter.cancel_comfyui_idle_free()
+        await _settle()
+        assert arbiter.comfyui_idle_free_at() is None and not _marker().exists()
+
+    run(go())
+
+
+def test_idle_deadline_moves_back_while_work_is_queued_and_clears_after_the_free(idle, monkeypatch):
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(arbiter.time, "time", lambda: clock["now"])
+
+    async def go():
+        idle.gate["release"] = asyncio.Event()
+        idle.comfy[OWN]["running"] = 1
+        arbiter.schedule_comfyui_idle_free()
+        await _settle()
+        assert arbiter.comfyui_idle_free_at() == 1_300.0
+        clock["now"] = 1_300.0
+        idle.gate["release"].set()
+        await _settle()
+        # Busy: the free was skipped and the next look is a whole period away.
+        assert idle.posts(OWN) == [] and arbiter.comfyui_idle_free_at() == 1_600.0
+        assert json.loads(_marker().read_text()) == {"free_at": 1_600.0}
+        idle.comfy[OWN]["running"] = 0
+        clock["now"] = 1_600.0
+        idle.gate["release"].set()
+        await _settle()
+        assert len(idle.posts(OWN)) == 1
+        assert arbiter.comfyui_idle_free_at() is None and not _marker().exists()
+
+    run(go())
+
+
+def test_a_new_job_clears_the_idle_deadline(idle):
+    async def go():
+        idle.gate["release"] = asyncio.Event()
+        arbiter.schedule_comfyui_idle_free()
+        await _settle()
+        assert arbiter.comfyui_idle_free_at() is not None and _marker().exists()
+        (await arbiter.before_comfyui_job()).require_clear()
+        await _settle()
+        assert arbiter.comfyui_idle_free_at() is None and not _marker().exists()
+
+    run(go())
+
+
+def test_no_deadline_when_the_idle_free_is_switched_off(idle):
+    set_config(idle, comfyui_idle_free_s = 0)
+
+    async def go():
+        assert not arbiter.schedule_comfyui_idle_free()
+        assert arbiter.comfyui_idle_free_at() is None and not _marker().exists()
+
+    run(go())

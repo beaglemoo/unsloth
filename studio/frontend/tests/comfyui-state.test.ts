@@ -59,6 +59,20 @@ function helper(patch: Partial<EngineHelperRow> = {}): EngineHelperRow {
 const line = (status: ComfyuiStatus | null | undefined, row: EngineHelperRow | null = null) =>
   comfyuiStatusLine({ status, helper: row });
 
+test("an idle ComfyUI counts down to the idle free from the poll that reported it", () => {
+  const status = comfy({ idleFreeAt: 1_700_000_300, idleFreeInS: 252 });
+  const at = (now: number) =>
+    comfyuiStatusLine({ status, helper: null, receivedAt: 10_000, now });
+  assert.deepEqual(at(10_000), { text: "Idle, frees memory in 4:12", tone: "ok" });
+  assert.equal(at(10_000 + 60_000).text, "Idle, frees memory in 3:12");
+  assert.equal(at(10_000 + 251_500).text, "Idle, frees memory in 0:01");
+  assert.equal(at(10_000 + 400_000).text, "Idle, freeing memory");
+  // no timer pending, and a timer never decorates a busy or unreachable ComfyUI
+  assert.equal(line(comfy({ idleFreeAt: null, idleFreeInS: null })).text, "Idle");
+  assert.equal(line(comfy({ state: "busy", queueRunning: 1, idleFreeInS: 30 })).text, "Generating (0 queued)");
+  assert.equal(line(down({ idleFreeInS: 30 })).text, "Not running");
+});
+
 test("idle, generating and queued", () => {
   assert.deepEqual(line(comfy()), { text: "Idle", tone: "ok" });
   assert.deepEqual(
