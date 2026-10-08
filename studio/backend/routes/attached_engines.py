@@ -5,6 +5,7 @@
 
 import asyncio
 import hashlib
+import time
 from dataclasses import asdict
 from typing import Literal, Optional
 
@@ -101,6 +102,7 @@ async def _probe_comfyui(config: AttachedEnginesConfig) -> dict:
     queue, stats, peers = await asyncio.gather(
         own.queue(), own.system_stats(), asyncio.gather(*(peer(url) for url in peer_urls))
     )
+    idle_free_at = arbiter.comfyui_idle_free_at()
     system = stats.get("system") if isinstance(stats, dict) else None
     system = system if isinstance(system, dict) else {}
     devices = stats.get("devices") if isinstance(stats, dict) else None
@@ -117,6 +119,9 @@ async def _probe_comfyui(config: AttachedEnginesConfig) -> dict:
         "failure": _engine_failure("comfyui"),
         "helper_wanted": desktop_settings.helper_wanted("comfyui"),
         "job_active": get_runner().is_running(),
+        # An absolute epoch and the seconds left, read at the same moment: a browser on another clock counts down from the latter.
+        "idle_free_at": idle_free_at,
+        "idle_free_in_s": None if idle_free_at is None else max(0.0, idle_free_at - time.time()),
         "peers": list(peers),
     }
 
