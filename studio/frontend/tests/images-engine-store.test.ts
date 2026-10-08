@@ -119,3 +119,11 @@ test("the ComfyUI panel cannot shrink below its controls, so the sticky Generate
   const page = readSrc("features/images/images-page.tsx");
   assert.match(page, /\{!comfyMode && \(\s*<div className="relative z-10 flex shrink-0 flex-wrap/);
 });
+
+test("the ComfyUI panel offers the sampler lists ComfyUI reports, not the static ones", () => {
+  const panel = readSrc("features/images/comfyui/comfyui-create-panel.tsx");
+  assert.match(panel, /options=\{samplerOptions\.samplers\}/);
+  assert.match(panel, /options=\{samplerOptions\.schedulers\}/);
+  assert.doesNotMatch(panel, /options=\{SAMPLER_OPTIONS\}|options=\{SCHEDULER_OPTIONS\}/);
+  assert.match(readSrc("features/images/comfyui/api.ts"), /\/samplers/);
+});

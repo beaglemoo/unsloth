@@ -11,8 +11,11 @@ import {
   type ComfyGenerateRequest,
   type ComfyProgress,
   type ComfyTemplate,
+  type SamplerOptions,
+  FALLBACK_SAMPLER_OPTIONS,
   describeComfyFailure,
   progressFromApi,
+  samplerOptionsFromApi,
   templatesFromApi,
 } from "./comfyui-panel-state";
 
@@ -79,6 +82,16 @@ export async function fetchComfyTemplates(): Promise<{
 }> {
   const res = await request("/templates", { method: "GET" }, "Could not list the ComfyUI templates");
   return templatesFromApi(await res.json());
+}
+
+/** The sampler and scheduler names ComfyUI's KSampler accepts; the built-in lists when it cannot be asked. */
+export async function fetchComfySamplers(): Promise<SamplerOptions> {
+  try {
+    const res = await request("/samplers", { method: "GET" }, "Could not list the samplers");
+    return samplerOptionsFromApi(await res.json());
+  } catch {
+    return FALLBACK_SAMPLER_OPTIONS;
+  }
 }
 
 /** The LoRA files ComfyUI lists in its `loras` folder; empty when it cannot be asked. */
