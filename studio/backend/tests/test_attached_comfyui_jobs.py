@@ -454,6 +454,33 @@ def test_missing_models_are_reported_before_admission(world):
     assert world.admissions == 0 and world.fake.submitted == []
 
 
+def test_uncensored_template_reports_a_missing_lora_file(world):
+    world.fake.models["loras"] = []
+    with pytest.raises(jobs.ComfyModelsMissing) as caught:
+        go(runner().run("qwen-image-2.1-t2i-uncensored", dict(PARAMS), client = world.fake.client()))
+    assert caught.value.missing == {"loras": ["qwen-image-2.1-uncensored-lora.safetensors"]}
+    assert world.admissions == 0 and world.fake.submitted == []
+
+
+def test_uncensored_template_checks_its_lora_and_the_users_together(world):
+    world.fake.models["loras"] = ["qwen-image-2.1-uncensored-lora.safetensors"]
+    with pytest.raises(jobs.ComfyModelsMissing) as caught:
+        go(runner().run("qwen-image-2.1-t2i-uncensored", {**PARAMS, "loras": [{"name": "gone.safetensors", "strength": 1}]}, client = world.fake.client()))
+    assert caught.value.missing == {"loras": ["gone.safetensors"]}
+
+
+def test_uncensored_template_submits_with_user_loras_chained_after_it(world):
+    world.fake.models["loras"] = ["qwen-image-2.1-uncensored-lora.safetensors", "a.safetensors"]
+    r = runner(FakeConnect(FakeWS([msg("execution_success")])))
+    original = world.fake.handle
+    world.fake.handle = lambda req: (original(req), world.fake.finish())[0] if req.url.path == "/prompt" else original(req)
+    result = go(r.run("qwen-image-2.1-t2i-uncensored", {**PARAMS, "loras": [{"name": "a.safetensors", "strength": 0.8}]}, client = world.fake.client()))
+    sent = world.fake.submitted[0]["prompt"]
+    assert sent["9"]["inputs"]["lora_name"] == "qwen-image-2.1-uncensored-lora.safetensors"
+    assert sent["unsloth_lora_0"]["inputs"]["model"] == ["9", 0] and sent["6"]["inputs"]["model"] == ["unsloth_lora_0", 0]
+    assert result.images[0]["comfyui_template"] == "qwen-image-2.1-t2i-uncensored"
+
+
 def test_comfyui_off_versus_starting(world, tmp_path, monkeypatch):
     world.fake.up = False
     home = tmp_path / "engines-home"
