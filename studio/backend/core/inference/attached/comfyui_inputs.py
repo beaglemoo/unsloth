@@ -34,7 +34,6 @@ SUBFOLDER = "unsloth-inputs"
 NAME_RE = re.compile(r"^[0-9a-f]{32}-image(_[2-4])?\.png$")
 MAX_SIDE_IN = 4096
 MAX_SIDE_OUT = 2048
-DEFAULT_DATA_DIR = "~/.unsloth/engines/comfyui-data"
 
 
 @dataclass(frozen = True)
@@ -151,7 +150,8 @@ def load_png(plan: InputPlan) -> bytes:
 
 def temp_inputs_dir() -> Optional[Path]:
     """``<ComfyUI data dir>/temp/unsloth-inputs``; the data dir is ``[comfyui] data_dir`` from engines.toml
-    (found like ``comfyui_jobs.configured_model_dirs`` does), default ``~/.unsloth/engines/comfyui-data``."""
+    (found like ``comfyui_jobs.configured_model_dirs`` does), default ``<engines home>/comfyui-data``
+    (``~/.unsloth/engines/comfyui-data``; ``UNSLOTH_ENGINES_HOME`` moves it, as it moves the launcher's)."""
     try:
         import tomllib
 
@@ -163,9 +163,8 @@ def temp_inputs_dir() -> Optional[Path]:
             data_dir = tomllib.loads(path.read_text(encoding = "utf-8")).get("comfyui", {}).get("data_dir")
         except Exception:  # noqa: BLE001 - no config means the default
             data_dir = None
-        if not (isinstance(data_dir, str) and data_dir.strip()):
-            data_dir = DEFAULT_DATA_DIR
-        return Path(os.path.expanduser(data_dir)) / "temp" / SUBFOLDER
+        base = Path(os.path.expanduser(data_dir)) if isinstance(data_dir, str) and data_dir.strip() else engines_home() / "comfyui-data"
+        return base / "temp" / SUBFOLDER
     except Exception as exc:  # noqa: BLE001 - e.g. no home directory
         logger.warning("Cannot locate ComfyUI's temp folder: %s", exc)
         return None
