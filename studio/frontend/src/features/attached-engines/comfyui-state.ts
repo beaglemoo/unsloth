@@ -5,6 +5,7 @@
 // rule, the queue and model lists, and the wording of the replies. No React and no "@/" imports,
 // so the node suite can drive it.
 
+import { formatCountdown, remainingNow } from "./attached-active.ts";
 import { EngineHttpError } from "./engine-errors.ts";
 import { failureMessage } from "./failure.ts";
 import type { EngineHelperRow } from "./engine-helpers-state.ts";
@@ -41,6 +42,9 @@ export function failureText(status: ComfyuiStatus): string | null {
 export function comfyuiStatusLine(input: {
   status: ComfyuiStatus | null | undefined;
   helper: EngineHelperRow | null;
+  /** The poll time and the current time, to count the idle-free timer down between polls. */
+  receivedAt?: number;
+  now?: number;
 }): StatusLine {
   const { status, helper } = input;
   if (!status) return { text: "Status unavailable", tone: "muted" };
@@ -49,8 +53,15 @@ export function comfyuiStatusLine(input: {
     if (failing) return { text: failing, tone: "error" };
   }
   switch (status.state) {
-    case "idle":
-      return { text: "Idle", tone: "ok" };
+    case "idle": {
+      const base = status.idleFreeInS;
+      if (base === null || base === undefined) return { text: "Idle", tone: "ok" };
+      const left = remainingNow(base, input.receivedAt, input.now ?? Date.now());
+      return {
+        text: left <= 0 ? "Idle, freeing memory" : `Idle, frees memory in ${formatCountdown(left)}`,
+        tone: "ok",
+      };
+    }
     case "busy":
       return status.queueRunning > 0
         ? { text: `Generating (${status.queuePending} queued)`, tone: "busy" }
