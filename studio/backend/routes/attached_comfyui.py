@@ -12,6 +12,7 @@ header next to the human ``detail``: ``busy``, ``off``, ``not_running``, ``admis
 
 import asyncio
 import copy
+import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -138,6 +139,37 @@ async def comfyui_templates():
         "comfyui_reachable": reachable,
         "templates": [{**t.summary(), "missing_models": m} for t, m in zip(templates, missing)],
     }
+
+
+# What ComfyUI offers changes only when it is updated or custom nodes are added, so a short cache is plenty.
+SAMPLERS_TTL_S = 60.0
+# Used while ComfyUI cannot be asked; the frontend keeps the same list for a backend that predates the route.
+FALLBACK_SAMPLERS = [
+    "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "dpmpp_3m_sde",
+    "uni_pc", "lcm", "ddim",
+]
+FALLBACK_SCHEDULERS = [
+    "simple", "normal", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "linear_quadratic",
+]
+# (monotonic expiry, ComfyUI URL, samplers, schedulers) of the last live answer.
+_samplers_cache: Optional[tuple[float, str, list[str], list[str]]] = None
+
+
+@router.get("/comfyui/samplers")
+async def comfyui_samplers():
+    """The sampler and scheduler names ComfyUI's KSampler accepts (cached briefly), or the built-in lists
+    with ``source: "fallback"`` while ComfyUI cannot be asked."""
+    global _samplers_cache
+    url = get_config().comfyui_url
+    cached = _samplers_cache
+    if cached is not None and cached[0] > time.monotonic() and cached[1] == url:
+        return {"samplers": cached[2], "schedulers": cached[3], "source": "comfyui"}
+    try:
+        samplers, schedulers = await _client().sampler_options()
+    except ComfyuiError:
+        return {"samplers": FALLBACK_SAMPLERS, "schedulers": FALLBACK_SCHEDULERS, "source": "fallback"}
+    _samplers_cache = (time.monotonic() + SAMPLERS_TTL_S, url, samplers, schedulers)
+    return {"samplers": samplers, "schedulers": schedulers, "source": "comfyui"}
 
 
 @router.post("/comfyui/templates/import")
