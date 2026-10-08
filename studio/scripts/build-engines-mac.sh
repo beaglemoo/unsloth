@@ -29,7 +29,9 @@
 #   --rollback-venvs   put <venv>.old back (names: omlx, comfyui; default both)
 #   --migrate-config   only migrate an existing engines.toml (the full and --stage-only runs do it
 #                      too; update-engines-mac.sh calls this explicitly). It removes the legacy
-#                      [omlx.env] OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" line.
+#                      [omlx.env] OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" line, turns the old
+#                      generated [comfyui] extra_args (exactly that line) into one with --cache-none,
+#                      and adds the two PYTORCH_MPS_*_WATERMARK_RATIO keys to [comfyui.env] when missing.
 #                      The original is copied to engines.toml.bak-<timestamp> first, every change is
 #                      logged, comments and other keys are preserved, and a second run is a no-op.
 #                      It also appends the default [comfyui] section when the file has none.
@@ -467,6 +469,62 @@ def has_comfyui():
             return True
     return False
 
+
+OLD_COMFY_ARGS = '["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline"]'
+NEW_COMFY_ARGS = '["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline", "--cache-none"]'
+WATERMARKS = [
+    ("PYTORCH_MPS_LOW_WATERMARK_RATIO", '"0.5"'),
+    ("PYTORCH_MPS_HIGH_WATERMARK_RATIO", '"0.8"'),
+]
+WATERMARK_NOTE = [
+    "# Reclaim freed MPS buffers early and cap MPS memory so Qwen-Image edit jobs do not grow to 80 GB",
+    "# (added by the engines.toml migration; see comfyui-edit-memory-diag.md).",
+]
+
+if has_comfyui():
+    # extra_args is replaced only when it is exactly the old generated default; a customized line stays.
+    sec = span("comfyui")
+    if sec:
+        for i in range(sec[0] + 1, sec[1]):
+            m = re.match(r"^(\s*extra_args\s*=\s*)(.*?)(\r?\n?)$", lines[i])
+            if m and m.group(2) == OLD_COMFY_ARGS:
+                lines[i] = m.group(1) + NEW_COMFY_ARGS + m.group(3)
+                changes.append("[comfyui] extra_args gained --cache-none")
+                break
+    # Watermark keys are added to an existing [comfyui.env] section, or a new one, never overwritten.
+    env_sec = span("comfyui.env")
+    present = set()
+    if env_sec:
+        for i in range(env_sec[0] + 1, env_sec[1]):
+            m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=", lines[i])
+            if m:
+                present.add(m.group(1))
+    missing = [(k, v) for k, v in WATERMARKS if k not in present]
+    if missing:
+        trial = list(lines)
+        add = [n + eol for n in WATERMARK_NOTE]
+        add += [f"{k} = {v}{eol}" for k, v in missing]
+        if env_sec:
+            at = env_sec[0] + 1
+            for i in range(env_sec[0] + 1, env_sec[1]):
+                s_ = trial[i].strip()
+                if s_ and not s_.startswith("#"):
+                    at = i + 1
+            if not trial[at - 1].endswith(("\n", "\r")):
+                trial[at - 1] += eol
+            trial[at:at] = add
+        else:
+            if trial and not trial[-1].endswith(("\n", "\r")):
+                trial[-1] += eol
+            if trial and trial[-1].strip():
+                trial.append(eol)
+            trial.append(f"[comfyui.env]{eol}")
+            trial.extend(add)
+        if parses("".join(trial)):
+            lines[:] = trial
+            changes.append("[comfyui.env] added " + ", ".join(k for k, _ in missing))
+        else:
+            say("could not add the MPS watermark keys (env is defined another way); left as is")
 
 if not has_comfyui():
     try:
