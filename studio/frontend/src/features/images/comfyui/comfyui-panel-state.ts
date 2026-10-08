@@ -18,6 +18,11 @@ export type ComfyLimits = {
   side: [number, number];
   multiple: number;
   batchSize: [number, number];
+  /** Image-to-image strength range. */
+  denoise: [number, number];
+  /** Edit reference resolution range (long-side-ish target, in pixels). */
+  referenceResolution: [number, number];
+  referenceMultiple: number;
 };
 
 export type ComfyDefaults = {
@@ -27,7 +32,11 @@ export type ComfyDefaults = {
   height: number;
   sampler: string | null;
   scheduler: string | null;
+  denoise: number | null;
+  referenceResolution: number | null;
 };
+
+export type ComfyImageSlot = { name: string; label: string; required: boolean };
 
 export type ComfyTemplate = {
   id: string;
@@ -39,6 +48,8 @@ export type ComfyTemplate = {
   limits: ComfyLimits;
   /** The parameter slots the graph binds (prompt, negative_prompt, seed, ...). */
   slots: string[];
+  /** Input images the template needs, in declaration order. Empty for text-to-image. */
+  imageSlots: ComfyImageSlot[];
   supportsLora: boolean;
   /** Model files by ComfyUI folder. */
   requiredModels: Record<string, string[]>;
@@ -59,7 +70,18 @@ export type ComfyParams = {
   scheduler: string;
   batchSize: number;
   loras: ComfyLoraRow[];
+  /** Image-to-image strength (ComfyUI denoise). */
+  denoise: number;
+  /** Edit reference resolution. */
+  referenceResolution: number;
 };
+
+/** An input image held in the panel. A gallery input has an object URL for its preview only. */
+export type ComfyInput =
+  | { kind: "data"; dataUrl: string; width: number; height: number }
+  | { kind: "gallery"; galleryId: string; previewUrl: string; width: number; height: number };
+
+export const REFERENCE_RESOLUTION_CHOICES = [512, 768, 1024] as const;
 
 export const DEFAULT_LIMITS: ComfyLimits = {
   steps: [1, 100],
@@ -67,6 +89,9 @@ export const DEFAULT_LIMITS: ComfyLimits = {
   side: [256, 2048],
   multiple: 16,
   batchSize: [1, 4],
+  denoise: [0.01, 1],
+  referenceResolution: [256, 2048],
+  referenceMultiple: 32,
 };
 
 export const SAMPLER_OPTIONS = [
@@ -150,6 +175,14 @@ function fileMap(value: unknown): Record<string, string[]> {
   return out;
 }
 
+function imageSlotsFromApi(value: unknown): ComfyImageSlot[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((row) => {
+    if (!isObj(row) || typeof row.name !== "string" || row.name === "") return [];
+    return [{ name: row.name, label: strOr(row.label, row.name), required: row.required !== false }];
+  });
+}
+
 function templateFromApi(raw: unknown): ComfyTemplate | null {
   if (!isObj(raw) || typeof raw.id !== "string" || raw.id === "") return null;
   const limits = isObj(raw.limits) ? raw.limits : {};
@@ -163,6 +196,12 @@ function templateFromApi(raw: unknown): ComfyTemplate | null {
         ? Math.floor(limits.multiple)
         : DEFAULT_LIMITS.multiple,
     batchSize: pair(limits.batch_size, DEFAULT_LIMITS.batchSize),
+    denoise: pair(limits.denoise, DEFAULT_LIMITS.denoise),
+    referenceResolution: pair(limits.reference_resolution, DEFAULT_LIMITS.referenceResolution),
+    referenceMultiple:
+      finite(limits.reference_multiple) && limits.reference_multiple >= 1
+        ? Math.floor(limits.reference_multiple)
+        : DEFAULT_LIMITS.referenceMultiple,
   };
   return {
     id: raw.id,
@@ -176,11 +215,16 @@ function templateFromApi(raw: unknown): ComfyTemplate | null {
       height: finite(defaults.height) ? defaults.height : 1024,
       sampler: typeof defaults.sampler === "string" ? defaults.sampler : null,
       scheduler: typeof defaults.scheduler === "string" ? defaults.scheduler : null,
+      denoise: finite(defaults.denoise) ? defaults.denoise : null,
+      referenceResolution: finite(defaults.reference_resolution)
+        ? defaults.reference_resolution
+        : null,
     },
     limits: merged,
     slots: Array.isArray(raw.slots)
       ? raw.slots.filter((s): s is string => typeof s === "string")
       : [],
+    imageSlots: imageSlotsFromApi(raw.image_slots),
     supportsLora: raw.supports_lora === true,
     requiredModels: fileMap(raw.required_models),
     missingModels: isObj(raw.missing_models) ? fileMap(raw.missing_models) : null,
@@ -230,6 +274,18 @@ export function snapSide(value: number, limits: ComfyLimits): number {
   return Math.max(snapped, floor);
 }
 
+function defaultDenoise(template: ComfyTemplate): number {
+  return clampNumber(template.defaults.denoise ?? 1, template.limits.denoise);
+}
+
+/** One reference resolution snapped to the multiple and kept inside the range. */
+export function snapReferenceResolution(value: number, limits: ComfyLimits): number {
+  const [lo, hi] = limits.referenceResolution;
+  const multiple = Math.max(1, limits.referenceMultiple);
+  const snapped = Math.round(clampNumber(value, [lo, hi]) / multiple) * multiple;
+  return clampNumber(snapped, [lo, hi]);
+}
+
 export function defaultParams(template: ComfyTemplate): ComfyParams {
   return {
     prompt: "",
@@ -243,6 +299,11 @@ export function defaultParams(template: ComfyTemplate): ComfyParams {
     scheduler: template.defaults.scheduler ?? "",
     batchSize: 1,
     loras: [],
+    denoise: defaultDenoise(template),
+    referenceResolution: snapReferenceResolution(
+      template.defaults.referenceResolution ?? 1024,
+      template.limits,
+    ),
   };
 }
 
@@ -258,6 +319,8 @@ export function reconcileParams(params: ComfyParams, template: ComfyTemplate): C
     cfg: clampNumber(params.cfg, limits.cfg),
     batchSize: Math.round(clampNumber(params.batchSize, limits.batchSize)),
     loras: template.supportsLora ? params.loras.slice(0, MAX_LORAS) : [],
+    denoise: Math.round(clampNumber(params.denoise, limits.denoise) * 10000) / 10000,
+    referenceResolution: snapReferenceResolution(params.referenceResolution, limits),
   };
 }
 
@@ -287,16 +350,23 @@ export type ComfyGenerateRequest = {
   scheduler?: string;
   batch_size: number;
   loras: Array<{ name: string; strength: number }>;
+  input_images?: Record<string, { data: string } | { gallery_id: string }>;
+  denoise?: number;
+  reference_resolution?: number;
 };
 
 /** The POST /comfyui/generate body, or an error text. Only parameters the template binds are sent. */
 export function buildGenerateRequest(
   template: ComfyTemplate,
   raw: ComfyParams,
+  inputs: Record<string, ComfyInput | null> = {},
 ): { ok: true; body: ComfyGenerateRequest } | { ok: false; error: string } {
   const params = reconcileParams(raw, template);
   const prompt = params.prompt.trim();
   if (!prompt) return { ok: false, error: "Prompt is empty" };
+  for (const slot of template.imageSlots) {
+    if (slot.required && !inputs[slot.name]) return { ok: false, error: "Add an input image" };
+  }
   const seed = parseSeed(params.seed);
   if (seed === undefined) {
     return { ok: false, error: "Seed must be a whole number, or empty for a random one" };
@@ -319,7 +389,73 @@ export function buildGenerateRequest(
   if (hasSlot(template, "cfg")) body.cfg = params.cfg;
   if (hasSlot(template, "sampler") && params.sampler) body.sampler = params.sampler;
   if (hasSlot(template, "scheduler") && params.scheduler) body.scheduler = params.scheduler;
+  if (template.imageSlots.length > 0) {
+    const images: NonNullable<ComfyGenerateRequest["input_images"]> = {};
+    for (const slot of template.imageSlots) {
+      const input = inputs[slot.name];
+      if (!input) continue;
+      images[slot.name] =
+        input.kind === "gallery" ? { gallery_id: input.galleryId } : { data: input.dataUrl };
+    }
+    body.input_images = images;
+  }
+  if (hasSlot(template, "denoise")) body.denoise = params.denoise;
+  if (hasSlot(template, "reference_resolution")) {
+    body.reference_resolution = params.referenceResolution;
+  }
   return { ok: true, body };
+}
+
+/** The template's default pixel area at the input's aspect, each side snapped and clamped. */
+export function sizeForInput(
+  width: number,
+  height: number,
+  template: ComfyTemplate,
+): { width: number; height: number } {
+  if (!(width > 0) || !(height > 0)) {
+    return {
+      width: snapSide(template.defaults.width, template.limits),
+      height: snapSide(template.defaults.height, template.limits),
+    };
+  }
+  const area = template.defaults.width * template.defaults.height;
+  const ratio = width / height;
+  const w = Math.sqrt(area * ratio);
+  const h = Math.sqrt(area / ratio);
+  const multiple = Math.max(1, template.limits.multiple);
+  const near = (v: number) =>
+    snapSide(Math.round(v / multiple) * multiple, template.limits);
+  return { width: near(w), height: near(h) };
+}
+
+/** The size ComfyUI gives an edit's output: the reference resized to about resolution squared at its
+ *  own aspect, in multiples of 32. */
+export function editOutputSize(
+  width: number,
+  height: number,
+  resolution: number,
+): { width: number; height: number } {
+  if (!(width > 0) || !(height > 0) || !(resolution > 0)) return { width, height };
+  const ratio = width / height;
+  const side = (v: number) => Math.max(32, Math.round(v / 32) * 32);
+  return {
+    width: side(Math.sqrt(resolution * resolution * ratio)),
+    height: side(Math.sqrt((resolution * resolution) / ratio)),
+  };
+}
+
+/** The template an image handed to the panel should land on: the current one when it takes an
+ *  image, else the first image-to-image template, else any template with an image slot. */
+export function pickTemplateForInput(
+  current: ComfyTemplate | null | undefined,
+  templates: readonly ComfyTemplate[],
+): ComfyTemplate | null {
+  if (current && current.imageSlots.length > 0) return current;
+  return (
+    templates.find((t) => t.kind === "img2img" && t.imageSlots.length > 0) ??
+    templates.find((t) => t.imageSlots.length > 0) ??
+    null
+  );
 }
 
 // ---------------------------------------------------------------- recall
@@ -340,11 +476,17 @@ export type ComfyRecallSource = {
   loras?: string[];
   sampler?: string | null;
   scheduler?: string | null;
+  workflow?: string | null;
+  strength?: number | null;
+  reference_resolution?: number | null;
+  comfyui_inputs?: Record<string, string | null> | null;
 };
 
 export type ComfyRecall = {
   templateId: string;
   params: Partial<ComfyParams>;
+  /** Per image slot: the gallery id to re-attach, or null when the input was an upload. */
+  inputs: Record<string, string | null>;
 };
 
 /** "name:strength" recipe entries; splits on the LAST colon so a file name with ':' survives. */
@@ -383,7 +525,15 @@ export function recallFromImage(image: ComfyRecallSource): ComfyRecall | null {
   };
   if (image.sampler) params.sampler = image.sampler;
   if (image.scheduler) params.scheduler = image.scheduler;
-  return { templateId, params };
+  if (finite(image.strength)) params.denoise = image.strength;
+  if (finite(image.reference_resolution)) params.referenceResolution = image.reference_resolution;
+  const inputs: Record<string, string | null> = {};
+  if (isObj(image.comfyui_inputs)) {
+    for (const [slot, id] of Object.entries(image.comfyui_inputs)) {
+      inputs[slot] = typeof id === "string" && id !== "" ? id : null;
+    }
+  }
+  return { templateId, params, inputs };
 }
 
 /** A recall applied to the templates now on offer: the recalled template when it still exists
