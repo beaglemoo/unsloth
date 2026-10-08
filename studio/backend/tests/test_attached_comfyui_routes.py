@@ -314,7 +314,10 @@ def test_cancel_route(client, monkeypatch):
 def test_templates_list_shipped_with_missing_models(client, world):
     body = client.get(url("/templates")).json()
     assert body["comfyui_reachable"] is True
-    [template] = body["templates"]
+    template, uncensored = body["templates"]
+    assert uncensored["id"] == "qwen-image-2.1-t2i-uncensored" and uncensored["name"] == "Qwen-Image 2.1 (uncensored)"
+    assert uncensored["supports_lora"] is True
+    assert uncensored["missing_models"] == {"loras": ["qwen-image-2.1-uncensored-lora.safetensors"]}
     assert template["id"] == TEMPLATE and template["source"] == "shipped" and template["kind"] == "t2i"
     assert template["missing_models"] == {} and template["supports_lora"] is True
     assert template["defaults"]["steps"] == 25 and "prompt" in template["slots"] and "seed" in template["slots"]
@@ -337,7 +340,7 @@ def test_import_list_and_delete_a_user_graph(client, world):
     assert body["template"]["id"] == "user:my-sd" and body["checked_nodes"] is True
     assert body["slot_targets"]["prompt"] == [{"node": "6", "input": "text"}]
     ids = [t["id"] for t in client.get(url("/templates")).json()["templates"]]
-    assert ids == [TEMPLATE, "user:my-sd"]
+    assert ids == [TEMPLATE, "qwen-image-2.1-t2i-uncensored", "user:my-sd"]
     assert client.delete(url("/templates/user:my-sd")).json() == {"deleted": "user:my-sd"}
     assert client.delete(url("/templates/user:my-sd")).status_code == 404
     shipped = client.delete(url(f"/templates/{TEMPLATE}"))
@@ -376,7 +379,7 @@ def test_import_checks_node_types_against_comfyui(client, world):
     del world.fake.object_info["CLIPTextEncode"]
     response = client.post(url("/templates/import"), json = {"name": "SD", "graph": SD_GRAPH})
     assert response.status_code == 422 and "CLIPTextEncode" in response.json()["detail"]
-    assert client.get(url("/templates")).json()["templates"][-1]["id"] == TEMPLATE  # nothing stored
+    assert client.get(url("/templates")).json()["templates"][-1]["id"] == "qwen-image-2.1-t2i-uncensored"  # nothing stored
 
 
 def test_import_without_comfyui_skips_the_node_check(client, world):
