@@ -364,6 +364,7 @@ export function ComfyuiCreatePanel({
       { galleryId: pendingInput.galleryId, url: pendingInput.url },
       { width: pendingInput.width, height: pendingInput.height },
     ).then((size) => {
+      if (size === "stale") return;
       if (!size) toast.error("Could not load that image as input");
       else matchInputSize(size, target);
     });
@@ -415,24 +416,26 @@ export function ComfyuiCreatePanel({
     slot: string,
     source: { galleryId: string; url: string },
     size?: { width: number; height: number },
-  ): Promise<{ width: number; height: number } | null> => {
+  ): Promise<{ width: number; height: number } | "stale" | null> => {
+    // Fetches can finish out of order; only the newest request for the slot may write.
+    const token = useComfyPanelStore.getState().beginInput(slot);
     try {
       const preview = await fetchGalleryObjectUrl(galleryThumbnailUrl(source.url, 512));
       const measured = size ?? (await measureImage(preview.url).catch(() => null));
       if (!measured) {
         URL.revokeObjectURL(preview.url);
-        return null;
+        return useComfyPanelStore.getState().isInputCurrent(slot, token) ? null : "stale";
       }
-      useComfyPanelStore.getState().setInput(slot, {
+      const written = useComfyPanelStore.getState().setInputIfCurrent(slot, token, {
         kind: "gallery",
         galleryId: source.galleryId,
         previewUrl: preview.url,
         width: measured.width,
         height: measured.height,
       });
-      return measured;
+      return written ? measured : "stale";
     } catch {
-      return null;
+      return useComfyPanelStore.getState().isInputCurrent(slot, token) ? null : "stale";
     }
   };
 
@@ -451,7 +454,8 @@ export function ComfyuiCreatePanel({
           return;
         }
         const url = `/api/inference/images/gallery/${encodeURIComponent(id)}/file`;
-        if (!(await attachGalleryInput(slot.name, { galleryId: id, url }))) missingInput = true;
+        const attached = await attachGalleryInput(slot.name, { galleryId: id, url });
+        if (attached === null) missingInput = true;
       }),
     );
     if (missingInput) toast.info("Add the input image again to reproduce this image.");
