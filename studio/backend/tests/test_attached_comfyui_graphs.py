@@ -20,6 +20,10 @@ def _user_dir(tmp_path, monkeypatch):
     return tmp_path / "user-templates"
 
 
+SHIPPED_IDS = ["qwen-image-2.1-t2i", "qwen-image-2.1-t2i-uncensored"]
+UNCENSORED_LORA = "qwen-image-2.1-uncensored-lora.safetensors"
+
+
 def shipped() -> g.Template:
     template = g.get_template("qwen-image-2.1-t2i")
     assert template is not None
@@ -72,6 +76,49 @@ def test_shipped_template_loads_and_slots_point_at_real_inputs():
 
 def test_shipped_template_file_is_in_the_package_data_glob():
     assert (g.SHIPPED_DIR / "qwen-image-2.1-t2i.json").is_file()
+
+
+def uncensored() -> g.Template:
+    template = g.get_template("qwen-image-2.1-t2i-uncensored")
+    assert template is not None
+    return template
+
+
+def test_uncensored_template_is_listed_after_the_standard_one_and_is_valid():
+    shipped_ids = [t.id for t in g.load_templates() if t.source == "shipped"]
+    assert shipped_ids == SHIPPED_IDS
+    template = uncensored()
+    assert template.name == "Qwen-Image 2.1 (uncensored)" and template.source == "shipped"
+    g.validate_api_graph(template.graph)
+    assert set(template.slots) == set(g.SLOT_NAMES)
+    assert template.summary()["supports_lora"] is True
+    assert template.required_models["loras"] == [UNCENSORED_LORA]
+    assert {k: v for k, v in template.required_models.items() if k != "loras"} == shipped().required_models
+
+
+def test_uncensored_template_applies_the_lora_between_loader_and_sampler():
+    graph, resolved = g.build_graph(uncensored(), {"prompt": "x", "seed": 1})
+    assert graph["9"] == {
+        "class_type": "LoraLoaderModelOnly",
+        "inputs": {"model": ["1", 0], "lora_name": UNCENSORED_LORA, "strength_model": 1.0},
+    }
+    assert graph["6"]["inputs"]["model"] == ["9", 0]
+    assert resolved["loras"] == []
+    # Everything else is the standard graph.
+    plain, _ = g.build_graph(shipped(), {"prompt": "x", "seed": 1})
+    assert {k: v for k, v in graph.items() if k not in ("9",)} == {
+        **plain, "6": {**plain["6"], "inputs": {**plain["6"]["inputs"], "model": ["9", 0]}}
+    }
+
+
+def test_user_loras_chain_after_the_uncensored_lora():
+    loras = [{"name": "u0.safetensors", "strength": 0.5}, {"name": "u1.safetensors", "strength": 0.7}]
+    graph, resolved = g.build_graph(uncensored(), {"prompt": "x", "seed": 1, "loras": loras})
+    assert graph["unsloth_lora_0"]["inputs"]["model"] == ["9", 0]
+    assert graph["unsloth_lora_1"]["inputs"]["model"] == ["unsloth_lora_0", 0]
+    assert graph["6"]["inputs"]["model"] == ["unsloth_lora_1", 0]
+    assert graph["9"]["inputs"]["model"] == ["1", 0]
+    assert resolved["loras"] == ["u0.safetensors:0.5", "u1.safetensors:0.7"]
 
 
 # ------------------------------------------------------------------ build_graph
@@ -254,7 +301,7 @@ def test_user_template_round_trip_and_delete(_user_dir):
     assert (_user_dir / "my-graph.json").is_file()
     loaded = g.get_template("user:my-graph")
     assert loaded is not None and loaded.slots == saved.slots and loaded.graph == saved.graph
-    assert [t.id for t in g.load_templates()] == ["qwen-image-2.1-t2i", "user:my-graph"]
+    assert [t.id for t in g.load_templates()] == SHIPPED_IDS + ["user:my-graph"]
     again = g.save_user_template("My Graph!", copy.deepcopy(SD_GRAPH))
     assert again.id == "user:my-graph-2"
     graph, resolved = g.build_graph(loaded, {"prompt": "dog", "seed": 3})
@@ -286,7 +333,7 @@ def test_bad_user_files_are_skipped(_user_dir):
         "schema": 1, "id": "x", "graph": SD_GRAPH, "slots": {"prompt": [{"node": "99", "input": "text"}]},
     }))
     g.save_user_template("good", copy.deepcopy(SD_GRAPH))
-    assert [t.id for t in g.load_templates()] == ["qwen-image-2.1-t2i", "user:good"]
+    assert [t.id for t in g.load_templates()] == SHIPPED_IDS + ["user:good"]
 
 
 def test_manual_slot_mapping_is_validated():
