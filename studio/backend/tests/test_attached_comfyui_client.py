@@ -292,6 +292,15 @@ def test_view_returns_bytes_and_passes_params():
         run(_client(lambda r: httpx.Response(404)).view("x"))
 
 
+def test_view_transport_error_is_a_comfyui_error():
+    # The parameter named `type` shadows the builtin; the error branch must not call it.
+    def handler(request):
+        raise httpx.ConnectError("refused", request = request)
+
+    with pytest.raises(ComfyuiError, match = "unreachable \\(ConnectError\\)"):
+        run(_client(handler).view("x"))
+
+
 def test_object_info():
     assert run(_client(lambda r: httpx.Response(200, json = {"KSampler": {}})).object_info()) == {"KSampler": {}}
     with pytest.raises(ComfyuiError, match = "unexpected"):
