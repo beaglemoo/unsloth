@@ -38,6 +38,7 @@ import {
   cancelComfyGeneration,
   comfyFailureOf,
   fetchComfyLoras,
+  fetchComfySamplers,
   fetchComfyProgress,
   fetchComfyTemplates,
   generateWithComfy,
@@ -50,8 +51,7 @@ import {
   type ComfyProgress,
   type ComfyTemplate,
   MAX_LORAS,
-  SAMPLER_OPTIONS,
-  SCHEDULER_OPTIONS,
+  FALLBACK_SAMPLER_OPTIONS,
   SIZE_PRESETS,
   applyRecall,
   buildGenerateRequest,
@@ -232,6 +232,7 @@ export function ComfyuiCreatePanel({
   const [templates, setTemplates] = useState<ComfyTemplate[]>([]);
   const [loaded, setLoaded] = useState<"loading" | "ready" | "error">("loading");
   const [loras, setLoras] = useState<string[]>([]);
+  const [samplerOptions, setSamplerOptions] = useState(FALLBACK_SAMPLER_OPTIONS);
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [progress, setProgress] = useState<ComfyProgress | null>(null);
@@ -330,6 +331,16 @@ export function ComfyuiCreatePanel({
       cancelled = true;
     };
   }, [template?.id, template?.supportsLora, reachable]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchComfySamplers().then((options) => {
+      if (!cancelled && mounted.current) setSamplerOptions(options);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [reachable]);
 
   const patch = useCallback((change: Partial<ComfyParams>) => {
     useComfyPanelStore.getState().patchParams(change);
@@ -633,7 +644,7 @@ export function ComfyuiCreatePanel({
                 <OptionSelect
                   label="Sampler"
                   value={params.sampler}
-                  options={SAMPLER_OPTIONS}
+                  options={samplerOptions.samplers}
                   onChange={(sampler) => patch({ sampler })}
                 />
               </div>
@@ -643,7 +654,7 @@ export function ComfyuiCreatePanel({
                 <OptionSelect
                   label="Scheduler"
                   value={params.scheduler}
-                  options={SCHEDULER_OPTIONS}
+                  options={samplerOptions.schedulers}
                   onChange={(scheduler) => patch({ scheduler })}
                 />
               </div>
