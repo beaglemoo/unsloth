@@ -448,3 +448,12 @@ def test_import_without_comfyui_skips_the_node_check(client, world):
 
 def test_status_block_reports_job_active(client, world):
     assert client.get("/api/engines/attached/status").json()["comfyui"]["job_active"] is False
+
+
+def test_status_block_carries_the_idle_free_deadline(client, world, monkeypatch):
+    idle = client.get("/api/engines/attached/status").json()["comfyui"]
+    assert idle["idle_free_at"] is None and idle["idle_free_in_s"] is None
+    monkeypatch.setattr(arbiter, "comfyui_idle_free_at", lambda: 1_700_000_300.0)
+    monkeypatch.setattr("routes.attached_engines.time.time", lambda: 1_700_000_048.0)
+    block = client.get("/api/engines/attached/status").json()["comfyui"]
+    assert block["idle_free_at"] == 1_700_000_300.0 and block["idle_free_in_s"] == 252.0

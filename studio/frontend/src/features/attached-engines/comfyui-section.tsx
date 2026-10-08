@@ -35,6 +35,7 @@ import {
 import { setEngineHelperEnabled } from "./engine-helpers-api";
 import { engineHelperRow } from "./engine-helpers-state";
 import { describeEngineFailure } from "./engine-errors";
+import { useNow } from "./use-active-attached";
 import { refreshAttachedStatus } from "./use-attached-engines";
 import type { ComfyuiModels, ComfyuiQueueRow } from "./types";
 
@@ -329,10 +330,18 @@ export function ComfyuiSection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queueKey]);
 
+  // Ticks once a second only while an idle-free timer is counting down.
+  const now = useNow(comfyui?.state === "idle" && comfyui.idleFreeInS != null);
+
   if (!enabled) return null;
 
   const helperRow = engineHelperRow(helpers, "comfyui");
-  const line = comfyuiStatusLine({ status: comfyui, helper: helperRow });
+  const line = comfyuiStatusLine({
+    status: comfyui,
+    helper: helperRow,
+    receivedAt: status?.receivedAt,
+    now,
+  });
   const details = comfyui?.reachable ? comfyuiDeviceLine(comfyui) : null;
   const rule = comfyuiUnloadRule(comfyui);
   const peers = comfyui ? peerNotes(comfyui.peers) : [];

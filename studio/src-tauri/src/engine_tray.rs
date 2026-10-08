@@ -8,6 +8,8 @@
 //! figures in `/system_stats` are system-wide, so the status line shows the memory its process holds
 //! (read from `lsof` and `ps`). The unload item is enabled only while the queue is empty and
 //! refuses (with a message on the status line for one poll) if a job arrived since the last poll.
+//! The idle-free countdown ("frees in 4m 12s") comes from the marker file the backend writes
+//! (`comfyui-idle.json`), because the backend's own status API needs the owner's token.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -156,6 +158,29 @@ fn read_failure(name: &str) -> Option<Failure> {
     parse_failure(&std::fs::read_to_string(path).ok()?)
 }
 
+/// The deadline the backend publishes in `<engines home>/comfyui-idle.json` (`{"free_at": epoch
+/// seconds}`) while the "Free ComfyUI after idle" timer is pending. The tray cannot ask the backend
+/// (its API needs the owner's token, and the tray must work with the backend stopped), so it reads the
+/// same file the way it reads the `*.fail` markers.
+pub(crate) fn parse_idle_marker(text: &str) -> Option<f64> {
+    let free_at = serde_json::from_str::<Value>(text)
+        .ok()?
+        .get("free_at")?
+        .as_f64()?;
+    free_at.is_finite().then_some(free_at)
+}
+
+/// Seconds until the idle free; None once the deadline has passed (a backend that died leaves a stale
+/// file behind, and a frozen "frees in 0s" would be wrong).
+pub(crate) fn idle_remaining_s(free_at: f64, now_epoch_s: f64) -> Option<f64> {
+    let remaining = free_at - now_epoch_s;
+    (remaining > 0.0).then_some(remaining)
+}
+
+fn read_idle_free_at() -> Option<f64> {
+    parse_idle_marker(&std::fs::read_to_string(engines_home()?.join("comfyui-idle.json")).ok()?)
+}
+
 const FAILURE_REASON_MAX: usize = 90;
 
 /// "oMLX failing: <reason>", the reason cut to fit a menu row.
@@ -252,6 +277,8 @@ pub(crate) struct ComfyStatus {
     failure: Option<Failure>,
     /// Resident memory of the ComfyUI process in bytes, when it could be read.
     resident_bytes: Option<u64>,
+    /// Seconds before Studio frees ComfyUI's models after idle; set only while the queue is empty.
+    idle_free_remaining_s: Option<f64>,
 }
 
 /// `(running, pending)` from ComfyUI's `/queue` body; None for anything that is not that shape.
@@ -467,7 +494,11 @@ fn comfyui_label(status: &ComfyStatus) -> String {
         .map(|bytes| format!(", {} GB in memory", gib(bytes)))
         .unwrap_or_default();
     if status.running == 0 && status.pending == 0 {
-        format!("ComfyUI: idle{memory}")
+        let countdown = status
+            .idle_free_remaining_s
+            .map(|seconds| format!(", frees in {}", fmt_duration(seconds)))
+            .unwrap_or_default();
+        format!("ComfyUI: idle{memory}{countdown}")
     } else {
         // the running job is not "queued": N counts the jobs waiting behind it
         format!("ComfyUI: generating ({} queued){memory}", status.pending)
@@ -648,6 +679,15 @@ async fn fetch_comfyui(urls: &EngineUrls) -> ComfyStatus {
             pending,
             failure: None,
             resident_bytes: resident_bytes_of_port(port_of_url(&urls.comfyui)).await,
+            idle_free_remaining_s: if running == 0 && pending == 0 {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                read_idle_free_at().and_then(|free_at| idle_remaining_s(free_at, now))
+            } else {
+                None
+            },
         },
         None => ComfyStatus {
             failure: read_failure("comfyui"),
@@ -1300,7 +1340,59 @@ mod tests {
             pending,
             failure: None,
             resident_bytes: None,
+            idle_free_remaining_s: None,
         }
+    }
+
+    #[test]
+    fn comfyui_idle_label_counts_down_to_the_idle_free() {
+        let waiting = ComfyStatus {
+            idle_free_remaining_s: Some(252.0),
+            ..comfy(0, 0)
+        };
+        assert_eq!(comfyui_label(&waiting), "ComfyUI: idle, frees in 4m 12s");
+        let with_memory = ComfyStatus {
+            resident_bytes: Some(27 * 1024 * 1024 * 1024),
+            idle_free_remaining_s: Some(45.4),
+            ..comfy(0, 0)
+        };
+        assert_eq!(
+            comfyui_label(&with_memory),
+            "ComfyUI: idle, 27.0 GB in memory, frees in 45s"
+        );
+        // no countdown while a job runs or waits, even if a stale value is carried
+        let busy = ComfyStatus {
+            idle_free_remaining_s: Some(10.0),
+            ..comfy(1, 0)
+        };
+        assert_eq!(comfyui_label(&busy), "ComfyUI: generating (0 queued)");
+    }
+
+    #[test]
+    fn the_idle_marker_parses_only_a_finite_deadline() {
+        assert_eq!(
+            parse_idle_marker(r#"{"free_at": 1700000300.5}"#),
+            Some(1_700_000_300.5)
+        );
+        assert_eq!(parse_idle_marker(r#"{"free_at": 1700000300}"#), Some(1_700_000_300.0));
+        for bad in [
+            "",
+            "not json",
+            "{}",
+            r#"{"free_at": "soon"}"#,
+            r#"{"free_at": null}"#,
+            r#"{"at": 1}"#,
+            "[1]",
+        ] {
+            assert_eq!(parse_idle_marker(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_passed_deadline_shows_no_countdown() {
+        assert_eq!(idle_remaining_s(1_300.0, 1_048.0), Some(252.0));
+        assert_eq!(idle_remaining_s(1_300.0, 1_300.0), None);
+        assert_eq!(idle_remaining_s(1_300.0, 9_999.0), None);
     }
 
     #[test]
