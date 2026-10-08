@@ -365,3 +365,124 @@ test("sampler lists come from ComfyUI and fall back list by list", () => {
   assert.deepEqual(samplerOptionsFromApi({ samplers: "euler" }), FALLBACK_SAMPLER_OPTIONS);
   assert.deepEqual(FALLBACK_SAMPLER_OPTIONS.schedulers, SCHEDULER_OPTIONS);
 });
+
+// ---------------------------------------------------------------- phase 7: image inputs
+
+import {
+  type ComfyInput,
+  REFERENCE_RESOLUTION_CHOICES,
+  editOutputSize,
+  pickTemplateForInput,
+  sizeForInput,
+} from "../src/features/images/comfyui/comfyui-panel-state.ts";
+
+const IMG_LIMITS = {
+  steps: [1, 100],
+  cfg: [0, 20],
+  side: [256, 2048],
+  multiple: 16,
+  batch_size: [1, 1],
+  denoise: [0.01, 1],
+  reference_resolution: [256, 2048],
+  reference_multiple: 32,
+};
+const IMG2IMG = {
+  ...QWEN,
+  id: "qwen-image-2.1-img2img",
+  kind: "img2img",
+  defaults: { ...QWEN.defaults, denoise: 0.6 },
+  limits: IMG_LIMITS,
+  slots: ["prompt", "negative_prompt", "seed", "steps", "cfg", "sampler", "scheduler", "width", "height", "denoise"],
+  image_slots: [{ name: "image", label: "Input image", required: true }],
+};
+const EDIT = {
+  ...QWEN,
+  id: "qwen-image-2.1-edit",
+  kind: "edit",
+  defaults: { steps: 25, cfg: 1, sampler: "euler", scheduler: "simple", reference_resolution: 1024 },
+  limits: IMG_LIMITS,
+  slots: ["prompt", "negative_prompt", "seed", "steps", "cfg", "sampler", "scheduler", "reference_resolution"],
+  image_slots: [{ name: "image", label: "Input image", required: true }],
+};
+const all = () => templatesFromApi({ templates: [QWEN, IMG2IMG, EDIT] }).templates;
+const DATA: ComfyInput = { kind: "data", dataUrl: "data:image/png;base64,AAAA", width: 600, height: 400 };
+const GALLERY: ComfyInput = { kind: "gallery", galleryId: "abc_123", previewUrl: "blob:x", width: 600, height: 400 };
+
+test("image slots, kinds and the new defaults parse; an old payload still does", () => {
+  const [, img, edit] = all();
+  assert.equal(img.kind, "img2img");
+  assert.deepEqual(img.imageSlots, [{ name: "image", label: "Input image", required: true }]);
+  assert.equal(img.defaults.denoise, 0.6);
+  assert.deepEqual(img.limits.denoise, [0.01, 1]);
+  assert.equal(edit.defaults.referenceResolution, 1024);
+  assert.equal(edit.limits.referenceMultiple, 32);
+  const old = qwen();
+  assert.deepEqual(old.imageSlots, []);
+  assert.equal(old.defaults.denoise, null);
+  assert.deepEqual(old.limits.denoise, [0.01, 1]);
+  assert.equal(old.limits.referenceMultiple, 32);
+  assert.equal(defaultParams(img).denoise, 0.6);
+  assert.equal(defaultParams(edit).referenceResolution, 1024);
+});
+
+test("a request carries data or gallery inputs, and only the image controls the template binds", () => {
+  const [t2i, img, edit] = all();
+  const p = (t: ComfyTemplate) => ({ ...defaultParams(t), prompt: "a cabin" });
+  const withData = buildGenerateRequest(img, p(img), { image: DATA });
+  assert.ok(withData.ok);
+  assert.deepEqual(withData.body.input_images, { image: { data: DATA.kind === "data" ? DATA.dataUrl : "" } });
+  assert.equal(withData.body.denoise, 0.6);
+  assert.equal(withData.body.reference_resolution, undefined);
+  const withGallery = buildGenerateRequest(img, p(img), { image: GALLERY });
+  assert.ok(withGallery.ok);
+  assert.deepEqual(withGallery.body.input_images, { image: { gallery_id: "abc_123" } });
+  const editReq = buildGenerateRequest(edit, p(edit), { image: DATA });
+  assert.ok(editReq.ok);
+  assert.equal(editReq.body.reference_resolution, 1024);
+  assert.equal(editReq.body.denoise, undefined);
+  assert.equal(editReq.body.width, undefined);
+  const plain = buildGenerateRequest(t2i, p(t2i));
+  assert.ok(plain.ok);
+  assert.equal(plain.body.input_images, undefined);
+  assert.equal(plain.body.denoise, undefined);
+});
+
+test("a required image slot without an input is refused after the prompt check", () => {
+  const [, img] = all();
+  const missing = buildGenerateRequest(img, { ...defaultParams(img), prompt: "x" }, { image: null });
+  assert.deepEqual(missing, { ok: false, error: "Add an input image" });
+  const noPrompt = buildGenerateRequest(img, defaultParams(img), {});
+  assert.deepEqual(noPrompt, { ok: false, error: "Prompt is empty" });
+});
+
+test("sizeForInput keeps the template area at the input's aspect", () => {
+  const [, img] = all();
+  assert.deepEqual(sizeForInput(1500, 1000, img), { width: 1248, height: 832 });
+  assert.deepEqual(sizeForInput(1000, 1000, img), { width: 1024, height: 1024 });
+  assert.deepEqual(sizeForInput(100000, 10, img), { width: 2048, height: 256 });
+  assert.deepEqual(sizeForInput(0, 0, img), { width: 1024, height: 1024 });
+});
+
+test("editOutputSize follows ComfyUI's resize to resolution squared in multiples of 32", () => {
+  assert.deepEqual(editOutputSize(1000, 1000, 1024), { width: 1024, height: 1024 });
+  assert.deepEqual(editOutputSize(1500, 1000, 1024), { width: 1248, height: 832 });
+  assert.deepEqual(editOutputSize(1000, 1500, 768), { width: 640, height: 928 });
+  assert.deepEqual(REFERENCE_RESOLUTION_CHOICES, [512, 768, 1024]);
+});
+
+test("pickTemplateForInput keeps an image template, else prefers img2img", () => {
+  const [t2i, img, edit] = all();
+  assert.equal(pickTemplateForInput(edit, all())?.id, "qwen-image-2.1-edit");
+  assert.equal(pickTemplateForInput(t2i, all())?.id, "qwen-image-2.1-img2img");
+  assert.equal(pickTemplateForInput(null, [t2i, edit])?.id, "qwen-image-2.1-edit");
+  assert.equal(pickTemplateForInput(t2i, [t2i]), null);
+  assert.equal(pickTemplateForInput(img, [t2i]), img);
+});
+
+test("reconcileParams clamps denoise and snaps the reference resolution", () => {
+  const [, img, edit] = all();
+  assert.equal(reconcileParams({ ...defaultParams(img), denoise: 0 }, img).denoise, 0.01);
+  assert.equal(reconcileParams({ ...defaultParams(img), denoise: 3 }, img).denoise, 1);
+  assert.equal(reconcileParams({ ...defaultParams(edit), referenceResolution: 1000 }, edit).referenceResolution, 992);
+  assert.equal(reconcileParams({ ...defaultParams(edit), referenceResolution: 99999 }, edit).referenceResolution, 2048);
+});
