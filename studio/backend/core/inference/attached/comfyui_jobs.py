@@ -113,8 +113,6 @@ class _State:
     first_step_at: float = 0.0
     eta_seconds: Optional[float] = None
     prompt_id: Optional[str] = None
-    # The id Studio sent in the /prompt body, set before the request goes out.
-    submit_id: Optional[str] = None
     queue_position: Optional[int] = None
     cancel_requested: bool = False
     # Set once the job is confirmed gone from ComfyUI's queue after a cancel (ComfyUI sends no message for a removed pending job).
@@ -318,18 +316,16 @@ class ComfyJobRunner:
         timeout = timeout_s if timeout_s is not None else _job_timeout()
         async with contextlib.AsyncExitStack() as stack:
             ws = await self._open_ws(stack, client, client_id)
-            # Studio names the prompt itself and records it before sending, so a /prompt that times out after
-            # ComfyUI queued it can still be cancelled by id. st.prompt_id stays unset until the reply: cancel()
+            # Studio names the prompt itself before sending, so a /prompt that times out after ComfyUI
+            # queued it can still be cancelled by id. st.prompt_id stays unset until the reply: cancel()
             # treats an unset id as "not submitted yet" and run() cancels right after submission.
             sent_id = str(uuid.uuid4())
-            st.submit_id = sent_id
             try:
                 prompt_id, number = await client.submit(
                     graph, client_id, {"unsloth": {"template": template.id}}, prompt_id = sent_id
                 )
             except ComfyGraphError as exc:
                 # A 400: ComfyUI rejected the graph and queued nothing.
-                st.submit_id = None
                 raise ComfyGraphError(_graph_error_text(exc), exc.node_errors) from exc
             except BaseException:
                 # A timeout, a transport error, a 5xx or a task cancellation: ComfyUI may have queued the prompt
