@@ -300,7 +300,7 @@ class ComfyJobRunner:
         required = {folder: list(names) for folder, names in template.required_models.items()}
         lora_names = [entry.rsplit(":", 1)[0] for entry in resolved["loras"]]
         if lora_names:
-            required["loras"] = lora_names
+            required["loras"] = required.get("loras", []) + [n for n in lora_names if n not in required.get("loras", [])]
         absent = await missing_models(client, required)
         if absent:
             raise ComfyModelsMissing(absent, configured_model_dirs())
