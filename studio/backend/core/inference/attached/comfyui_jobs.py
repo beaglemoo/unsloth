@@ -604,23 +604,25 @@ class ComfyJobRunner:
 
     # ------------------------------------------------------------- cancel
 
-    async def cancel(self) -> bool:
+    async def cancel(self) -> str:
         """Stop Studio's own job and wait (bounded) until ComfyUI no longer has it.
 
-        True when the job is confirmed gone from the queue, or has not been submitted yet (``run`` then cancels
-        it right after submission). False when nothing is active, or when ComfyUI still shows the job after
-        ``cancel_wait`` seconds: it stays owned by the runner and Cancel can be retried.
+        ``"confirmed"``: the job is gone from the queue, or has not been submitted yet (``run`` then cancels it
+        right after submission). ``"pending"``: the interrupt was sent but ComfyUI still shows the job after
+        ``cancel_wait`` seconds (a denoise step can take minutes on a swapping machine). ``cancel_requested``
+        stays set, so the job still ends as cancelled when ComfyUI gets to the interrupt, and Cancel can be
+        repeated. ``"none"``: no Studio job is active.
         """
         st, client = self._state, self._client
         if st is None or client is None:
-            return False
+            return "none"
         st.cancel_requested = True
         if st.prompt_id is None:
-            return True
+            return "confirmed"
         if await self._cancel_and_confirm(client, st.prompt_id):
             st.cancel_confirmed = True
-            return True
-        return False
+            return "confirmed"
+        return "pending"
 
     async def _cancel_and_confirm(self, client: ComfyuiClient, prompt_id: str) -> bool:
         """Cancel one prompt of ours until it is absent from ComfyUI's queue; False if it still is after ``cancel_wait``.

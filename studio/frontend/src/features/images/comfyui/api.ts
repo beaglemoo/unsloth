@@ -7,12 +7,14 @@ import { parseRetryAfter } from "@/features/attached-engines/engine-errors";
 import { readFastApiError } from "@/lib/format-fastapi-error";
 import type { GalleryImage } from "../api";
 import {
+  type ComfyCancelOutcome,
   type ComfyFailure,
   type ComfyGenerateRequest,
   type ComfyProgress,
   type ComfyTemplate,
   type SamplerOptions,
   FALLBACK_SAMPLER_OPTIONS,
+  cancelOutcomeFromApi,
   describeComfyFailure,
   progressFromApi,
   samplerOptionsFromApi,
@@ -130,10 +132,9 @@ export async function fetchComfyProgress(signal?: AbortSignal): Promise<ComfyPro
   return progressFromApi(await res.json());
 }
 
-export async function cancelComfyGeneration(): Promise<boolean> {
+export async function cancelComfyGeneration(): Promise<ComfyCancelOutcome> {
   const res = await request("/generate/cancel", { method: "POST" }, "Could not cancel the job");
-  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  return data.cancelled === true;
+  return cancelOutcomeFromApi(await res.json().catch(() => ({})));
 }
 
 export async function importComfyGraph(name: string, graph: unknown): Promise<ComfyTemplate | null> {

@@ -556,8 +556,13 @@ export function ComfyuiCreatePanel({
     if (stopping) return;
     setStopping(true);
     try {
-      const cancelled = await cancelComfyGeneration();
-      if (!cancelled && mounted.current) setStopping(false);
+      const outcome = await cancelComfyGeneration();
+      if (outcome === "none") {
+        if (mounted.current) setStopping(false);
+      } else if (outcome === "pending") {
+        // Stay on "Stopping": the job ends as cancelled once ComfyUI reaches the interrupt.
+        toast.info("Stop requested. ComfyUI will stop at the end of its current step.");
+      }
     } catch {
       if (mounted.current) setStopping(false);
       toast.error("Could not reach ComfyUI to stop this generation; it is still running");
