@@ -229,9 +229,13 @@ class ComfyuiClient:
         await self._post("/queue", {"clear": True})
 
     async def submit(
-        self, graph: dict, client_id: str, extra: Optional[dict] = None
+        self, graph: dict, client_id: str, extra: Optional[dict] = None, prompt_id: Optional[str] = None
     ) -> tuple[str, int]:
+        """Queue a graph. ``prompt_id`` (a canonical lowercase UUID) lets the caller name the job up front,
+        so it can still cancel it when this call times out after ComfyUI queued the prompt."""
         body: dict[str, Any] = {"prompt": graph, "client_id": client_id}
+        if prompt_id:
+            body["prompt_id"] = prompt_id
         if extra:
             body["extra_data"] = extra
         try:
