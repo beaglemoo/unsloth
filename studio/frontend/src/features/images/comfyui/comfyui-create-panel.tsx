@@ -61,6 +61,7 @@ import {
   defaultParams,
   editOutputSize,
   hasSlot,
+  keepsInputSize,
   missingModelList,
   pickTemplateForInput,
   queueLabel,
@@ -785,15 +786,17 @@ export function ComfyuiCreatePanel({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {(
-                  (REFERENCE_RESOLUTION_CHOICES as readonly number[]).includes(
-                    params.referenceResolution,
-                  )
-                    ? [...REFERENCE_RESOLUTION_CHOICES]
-                    : [params.referenceResolution, ...REFERENCE_RESOLUTION_CHOICES]
-                ).map((value) => (
+                {(() => {
+                  const base: number[] = [
+                    ...(keepsInputSize(template) ? [0] : []),
+                    ...REFERENCE_RESOLUTION_CHOICES,
+                  ];
+                  return base.includes(params.referenceResolution)
+                    ? base
+                    : [params.referenceResolution, ...base];
+                })().map((value) => (
                   <SelectItem key={value} value={String(value)} className="text-xs">
-                    {value} px
+                    {value === 0 ? "Keep input size" : `${value} px`}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -806,9 +809,13 @@ export function ComfyuiCreatePanel({
                       firstInput.height,
                       params.referenceResolution,
                     );
-                    return `Output about ${out.width} x ${out.height}, follows the input's shape`;
+                    return params.referenceResolution === 0
+                      ? `Output about ${out.width} x ${out.height}, follows the input size`
+                      : `Output about ${out.width} x ${out.height}, follows the input's shape`;
                   })()
-                : "Output follows the input's shape"}
+                : params.referenceResolution === 0
+                  ? "Output follows the input size"
+                  : "Output follows the input's shape"}
             </span>
           </PanelField>
         ) : null}

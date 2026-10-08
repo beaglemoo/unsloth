@@ -286,6 +286,16 @@ export function snapReferenceResolution(value: number, limits: ComfyLimits): num
   return clampNumber(snapped, [lo, hi]);
 }
 
+/** True when the template itself defaults to 0 ("keep the input size"); the backend accepts 0 only then. */
+export function keepsInputSize(template: ComfyTemplate): boolean {
+  return template.defaults.referenceResolution === 0;
+}
+
+function templateReferenceResolution(value: number, template: ComfyTemplate): number {
+  if (value === 0 && keepsInputSize(template)) return 0;
+  return snapReferenceResolution(value, template.limits);
+}
+
 export function defaultParams(template: ComfyTemplate): ComfyParams {
   return {
     prompt: "",
@@ -300,9 +310,9 @@ export function defaultParams(template: ComfyTemplate): ComfyParams {
     batchSize: 1,
     loras: [],
     denoise: defaultDenoise(template),
-    referenceResolution: snapReferenceResolution(
+    referenceResolution: templateReferenceResolution(
       template.defaults.referenceResolution ?? 1024,
-      template.limits,
+      template,
     ),
   };
 }
@@ -320,7 +330,7 @@ export function reconcileParams(params: ComfyParams, template: ComfyTemplate): C
     batchSize: Math.round(clampNumber(params.batchSize, limits.batchSize)),
     loras: template.supportsLora ? params.loras.slice(0, MAX_LORAS) : [],
     denoise: Math.round(clampNumber(params.denoise, limits.denoise) * 10000) / 10000,
-    referenceResolution: snapReferenceResolution(params.referenceResolution, limits),
+    referenceResolution: templateReferenceResolution(params.referenceResolution, template),
   };
 }
 
@@ -429,15 +439,16 @@ export function sizeForInput(
 }
 
 /** The size ComfyUI gives an edit's output: the reference resized to about resolution squared at its
- *  own aspect, in multiples of 32. */
+ *  own aspect, in multiples of 32. Resolution 0 keeps the input size (rounded to 32). */
 export function editOutputSize(
   width: number,
   height: number,
   resolution: number,
 ): { width: number; height: number } {
-  if (!(width > 0) || !(height > 0) || !(resolution > 0)) return { width, height };
-  const ratio = width / height;
+  if (!(width > 0) || !(height > 0) || !(resolution >= 0)) return { width, height };
   const side = (v: number) => Math.max(32, Math.round(v / 32) * 32);
+  if (resolution === 0) return { width: side(width), height: side(height) };
+  const ratio = width / height;
   return {
     width: side(Math.sqrt(resolution * resolution * ratio)),
     height: side(Math.sqrt((resolution * resolution) / ratio)),
