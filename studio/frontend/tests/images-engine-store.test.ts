@@ -108,3 +108,14 @@ test("the Engines tab names the show switch apart from Engines enabled", () => {
   assert.doesNotMatch(section, /label="Enable engines"/);
   assert.match(section, /label="Engines enabled"/);
 });
+
+test("the ComfyUI panel cannot shrink below its controls, so the sticky Generate bar never covers Add LoRA", () => {
+  const panel = readSrc("features/images/comfyui/comfyui-create-panel.tsx");
+  const wrapper = panel.match(/<div className="([^"]*)" data-comfyui-panel="">/);
+  assert.ok(wrapper, "panel wrapper found");
+  assert.ok(!wrapper[1].split(" ").includes("min-h-0"), "wrapper must not be shrinkable");
+  assert.match(panel, /sticky bottom-0/);
+  // Studio mode keeps its Generate footer outside the settings scroller.
+  const page = readSrc("features/images/images-page.tsx");
+  assert.match(page, /\{!comfyMode && \(\s*<div className="relative z-10 flex shrink-0 flex-wrap/);
+});
