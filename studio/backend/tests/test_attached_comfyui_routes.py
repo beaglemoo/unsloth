@@ -565,7 +565,7 @@ def test_templates_list_the_image_templates_with_kinds_and_slots(client, world):
     img2img, edit, t2i = listed[IMG2IMG], listed[EDIT], listed[TEMPLATE]
     assert img2img["image_slots"] == edit["image_slots"] == [{"name": "image", "label": "Input image", "required": True}]
     assert t2i["image_slots"] == []
-    assert "denoise" in img2img["slots"] and "width" in img2img["slots"] and img2img["defaults"]["denoise"] == 0.6
+    assert "denoise" in img2img["slots"] and "width" in img2img["slots"] and img2img["defaults"]["denoise"] == 0.8
     assert "reference_resolution" in edit["slots"] and "width" not in edit["slots"]
     assert edit["defaults"]["reference_resolution"] == 1024 and edit["limits"]["batch_size"] == [1, 1]
     assert img2img["limits"]["denoise"] == [0.01, 1.0] and edit["limits"]["reference_multiple"] == 32

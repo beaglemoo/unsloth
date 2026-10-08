@@ -392,7 +392,7 @@ const IMG2IMG = {
   ...QWEN,
   id: "qwen-image-2.1-img2img",
   kind: "img2img",
-  defaults: { ...QWEN.defaults, denoise: 0.6 },
+  defaults: { ...QWEN.defaults, denoise: 0.8 },
   limits: IMG_LIMITS,
   slots: ["prompt", "negative_prompt", "seed", "steps", "cfg", "sampler", "scheduler", "width", "height", "denoise"],
   image_slots: [{ name: "image", label: "Input image", required: true }],
@@ -414,7 +414,7 @@ test("image slots, kinds and the new defaults parse; an old payload still does",
   const [, img, edit] = all();
   assert.equal(img.kind, "img2img");
   assert.deepEqual(img.imageSlots, [{ name: "image", label: "Input image", required: true }]);
-  assert.equal(img.defaults.denoise, 0.6);
+  assert.equal(img.defaults.denoise, 0.8);
   assert.deepEqual(img.limits.denoise, [0.01, 1]);
   assert.equal(edit.defaults.referenceResolution, 1024);
   assert.equal(edit.limits.referenceMultiple, 32);
@@ -423,7 +423,7 @@ test("image slots, kinds and the new defaults parse; an old payload still does",
   assert.equal(old.defaults.denoise, null);
   assert.deepEqual(old.limits.denoise, [0.01, 1]);
   assert.equal(old.limits.referenceMultiple, 32);
-  assert.equal(defaultParams(img).denoise, 0.6);
+  assert.equal(defaultParams(img).denoise, 0.8);
   assert.equal(defaultParams(edit).referenceResolution, 1024);
 });
 
@@ -433,7 +433,7 @@ test("a request carries data or gallery inputs, and only the image controls the 
   const withData = buildGenerateRequest(img, p(img), { image: DATA });
   assert.ok(withData.ok);
   assert.deepEqual(withData.body.input_images, { image: { data: DATA.kind === "data" ? DATA.dataUrl : "" } });
-  assert.equal(withData.body.denoise, 0.6);
+  assert.equal(withData.body.denoise, 0.8);
   assert.equal(withData.body.reference_resolution, undefined);
   const withGallery = buildGenerateRequest(img, p(img), { image: GALLERY });
   assert.ok(withGallery.ok);
