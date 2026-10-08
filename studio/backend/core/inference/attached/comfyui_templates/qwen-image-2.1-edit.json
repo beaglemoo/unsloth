@@ -206,7 +206,7 @@
     ],
     "reference_resolution": [
       256,
-      2048
+      1536
     ],
     "reference_multiple": 32
   },
