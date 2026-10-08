@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import re
 import sys
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -50,6 +52,10 @@ class FakeComfy:
         self.history: dict[str, dict] = {}
         self.images = [{"filename": "ComfyUI_temp_00001_.png", "subfolder": "", "type": "temp"}]
         self.submit_status = 200
+        # A /prompt that dies client-side (timeout, reset): ``queue_before_submit_error`` says whether ComfyUI
+        # queued the prompt under the id Studio sent before the connection died.
+        self.submit_error: Exception | None = None
+        self.queue_before_submit_error = False
         self.submit_body: dict | None = None
         self.submitted: list[dict] = []
         self.calls: list[tuple[str, str]] = []
@@ -111,6 +117,10 @@ class FakeComfy:
         if path == "/prompt":
             body = json.loads(request.content)
             self.submitted.append(body)
+            if self.submit_error is not None:
+                if self.queue_before_submit_error:
+                    self.pending.append(body["prompt_id"])
+                raise self.submit_error
             if self.submit_status != 200:
                 return httpx.Response(self.submit_status, json = self.submit_body or {})
             self.running.append(PID)
@@ -479,6 +489,83 @@ def test_uncensored_template_submits_with_user_loras_chained_after_it(world):
     assert sent["9"]["inputs"]["lora_name"] == "qwen-image-2.1-uncensored-lora.safetensors"
     assert sent["unsloth_lora_0"]["inputs"]["model"] == ["9", 0] and sent["6"]["inputs"]["model"] == ["unsloth_lora_0", 0]
     assert result.images[0]["comfyui_template"] == "qwen-image-2.1-t2i-uncensored"
+
+
+# ------------------------------------------------- cancellable prompts (orphan fix)
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+
+
+def test_studio_names_the_prompt_and_sends_a_canonical_uuid(world):
+    r = runner(FakeConnect(FakeWS([msg("execution_success")])))
+    original = world.fake.handle
+    world.fake.handle = lambda req: (original(req), world.fake.finish())[0] if req.url.path == "/prompt" else original(req)
+    go(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client()))
+    sent = world.fake.submitted[0]
+    assert UUID_RE.match(sent["prompt_id"]) and str(uuid.UUID(sent["prompt_id"])) == sent["prompt_id"]
+    # The marker the Engines tab uses to show a job as Studio's own rides along, so an orphan is cancellable there.
+    assert sent["extra_data"] == {"unsloth": {"template": "qwen-image-2.1-t2i"}}
+
+
+@pytest.mark.parametrize("queued", [True, False])
+@pytest.mark.parametrize("endpoint", [True, False])
+def test_submit_timeout_cancels_the_prompt_comfyui_may_have_queued(world, queued, endpoint):
+    world.fake.has_cancel_endpoint = endpoint
+    world.fake.submit_error = httpx.ReadTimeout("timed out")
+    world.fake.queue_before_submit_error = queued
+    r = runner()
+    with pytest.raises(ComfyuiError):
+        go(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client()))
+    sent_id = world.fake.submitted[0]["prompt_id"]
+    assert world.fake.pending == [] and world.fake.running == []
+    if queued and endpoint:
+        assert world.fake.cancel_calls == [sent_id]
+    elif queued:
+        assert world.fake.count("POST", "/queue") == 1  # the pending prompt was deleted by id
+    else:
+        assert world.fake.cancel_calls == [] and world.fake.interrupts == []
+        assert world.fake.count("POST", "/queue") == 0
+    assert not r.is_running()
+
+
+def test_submit_timeout_keeps_ownership_when_the_cancel_cannot_be_confirmed(world):
+    world.fake.has_cancel_endpoint = True
+    world.fake.submit_error = httpx.ReadTimeout("timed out")
+    world.fake.queue_before_submit_error = True
+    r = runner()
+    r.cancel_wait = 0.0
+    r.reap_wait = 0.0
+    stuck: list[str] = []
+    original = world.fake.handle
+
+    def handle(req):
+        if req.url.path.startswith("/api/jobs/"):
+            stuck.append(req.url.path)
+            return httpx.Response(200, json = {"cancelled": False})
+        return original(req)
+
+    world.fake.handle = handle
+
+    async def main():
+        with pytest.raises(ComfyuiError):
+            await r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client())
+        # The prompt is still queued under Studio's own id: the runner stays busy while it is reaped, and Cancel can name it.
+        assert r._reaper is not None and r._state is not None
+        assert r._state.prompt_id == world.fake.submitted[0]["prompt_id"] == world.fake.pending[0]
+        await r._reaper
+
+    go(main())
+    assert stuck and not r.is_running()
+
+
+def test_graph_rejection_cancels_nothing(world):
+    world.fake.submit_status = 400
+    world.fake.submit_body = {"error": {"message": "bad graph"}, "node_errors": {}}
+    world.fake.has_cancel_endpoint = True
+    r = runner()
+    with pytest.raises(ComfyGraphError):
+        go(r.run("qwen-image-2.1-t2i", dict(PARAMS), client = world.fake.client()))
+    assert world.fake.cancel_calls == [] and world.fake.interrupts == [] and not r.is_running()
 
 
 def test_comfyui_off_versus_starting(world, tmp_path, monkeypatch):
