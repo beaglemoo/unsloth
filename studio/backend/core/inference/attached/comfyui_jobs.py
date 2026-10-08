@@ -3,13 +3,16 @@
 
 """Run one Studio-submitted ComfyUI job: admit, submit, follow progress, save the outputs to the gallery.
 
-One job at a time (``ComfyBusyError`` for a second). The sequence is: build the graph, make sure ComfyUI
-is up and has the models, ask the arbiter for room (``before_comfyui_job``: unloads oMLX), open the
-websocket, ``POST /prompt``, follow ``/ws`` (with a periodic ``/history`` check, and polling alone when
+One job at a time (``ComfyBusyError`` for a second). The sequence is: build the graph (checking the input
+images against the template), make sure ComfyUI is up and has the models, prepare the input images (a bad
+one fails here, before anything is unloaded), ask the arbiter for room (``before_comfyui_job``: unloads
+oMLX), upload the inputs to ComfyUI's temp folder, open the websocket, ``POST /prompt``, follow ``/ws`` (with a periodic ``/history`` check, and polling alone when
 the websocket is unavailable), fetch the outputs through ``/history`` and ``/view`` and store them with
 ``image_gallery.save``. The graph ships ``PreviewImage`` nodes, so ComfyUI keeps no copy: the Studio
 gallery holds the only one. ``/interrupt`` and queue deletes only ever name Studio's own ``prompt_id``.
 The idle free timer lives in the arbiter: admission cancels it, and a finished job restarts it.
+Uploaded inputs are deleted when the job is released, which is the one place that runs once ComfyUI no
+longer holds the prompt (including after the reaper): never earlier.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import quote, urlsplit
 
-from core.inference.attached import arbiter, desktop_settings
+from core.inference.attached import arbiter, comfyui_inputs, desktop_settings
 from core.inference.attached.comfyui_client import (
     ComfyGraphError,
     ComfyuiClient,
@@ -125,6 +128,10 @@ class _State:
     stage: str = "starting"
     misses: int = 0
     poll_failures: int = 0
+    # The prepared input images by slot, and the names already sent to ComfyUI (recorded before the upload
+    # call, so a failed or cancelled upload is cleaned up too). Deleted in ``_release``.
+    inputs: dict = field(default_factory = dict)
+    uploaded: list = field(default_factory = list)
 
 
 def _estimate_eta(total_steps: int, step: int, first_step_at: float, now: float) -> Optional[float]:
@@ -174,6 +181,10 @@ def _default_connect(url: str, **kwargs: Any):
     from websockets.asyncio.client import connect
 
     return connect(url, **kwargs)
+
+
+# Gallery ``workflow`` per template kind; a text-to-image record keeps "create" as it always had.
+_WORKFLOWS = {"t2i": "create", "img2img": "img2img", "edit": "edit"}
 
 
 def _is_sampler(class_type: str) -> bool:
@@ -243,8 +254,9 @@ class ComfyJobRunner:
         template = get_template(template_id)
         if template is None:
             raise ComfyTemplateNotFound(f"Unknown ComfyUI template {template_id!r}.")
-        graph, resolved = build_graph(template, params)
-        st = self._state = _State(template_id = template.id, total_steps = int(resolved["steps"]))
+        plans = comfyui_inputs.plan_inputs(template, params.get("input_images") or {})
+        graph, resolved = build_graph(template, {**params, "images": {slot: plan.annotated for slot, plan in plans.items()}})
+        st = self._state = _State(template_id = template.id, total_steps = int(resolved["steps"]), inputs = plans)
         client = self._client = client or ComfyuiClient(get_config().comfyui_url)
         try:
             return await self._run(client, template, graph, resolved, st, timeout_s)
@@ -257,7 +269,10 @@ class ComfyJobRunner:
                 self._release(st)
 
     def _release(self, st: _State) -> None:
-        """Let go of the job: the memory claim first, then the runner; the idle timer restarts last."""
+        """Let go of the job: its uploaded inputs and the memory claim first, then the runner; the idle timer restarts last."""
+        if st.uploaded:
+            with contextlib.suppress(Exception):
+                comfyui_inputs.remove_inputs(st.uploaded)
         if st.hold is not None:
             st.hold.release()
         if self._state is st:
@@ -297,6 +312,11 @@ class ComfyJobRunner:
         if queue.state == "unknown":
             raise ComfyuiError("ComfyUI did not report its queue.")
 
+        # A bad image is the caller's error: refuse it before the models check and before admission unloads anything.
+        blobs: dict[str, bytes] = {}
+        if st.inputs:
+            blobs = await asyncio.to_thread(lambda: {slot: comfyui_inputs.load_png(plan) for slot, plan in st.inputs.items()})
+
         required = {folder: list(names) for folder, names in template.required_models.items()}
         lora_names = [entry.rsplit(":", 1)[0] for entry in resolved["loras"]]
         if lora_names:
@@ -311,6 +331,12 @@ class ComfyJobRunner:
         st.admitted = True
         if st.cancel_requested:
             raise ComfyCancelled(_cancelled_message())
+
+        if st.inputs:
+            await asyncio.to_thread(comfyui_inputs.sweep_stale)
+            for slot, plan in st.inputs.items():
+                st.uploaded.append(plan.filename)
+                await client.upload_image(plan.filename, blobs[slot], subfolder = comfyui_inputs.SUBFOLDER)
 
         client_id = uuid.uuid4().hex
         timeout = timeout_s if timeout_s is not None else _job_timeout()
@@ -359,7 +385,7 @@ class ComfyJobRunner:
 
         st.stage, st.phase = "saving", "decode"
         entry = await self._final_history(client, prompt_id)
-        records = await self._persist(client, entry, template, resolved)
+        records = await self._persist(client, entry, template, resolved, st.inputs)
         return ComfyJobResult(
             images = records, actions = list(admission.actions), prompt_id = prompt_id, resolved = resolved
         )
@@ -505,7 +531,9 @@ class ComfyJobRunner:
 
     # ------------------------------------------------------------ outputs
 
-    async def _persist(self, client: ComfyuiClient, entry: dict, template: Template, resolved: dict) -> list[dict]:
+    async def _persist(
+        self, client: ComfyuiClient, entry: dict, template: Template, resolved: dict, inputs: Optional[dict] = None
+    ) -> list[dict]:
         outputs = entry.get("outputs") if isinstance(entry.get("outputs"), dict) else {}
         files = []
         for node_id in sorted(outputs, key = _natural_key):
@@ -520,6 +548,19 @@ class ComfyJobRunner:
         ]
         created_at = time.time()
         batch_size = len(files)
+        # Image templates also record what the native Images page records for its conditioned workflows. The input
+        # bytes are never kept: comfyui_inputs says which gallery image each slot came from (null for an upload).
+        extra: dict[str, Any] = {}
+        if template.kind in _WORKFLOWS:
+            extra["workflow"] = _WORKFLOWS[template.kind]
+        if template.image_slots:
+            extra["comfyui_inputs"] = {slot: getattr(plan, "gallery_id", None) for slot, plan in (inputs or {}).items()}
+            if len(template.image_slots) > 1:
+                extra["reference_image_count"] = len(template.image_slots) - 1
+        if template.kind == "img2img" and resolved.get("denoise") is not None:
+            extra["strength"] = resolved["denoise"]
+        if resolved.get("reference_resolution") is not None:
+            extra["reference_resolution"] = resolved["reference_resolution"]
 
         def save() -> list[dict]:
             from PIL import Image
@@ -553,6 +594,7 @@ class ComfyJobRunner:
                             "comfyui_template": template.id,
                             "sampler": resolved.get("sampler"),
                             "scheduler": resolved.get("scheduler"),
+                            **extra,
                         },
                     )
                 )
