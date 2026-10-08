@@ -1110,3 +1110,46 @@ def test_no_deadline_when_the_idle_free_is_switched_off(idle):
         assert arbiter.comfyui_idle_free_at() is None and not _marker().exists()
 
     run(go())
+
+
+def test_a_free_of_own_comfyui_clears_the_idle_deadline(idle):
+    async def go():
+        idle.gate["release"] = asyncio.Event()
+        arbiter.schedule_comfyui_idle_free()
+        await _settle()
+        task = arbiter._idle_free
+        assert arbiter.comfyui_idle_free_at() is not None and _marker().exists()
+        assert await arbiter.free_comfyui() == [OWN, PEER]
+        await _settle()
+        assert task.cancelled() and arbiter.comfyui_idle_free_at() is None and not _marker().exists()
+
+    run(go())
+
+
+def test_a_free_that_skips_own_comfyui_keeps_the_idle_deadline(idle):
+    async def go():
+        idle.gate["release"] = asyncio.Event()
+        arbiter.schedule_comfyui_idle_free()
+        await _settle()
+        idle.comfy[OWN]["running"] = 1
+        assert await arbiter.free_comfyui() == [PEER]
+        assert arbiter.comfyui_idle_free_at() is not None and _marker().exists()
+        arbiter.cancel_comfyui_idle_free()
+        await _settle()
+
+    run(go())
+
+
+def test_cancel_removes_a_marker_left_by_an_earlier_process(idle):
+    _marker().parent.mkdir(parents = True, exist_ok = True)
+    _marker().write_text('{"free_at": 1.0}')
+    arbiter.cancel_comfyui_idle_free()
+    assert not _marker().exists()
+
+
+def test_clear_stale_idle_marker_at_startup(idle):
+    _marker().parent.mkdir(parents = True, exist_ok = True)
+    _marker().write_text('{"free_at": 1.0}')
+    arbiter.clear_stale_idle_marker()
+    assert not _marker().exists() and arbiter.comfyui_idle_free_at() is None
+    arbiter.clear_stale_idle_marker()
