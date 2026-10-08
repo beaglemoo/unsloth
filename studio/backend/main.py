@@ -838,6 +838,13 @@ async def lifespan(app: FastAPI):
     if overlay_dir.is_dir():
         shutil.rmtree(overlay_dir, ignore_errors = True)
 
+    # The tray's idle-free countdown marker outlives a quit; no timer survives a restart.
+    try:
+        from core.inference.attached.arbiter import clear_stale_idle_marker
+        clear_stale_idle_marker()
+    except Exception:  # noqa: BLE001 -- a phantom countdown is cosmetic
+        _lifespan_log.debug("could not clear the ComfyUI idle marker", exc_info = True)
+
     # Before the first writer, so startup's own connections stop checkpointing too.
     try:
         from storage.studio_db import open_wal_keeper

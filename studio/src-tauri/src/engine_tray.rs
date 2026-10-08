@@ -181,6 +181,18 @@ fn read_idle_free_at() -> Option<f64> {
     parse_idle_marker(&std::fs::read_to_string(engines_home()?.join("comfyui-idle.json")).ok()?)
 }
 
+/// Drop the countdown marker in `home`: after a manual unload nothing is left for the idle free to
+/// do, and a stale file would keep the tray counting down. A missing file is fine.
+pub(crate) fn remove_idle_marker_in(home: &std::path::Path) {
+    let _ = std::fs::remove_file(home.join("comfyui-idle.json"));
+}
+
+fn clear_idle_marker() {
+    if let Some(home) = engines_home() {
+        remove_idle_marker_in(&home);
+    }
+}
+
 const FAILURE_REASON_MAX: usize = 90;
 
 /// "oMLX failing: <reason>", the reason cut to fit a menu row.
@@ -758,6 +770,7 @@ async fn free_comfyui(urls: &EngineUrls) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
     if response.status().is_success() {
+        clear_idle_marker();
         Ok(())
     } else {
         Err(format!("HTTP {}", response.status().as_u16()))
@@ -1342,6 +1355,18 @@ mod tests {
             resident_bytes: None,
             idle_free_remaining_s: None,
         }
+    }
+
+    #[test]
+    fn removing_the_idle_marker_clears_it_and_tolerates_a_missing_file() {
+        let home = std::env::temp_dir().join(format!("engine-tray-idle-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let marker = home.join("comfyui-idle.json");
+        std::fs::write(&marker, r#"{"free_at": 9999999999}"#).unwrap();
+        remove_idle_marker_in(&home);
+        assert!(!marker.exists());
+        remove_idle_marker_in(&home);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
