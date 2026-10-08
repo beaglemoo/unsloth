@@ -40,6 +40,14 @@ TEMPLATE = "qwen-image-2.1-t2i"
 BODY = {"template_id": TEMPLATE, "prompt": "a red fox", "seed": 7, "steps": 4, "width": 512, "height": 512}
 
 
+# The shape of ComfyUI's /object_info/KSampler: input.required.<name> = [choices, options].
+KSAMPLER_INFO = {"KSampler": {"input": {"required": {
+    "model": ["MODEL", {}],
+    "sampler_name": [["euler", "res_multistep", "er_sde"], {}],
+    "scheduler": [["simple", "kl_optimal"], {}],
+}}}}
+
+
 class RouteComfy(FakeComfy):
     def __init__(self):
         super().__init__()
@@ -47,7 +55,14 @@ class RouteComfy(FakeComfy):
             "UNETLoader", "CLIPLoader", "VAELoader", "TextEncodeQwenImage21", "EmptyLatentImage", "KSampler",
             "VAEDecode", "SaveImage", "PreviewImage", "CheckpointLoaderSimple", "CLIPTextEncode")}
 
+    ksampler_info: dict | None = None
+
     def handle(self, request):
+        if request.url.path == "/object_info/KSampler":
+            self.calls.append((request.method, request.url.path))
+            if not self.up:
+                raise httpx.ConnectError("refused", request = request)
+            return httpx.Response(200, json = self.ksampler_info if self.ksampler_info is not None else KSAMPLER_INFO)
         if request.url.path == "/object_info":
             if not self.up:
                 raise httpx.ConnectError("refused", request = request)
@@ -74,6 +89,7 @@ def world(monkeypatch, tmp_path):
         raise httpx.ConnectError("no oMLX in tests", request = request)
 
     monkeypatch.setattr(routes, "OmlxClient", lambda url: OmlxClient(url, transport = httpx.MockTransport(refuse)))
+    monkeypatch.setattr(gen_routes, "_samplers_cache", None)
     monkeypatch.setenv("UNSLOTH_STUDIO_HOME", str(tmp_path / "studio"))
     monkeypatch.setenv("UNSLOTH_COMFYUI_TEMPLATES_DIR", str(tmp_path / "templates"))
     monkeypatch.setenv("UNSLOTH_ENGINES_HOME", str(tmp_path / "engines"))
@@ -129,7 +145,7 @@ def test_new_routes_are_404_when_the_flag_is_off(client, world):
     for method, path, body in (
         ("get", "/templates", None), ("post", "/templates/import", {"name": "x", "graph": {}}),
         ("delete", "/templates/user:x", None), ("post", "/generate", BODY),
-        ("get", "/progress", None), ("post", "/generate/cancel", None),
+        ("get", "/progress", None), ("post", "/generate/cancel", None), ("get", "/samplers", None),
     ):
         assert client.request(method.upper(), url(path), json = body).status_code == 404, path
     assert world.fake.calls == []
@@ -146,7 +162,8 @@ def test_new_routes_require_owner(world):
     app.dependency_overrides[policy.require_owner] = not_owner
     with TestClient(app) as test_client:
         for method, path in (("get", "/templates"), ("post", "/generate"), ("get", "/progress"),
-                             ("post", "/generate/cancel"), ("post", "/templates/import"), ("delete", "/templates/user:x")):
+                             ("post", "/generate/cancel"), ("post", "/templates/import"), ("delete", "/templates/user:x"),
+                             ("get", "/samplers")):
             assert test_client.request(method.upper(), url(path)).status_code == 403, path
     assert world.fake.calls == [] and world.admissions == 0
 
@@ -306,6 +323,47 @@ def test_cancel_route(client, monkeypatch):
 
     monkeypatch.setattr(jobs, "_runner", Active())
     assert client.post(url("/generate/cancel")).json() == {"cancelled": True}
+
+
+# ------------------------------------------------------------------ samplers
+
+
+def test_samplers_come_from_comfyui_object_info(client, world):
+    body = client.get(url("/samplers")).json()
+    assert body == {"samplers": ["euler", "res_multistep", "er_sde"], "schedulers": ["simple", "kl_optimal"], "source": "comfyui"}
+    assert world.fake.count("GET", "/object_info/KSampler") == 1
+
+
+def test_samplers_are_cached_briefly_then_refetched(client, world):
+    client.get(url("/samplers"))
+    world.fake.ksampler_info = {"KSampler": {"input": {"required": {
+        "sampler_name": [["euler", "new_one"], {}], "scheduler": [["simple"], {}]}}}}
+    assert client.get(url("/samplers")).json()["samplers"] == ["euler", "res_multistep", "er_sde"]
+    assert world.fake.count("GET", "/object_info/KSampler") == 1
+    expiry, *rest = gen_routes._samplers_cache
+    gen_routes._samplers_cache = (0.0, *rest)
+    assert client.get(url("/samplers")).json()["samplers"] == ["euler", "new_one"]
+    assert world.fake.count("GET", "/object_info/KSampler") == 2
+
+
+def test_samplers_fall_back_to_the_static_lists_when_comfyui_is_down(client, world):
+    world.fake.up = False
+    body = client.get(url("/samplers")).json()
+    assert body["source"] == "fallback"
+    assert body["samplers"] == gen_routes.FALLBACK_SAMPLERS and "euler" in body["samplers"]
+    assert body["schedulers"] == gen_routes.FALLBACK_SCHEDULERS and "simple" in body["schedulers"]
+    # Not cached: the live list is used as soon as ComfyUI is back.
+    world.fake.up = True
+    assert client.get(url("/samplers")).json()["source"] == "comfyui"
+
+
+@pytest.mark.parametrize("payload", [{}, {"KSampler": {"input": {"required": {}}}},
+                                     {"KSampler": {"input": {"required": {"sampler_name": [[], {}], "scheduler": [["a"], {}]}}}},
+                                     {"KSampler": {"input": {"required": {"sampler_name": ["COMBO", {}], "scheduler": [["a"], {}]}}}}])
+def test_samplers_fall_back_on_an_unexpected_payload(client, world, payload):
+    world.fake.ksampler_info = payload
+    assert client.get(url("/samplers")).json()["source"] == "fallback"
+    assert gen_routes._samplers_cache is None
 
 
 # ---------------------------------------------------------------- templates
