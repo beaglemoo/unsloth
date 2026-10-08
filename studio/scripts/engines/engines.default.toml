@@ -3,8 +3,9 @@
 # Read by the omlx-launch and comfyui-launch wrappers and by the Studio
 # desktop tray. Written by studio/scripts/build-engines-mac.sh only when it is
 # missing, so edit freely. build-engines-mac.sh and update-engines-mac.sh remove
-# the retired OMLX_PEER_EVICT_URLS setting from old generated files (backup:
-# engines.toml.bak-<timestamp>). "~" is expanded in every path.
+# the retired OMLX_PEER_EVICT_URLS setting from old generated files, replace the old default ComfyUI
+# extra_args with the one that has --cache-none and add the missing MPS watermark keys (backup:
+# engines.toml.bak-<timestamp>; a customized extra_args is never touched). "~" is expanded in every path.
 #
 # Per-run overrides (used for testing on alternate ports):
 #   UNSLOTH_ENGINES_CONFIG=<other toml>  UNSLOTH_ENGINES_HOME=<dir>
@@ -32,7 +33,13 @@ data_dir = "~/.unsloth/engines/comfyui-data"
 # Read-only shared weights, written into extra_model_paths.unsloth.yaml at every start.
 model_dirs = ["~/Library/Application Support/StoryPressRuntime/ComfyUI/models"]
 # The StoryPress-tested Apple Silicon flags plus no custom nodes and no internet for the web UI.
-extra_args = ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline"]
+# --cache-none drops cached node outputs after each job so image-edit jobs do not keep growing.
+extra_args = ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline", "--cache-none"]
 
 [comfyui.env]
 PYTORCH_ENABLE_MPS_FALLBACK = "1"
+# Qwen-Image 2.1 edit jobs grew ComfyUI to 74-84 GB because freed MPS attention buffers are only reclaimed
+# at PyTorch's default low watermark (78 GiB). Reclaim at 0.5 x the Metal limit and fail the job cleanly
+# at 0.8 instead of letting macOS swap or kill the process. See comfyui-edit-memory-diag.md.
+PYTORCH_MPS_LOW_WATERMARK_RATIO = "0.5"
+PYTORCH_MPS_HIGH_WATERMARK_RATIO = "0.8"
