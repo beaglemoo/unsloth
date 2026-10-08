@@ -1373,8 +1373,18 @@ def test_wheel_gate_requires_the_fork_modules(tmp_path):
     no_template = builder.replace('z.writestr("unsloth/x.py", "")', with_pins)
     result = fork_fn(tmp_path, f"DRY=0; {no_template} build_fork_wheel")
     assert result.returncode != 0 and "qwen-image-2.1-t2i.json" in result.stderr
-    template = 'z.writestr("studio/backend/core/inference/attached/comfyui_templates/qwen-image-2.1-t2i.json", "{}")'
-    good = builder.replace('z.writestr("unsloth/x.py", "")', f"{with_pins}; {template}")
+    prefix = "studio/backend/core/inference/attached/comfyui_templates"
+
+    def templates(*names):
+        return "; ".join(f'z.writestr("{prefix}/qwen-image-2.1-{name}.json", "{{}}")' for name in names)
+
+    only_t2i = builder.replace('z.writestr("unsloth/x.py", "")', f"{with_pins}; {templates('t2i')}")
+    result = fork_fn(tmp_path, f"DRY=0; {only_t2i} build_fork_wheel")
+    assert result.returncode != 0 and "qwen-image-2.1-img2img.json" in result.stderr
+    no_edit = builder.replace('z.writestr("unsloth/x.py", "")', f"{with_pins}; {templates('t2i', 'img2img')}")
+    result = fork_fn(tmp_path, f"DRY=0; {no_edit} build_fork_wheel")
+    assert result.returncode != 0 and "qwen-image-2.1-edit.json" in result.stderr
+    good = builder.replace('z.writestr("unsloth/x.py", "")', f"{with_pins}; {templates('t2i', 'img2img', 'edit')}")
     result = fork_fn(tmp_path, f'DRY=0; {good} build_fork_wheel; echo "wheel=$WHEEL"')
     assert result.returncode == 0, result.stderr
     assert "wheel=" in result.stdout and result.stdout.strip().endswith("unsloth-1.0-py3-none-any.whl")
