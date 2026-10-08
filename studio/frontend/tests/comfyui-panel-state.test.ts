@@ -371,7 +371,9 @@ test("sampler lists come from ComfyUI and fall back list by list", () => {
 import {
   type ComfyInput,
   REFERENCE_RESOLUTION_CHOICES,
+  applyRecall,
   editOutputSize,
+  keepsInputSize,
   pickTemplateForInput,
   sizeForInput,
 } from "../src/features/images/comfyui/comfyui-panel-state.ts";
@@ -468,6 +470,32 @@ test("editOutputSize follows ComfyUI's resize to resolution squared in multiples
   assert.deepEqual(editOutputSize(1500, 1000, 1024), { width: 1248, height: 832 });
   assert.deepEqual(editOutputSize(1000, 1500, 768), { width: 640, height: 928 });
   assert.deepEqual(REFERENCE_RESOLUTION_CHOICES, [512, 768, 1024]);
+});
+
+test("editOutputSize with resolution 0 follows the input size in multiples of 32", () => {
+  assert.deepEqual(editOutputSize(1000, 700, 0), { width: 992, height: 704 });
+  assert.deepEqual(editOutputSize(0, 0, 0), { width: 0, height: 0 });
+});
+
+test("a template defaulting to reference resolution 0 keeps 0 in defaults, reconcile and recall", () => {
+  const keep = templatesFromApi({
+    templates: [{ ...EDIT, id: "user:keep", source: "user", defaults: { ...EDIT.defaults, reference_resolution: 0 } }],
+  }).templates[0];
+  const [, , edit] = all();
+  assert.equal(keepsInputSize(keep), true);
+  assert.equal(keepsInputSize(edit), false);
+  assert.equal(defaultParams(keep).referenceResolution, 0);
+  assert.equal(reconcileParams({ ...defaultParams(keep), referenceResolution: 0 }, keep).referenceResolution, 0);
+  assert.equal(reconcileParams({ ...defaultParams(keep), referenceResolution: 700 }, keep).referenceResolution, 704);
+  const recalled = applyRecall(
+    { templateId: "user:keep", params: { referenceResolution: 0 }, inputs: {} },
+    [keep],
+  );
+  assert.equal(recalled?.params.referenceResolution, 0);
+  const sent = buildGenerateRequest(keep, { ...defaultParams(keep), prompt: "a fox" }, { image: GALLERY });
+  assert.equal(sent.ok && sent.body.reference_resolution, 0);
+  // A template that does not default to 0 still refuses it (the backend would reject it).
+  assert.equal(reconcileParams({ ...defaultParams(edit), referenceResolution: 0 }, edit).referenceResolution, 256);
 });
 
 test("pickTemplateForInput keeps an image template, else prefers img2img", () => {
