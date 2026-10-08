@@ -305,6 +305,8 @@ export interface GalleryImage {
   // (sampler above carries the ComfyUI sampler there).
   engine?: string | null;
   comfyui_template?: string | null;
+  // Per ComfyUI image slot: the gallery id of the input when it came from the gallery, else null (uploads are not kept).
+  comfyui_inputs?: Record<string, string | null> | null;
   scheduler?: string | null;
   created_at: number;
   // Library state, not recipe: stored beside the PNG, absent on records written before this existed.
