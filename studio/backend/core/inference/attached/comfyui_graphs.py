@@ -187,6 +187,20 @@ def validate_api_graph(obj: Any) -> dict:
     return obj
 
 
+# Nodes whose output 1 is a MASK; an uploaded image is flattened to RGB, so a mask would be empty.
+_MASK_OUTPUT_NODES = {"LoadImage", "LoadImageOutput"}
+
+
+def _check_no_masks(graph: dict) -> None:
+    """Reject inpainting graphs: ``LoadImageMask``, or a link to the MASK output (index 1) of a LoadImage."""
+    if any(n["class_type"] == "LoadImageMask" for n in graph.values()):
+        raise ComfyTemplateError("Mask inputs are not supported yet.")
+    for node in graph.values():
+        for value in node["inputs"].values():
+            if _is_link(value) and value[1] == 1 and graph[value[0]]["class_type"] in _MASK_OUTPUT_NODES:
+                raise ComfyTemplateError("Mask inputs are not supported yet.")
+
+
 def _check_slots(graph: dict, slots: Any) -> dict:
     if not isinstance(slots, dict):
         raise ComfyTemplateError("slots must be an object.")
@@ -258,6 +272,7 @@ def _template_from_dict(raw: Any, *, source: str, path: Optional[Path] = None, t
     if not isinstance(raw, dict) or raw.get("schema") != SCHEMA:
         raise ComfyTemplateError("Unsupported template schema.")
     graph = validate_api_graph(raw.get("graph"))
+    _check_no_masks(graph)
     tid = template_id or raw.get("id")
     if not isinstance(tid, str) or not tid:
         raise ComfyTemplateError("Template has no id.")
@@ -612,8 +627,7 @@ def detect_slots(graph: dict) -> dict:
             if name not in ("prompt", "negative_prompt", "seed"):
                 defaults[name] = _PLACEHOLDER_DEFAULTS[name]
 
-    if any(n["class_type"] == "LoadImageMask" for n in graph.values()):
-        raise ComfyTemplateError("Mask inputs are not supported yet.")
+    _check_no_masks(graph)
     image_slots = _detect_image_slots(graph)
 
     def bind(name: str, node_id: str, key: str, *, record_default: bool = True) -> None:
