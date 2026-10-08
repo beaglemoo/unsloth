@@ -314,7 +314,7 @@ class ComfyuiClient:
         except httpx.HTTPStatusError as exc:
             raise ComfyuiError(f"ComfyUI returned HTTP {exc.response.status_code} for /view") from exc
         except httpx.HTTPError as exc:
-            raise ComfyuiError(f"ComfyUI is unreachable ({type(exc).__name__})") from exc
+            raise ComfyuiError(f"ComfyUI is unreachable ({exc.__class__.__name__})") from exc
 
     async def sampler_options(self) -> tuple[list[str], list[str]]:
         """``(samplers, schedulers)`` ComfyUI's ``KSampler`` node accepts, from ``/object_info/KSampler``."""
