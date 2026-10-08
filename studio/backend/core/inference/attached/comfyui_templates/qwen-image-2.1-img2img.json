@@ -97,7 +97,7 @@
         "cfg": 1,
         "sampler_name": "euler",
         "scheduler": "simple",
-        "denoise": 0.6
+        "denoise": 0.8
       }
     },
     "9": {
@@ -216,7 +216,7 @@
     "height": 1024,
     "sampler": "euler",
     "scheduler": "simple",
-    "denoise": 0.6
+    "denoise": 0.8
   },
   "limits": {
     "steps": [
