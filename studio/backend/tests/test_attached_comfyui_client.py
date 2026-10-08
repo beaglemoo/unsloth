@@ -322,3 +322,67 @@ def test_cancel_job_without_the_endpoint_is_none_and_other_failures_raise():
                      httpx.Response(200, json = {"cancelled": "yes"}), httpx.Response(200, json = [])):
         with pytest.raises(ComfyuiError):
             run(_client(lambda r, response = response: response).cancel_job("abc"))
+
+
+# ----------------------------------------------------------------- upload_image
+
+
+def _multipart_fields(request) -> dict:
+    """``{field name: (filename or None, bytes)}`` of a multipart request body."""
+    boundary = request.headers["content-type"].split("boundary=")[1].encode()
+    fields = {}
+    for part in request.content.split(b"--" + boundary)[1:-1]:
+        head, _, body = part.strip(b"\r\n").partition(b"\r\n\r\n")
+        disposition = head.decode().split("\r\n")[0]
+        name = disposition.split('name="')[1].split('"')[0]
+        filename = disposition.split('filename="')[1].split('"')[0] if 'filename="' in disposition else None
+        fields[name] = (filename, body)
+    return fields
+
+
+def test_upload_image_sends_the_file_type_subfolder_and_overwrite():
+    seen = {}
+
+    def handler(request):
+        assert request.method == "POST" and request.url.path == "/upload/image"
+        assert request.extensions["timeout"]["read"] == 30
+        seen.update(_multipart_fields(request))
+        return httpx.Response(200, json = {"name": "a-image.png", "subfolder": "unsloth-inputs", "type": "temp"})
+
+    reply = run(_client(handler).upload_image("a-image.png", b"\x89PNGdata", subfolder = "unsloth-inputs"))
+    assert reply == {"name": "a-image.png", "subfolder": "unsloth-inputs", "type": "temp"}
+    assert seen["image"] == ("a-image.png", b"\x89PNGdata")
+    assert seen["type"] == (None, b"temp") and seen["subfolder"] == (None, b"unsloth-inputs")
+    assert seen["overwrite"] == (None, b"true")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(400, json = {"error": "no"}),
+        httpx.Response(500),
+        httpx.Response(200, text = "not json"),
+        httpx.Response(200, json = ["a-image.png"]),
+        httpx.Response(200, json = {"name": "renamed.png", "subfolder": "unsloth-inputs", "type": "temp"}),
+        httpx.Response(200, json = {"name": "a-image.png", "subfolder": "other", "type": "temp"}),
+        httpx.Response(200, json = {"name": "a-image.png", "subfolder": "unsloth-inputs", "type": "input"}),
+        httpx.Response(200, json = {}),
+    ],
+)
+def test_upload_image_refuses_errors_and_unexpected_replies(response):
+    with pytest.raises(ComfyuiError):
+        run(_client(lambda request: response).upload_image("a-image.png", b"x", subfolder = "unsloth-inputs"))
+
+
+def test_upload_image_names_the_unexpected_name():
+    reply = httpx.Response(200, json = {"name": "x.png", "subfolder": "unsloth-inputs", "type": "temp"})
+    with pytest.raises(ComfyuiError, match = "unexpected name"):
+        run(_client(lambda request: reply).upload_image("a-image.png", b"x", subfolder = "unsloth-inputs"))
+
+
+def test_upload_image_transport_error_is_a_comfyui_error():
+    def handler(request):
+        raise httpx.ConnectError("refused", request = request)
+
+    with pytest.raises(ComfyuiError, match = "unreachable"):
+        run(_client(handler).upload_image("a-image.png", b"x", subfolder = "unsloth-inputs"))
