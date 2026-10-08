@@ -33,7 +33,13 @@ from dataclasses import replace  # noqa: E402
 from utils.attached_engines_settings import DEFAULT_CONFIG  # noqa: E402
 
 from .test_attached_comfyui_jobs import PID, FakeComfy, FakeConnect, FakeWS, _no_sleep, msg  # noqa: E402
-from .test_attached_comfyui_graphs import PLACEHOLDER_GRAPH, SD_GRAPH  # noqa: E402
+from .test_attached_comfyui_graphs import (  # noqa: E402
+    IMG2IMG_GRAPH,
+    PICTUREPRESS_EDIT,
+    PLACEHOLDER_GRAPH,
+    SD_GRAPH,
+    STORYPRESS_REFERENCE,
+)
 
 BASE = "/api/engines/attached/comfyui"
 TEMPLATE = "qwen-image-2.1-t2i"
@@ -53,7 +59,8 @@ class RouteComfy(FakeComfy):
         super().__init__()
         self.object_info = {c: {} for c in (
             "UNETLoader", "CLIPLoader", "VAELoader", "TextEncodeQwenImage21", "EmptyLatentImage", "KSampler",
-            "VAEDecode", "SaveImage", "PreviewImage", "CheckpointLoaderSimple", "CLIPTextEncode")}
+            "VAEDecode", "SaveImage", "PreviewImage", "CheckpointLoaderSimple", "CLIPTextEncode",
+            "LoadImage", "ImageScale", "VAEEncode")}
 
     ksampler_info: dict | None = None
 
@@ -460,3 +467,144 @@ def test_status_block_carries_the_idle_free_deadline(client, world, monkeypatch)
     monkeypatch.setattr("routes.attached_engines.time.time", lambda: 1_700_000_048.0)
     block = client.get("/api/engines/attached/status").json()["comfyui"]
     assert block["idle_free_at"] == 1_700_000_300.0 and block["idle_free_in_s"] == 252.0
+
+
+# ------------------------------------------------------------- image inputs
+
+IMG2IMG = "qwen-image-2.1-img2img"
+EDIT = "qwen-image-2.1-edit"
+
+
+def data_url(size = (40, 30)) -> str:
+    import base64
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, (30, 120, 220)).save(buf, format = "PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def image_body(template_id = IMG2IMG, **extra) -> dict:
+    return {**BODY, "template_id": template_id, "input_images": {"image": {"data": data_url()}}, **extra}
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"input_images": {"image": {}}},
+        {"input_images": {"image": {"data": "abc", "gallery_id": "a" * 32}}},
+        {"input_images": {"image": {"gallery_id": "../etc/passwd"}}},
+        {"input_images": {"image": {"gallery_id": ""}}},
+        {"input_images": {"image": {"gallery_id": "x" * 129}}},
+        {"input_images": {f"image_{i}": {"data": "abc"} for i in range(5)}},
+        {"input_images": {"image": "not an object"}},
+        {"denoise": 0}, {"denoise": 1.5}, {"denoise": -0.1},
+        {"reference_resolution": -1}, {"reference_resolution": 4097},
+    ],
+)
+def test_generate_validates_image_inputs(client, world, patch):
+    assert client.post(url("/generate"), json = {**image_body(), **patch}).status_code == 422
+    assert world.fake.calls == []
+
+
+def test_oversized_inputs_are_refused(client, world, monkeypatch):
+    one_too_big = {"image": {"data": "A" * (gen_routes.MAX_INPUT_DATA_CHARS + 1)}}
+    assert client.post(url("/generate"), json = {**image_body(), "input_images": one_too_big}).status_code == 422
+    monkeypatch.setattr(gen_routes, "MAX_TOTAL_INPUT_DATA_CHARS", 100)
+    two = {"image": {"data": "A" * 60}, "image_2": {"data": "A" * 60}}
+    assert client.post(url("/generate"), json = {**image_body(), "input_images": two}).status_code == 422
+    assert world.fake.calls == []
+
+
+def test_generate_with_an_image_returns_the_recipe_with_inputs(client, world):
+    finish_on_submit(world)
+    response = client.post(url("/generate"), json = image_body(denoise = 0.5))
+    assert response.status_code == 200, response.text
+    [image] = response.json()["images"]
+    assert (image["workflow"], image["strength"], image["comfyui_inputs"]) == ("img2img", 0.5, {"image": None})
+    assert image["comfyui_template"] == IMG2IMG and image["reference_resolution"] is None
+    sent = world.fake.submitted[0]["prompt"]
+    assert sent["5"]["inputs"]["image"].startswith("unsloth-inputs/") and sent["8"]["inputs"]["denoise"] == 0.5
+    assert len(world.fake.uploads) == 1
+
+
+def test_generate_an_edit_with_a_gallery_image(client, world):
+    from core.inference import image_gallery
+    from PIL import Image
+
+    made = image_gallery.save(
+        Image.new("RGB", (64, 48)), {"prompt": "fox", "width": 64, "height": 48, "steps": 1, "guidance": 1.0, "seed": 1, "created_at": 1.0}
+    )
+    finish_on_submit(world)
+    body = {**BODY, "template_id": EDIT, "input_images": {"image": {"gallery_id": made["id"]}}, "reference_resolution": 1000}
+    response = client.post(url("/generate"), json = body)
+    assert response.status_code == 200, response.text
+    [image] = response.json()["images"]
+    assert (image["workflow"], image["reference_resolution"], image["strength"]) == ("edit", 992, None)
+    assert image["comfyui_inputs"] == {"image": made["id"]}
+
+
+def test_generate_image_errors_are_params_errors_before_admission(client, world):
+    missing = client.post(url("/generate"), json = {**BODY, "template_id": IMG2IMG})
+    assert missing.status_code == 422 and missing.headers["X-Comfy-Error"] == "params"
+    assert "needs an input image" in missing.json()["detail"]
+    unknown = client.post(url("/generate"), json = {**BODY, "input_images": {"image": {"data": data_url()}}})
+    assert unknown.status_code == 422 and unknown.headers["X-Comfy-Error"] == "params"
+    gone = client.post(url("/generate"), json = {**BODY, "template_id": IMG2IMG, "input_images": {"image": {"gallery_id": "nothere"}}})
+    assert gone.status_code == 422 and gone.headers["X-Comfy-Error"] == "params" and "no longer exists" in gone.json()["detail"]
+    junk = client.post(url("/generate"), json = image_body() | {"input_images": {"image": {"data": "%%%"}}})
+    assert junk.status_code == 422 and junk.headers["X-Comfy-Error"] == "params"
+    assert world.admissions == 0 and world.fake.uploads == []
+
+
+def test_templates_list_the_image_templates_with_kinds_and_slots(client, world):
+    listed = {t["id"]: t for t in client.get(url("/templates")).json()["templates"]}
+    assert [t["kind"] for t in listed.values()] == ["t2i", "t2i", "img2img", "edit"]
+    img2img, edit, t2i = listed[IMG2IMG], listed[EDIT], listed[TEMPLATE]
+    assert img2img["image_slots"] == edit["image_slots"] == [{"name": "image", "label": "Input image", "required": True}]
+    assert t2i["image_slots"] == []
+    assert "denoise" in img2img["slots"] and "width" in img2img["slots"] and img2img["defaults"]["denoise"] == 0.6
+    assert "reference_resolution" in edit["slots"] and "width" not in edit["slots"]
+    assert edit["defaults"]["reference_resolution"] == 1024 and edit["limits"]["batch_size"] == [1, 1]
+    assert img2img["limits"]["denoise"] == [0.01, 1.0] and edit["limits"]["reference_multiple"] == 32
+
+
+def test_import_accepts_image_graphs_and_reports_their_slots(client, world):
+    storypress = client.post(url("/templates/import"), json = {"name": "StoryPress ref", "graph": json.loads(STORYPRESS_REFERENCE)})
+    assert storypress.status_code == 200, storypress.text
+    body = storypress.json()
+    assert body["template"]["kind"] == "edit" and body["checked_nodes"] is True
+    assert body["template"]["image_slots"] == [{"name": "image", "label": "Input image 1", "required": True}]
+    assert body["template"]["defaults"]["reference_resolution"] == 0
+    picturepress = client.post(url("/templates/import"), json = {"name": "PicturePress edit", "graph": json.loads(PICTUREPRESS_EDIT)})
+    assert picturepress.status_code == 200, picturepress.text
+    template = picturepress.json()["template"]
+    assert template["kind"] == "edit" and template["defaults"]["reference_resolution"] == 1024
+    assert "reference_resolution" in template["slots"] and len(template["image_slots"]) == 1
+    heuristic = client.post(url("/templates/import"), json = {"name": "Photo", "graph": IMG2IMG_GRAPH})
+    assert heuristic.status_code == 200, heuristic.text
+    assert heuristic.json()["template"]["kind"] == "img2img" and "denoise" in heuristic.json()["template"]["slots"]
+
+
+def test_import_refuses_masks_and_too_many_images(client, world):
+    masked = {**SD_GRAPH, "20": {"class_type": "LoadImageMask", "inputs": {"image": "m.png", "channel": "alpha"}}}
+    response = client.post(url("/templates/import"), json = {"name": "masked", "graph": masked})
+    assert response.status_code == 422 and "Mask" in response.json()["detail"]
+    many = {**SD_GRAPH, **{str(20 + i): {"class_type": "LoadImage", "inputs": {"image": "x.png"}} for i in range(5)}}
+    response = client.post(url("/templates/import"), json = {"name": "many", "graph": many})
+    assert response.status_code == 422 and "at most 4" in response.json()["detail"]
+
+
+def test_an_imported_image_graph_then_generates(client, world):
+    imported = client.post(url("/templates/import"), json = {"name": "PicturePress edit", "graph": json.loads(PICTUREPRESS_EDIT)})
+    template_id = imported.json()["template"]["id"]
+    assert template_id == "user:picturepress-edit"
+    finish_on_submit(world)
+    response = client.post(url("/generate"), json = image_body(template_id, reference_resolution = 768))
+    assert response.status_code == 200, response.text
+    [image] = response.json()["images"]
+    assert (image["workflow"], image["reference_resolution"], image["comfyui_template"]) == ("edit", 768, template_id)
+    graph = world.fake.submitted[0]["prompt"]
+    assert graph["4"]["inputs"]["image"].startswith("unsloth-inputs/") and graph["5"]["inputs"]["resolution"] == 768
