@@ -489,6 +489,27 @@ def test_detect_rejects_five_input_images_and_masks():
         g.detect_slots(masked)
 
 
+def test_detect_rejects_a_linked_load_image_mask_output():
+    graph = copy.deepcopy(IMG2IMG_GRAPH)
+    graph["30"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["13", 0], "mask": ["10", 1]}}
+    with pytest.raises(g.ComfyTemplateError, match = "Mask inputs"):
+        g.detect_slots(graph)
+
+
+def test_detect_accepts_a_graph_using_only_the_image_output():
+    graph = copy.deepcopy(IMG2IMG_GRAPH)
+    graph["30"] = {"class_type": "ImageScale", "inputs": {"image": ["10", 0]}}
+    assert "image" in g.detect_slots(graph)["image_slots"]
+
+
+def test_a_saved_user_template_linking_the_mask_output_is_skipped(_user_dir):
+    graph = copy.deepcopy(IMG2IMG_GRAPH)
+    graph["30"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["13", 0], "mask": ["10", 1]}}
+    raw = {"schema": g.SCHEMA, "id": "x", "name": "Masked", "graph": graph}
+    with pytest.raises(g.ComfyTemplateError, match = "Mask inputs"):
+        g._template_from_dict(raw, source = "user")
+
+
 def test_an_image_placeholder_on_another_node_is_unknown():
     graph = copy.deepcopy(SD_GRAPH)
     graph["6"]["inputs"]["text"] = "{{reference_image}}"
