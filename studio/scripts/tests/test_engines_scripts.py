@@ -2080,8 +2080,12 @@ def test_generated_config_has_omlx_and_comfyui():
     assert "OMLX_PEER_EVICT_URLS" not in config["omlx"]["env"]
     comfy = config["comfyui"]
     assert comfy["port"] == 8844 and "host" not in comfy
-    assert comfy["extra_args"] == ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline"]
-    assert comfy["env"] == {"PYTORCH_ENABLE_MPS_FALLBACK": "1"}
+    assert comfy["extra_args"] == ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline", "--cache-none"]
+    assert comfy["env"] == {
+        "PYTORCH_ENABLE_MPS_FALLBACK": "1",
+        "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.5",
+        "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.8",
+    }
     assert comfy["model_dirs"] == ["~/Library/Application Support/StoryPressRuntime/ComfyUI/models"]
     # the migration copies from "# ComfyUI (bundled helper" to the end of the file
     assert (ENGINES / "engines.default.toml").read_text().count("# ComfyUI (bundled helper") == 1
@@ -2124,10 +2128,15 @@ def test_the_blank_line_before_the_appended_section_is_exactly_one(home, origina
     assert config.read_text() == joined + COMFYUI_BLOCK
 
 
+WM = 'PYTORCH_MPS_LOW_WATERMARK_RATIO = "0.5"\nPYTORCH_MPS_HIGH_WATERMARK_RATIO = "0.8"\n'
+
+
 @pytest.mark.parametrize("text", [
-    '[omlx]\nport = 1\n[comfyui]\nport = 9999\n',
-    '[omlx]\nport = 1\n[comfyui.env]\nX = "1"\n',
-    '[ comfyui ]\nport = 5\n',
+    f'[omlx]\nport = 1\n[comfyui]\nport = 9999\n[comfyui.env]\n{WM}',
+    f'[omlx]\nport = 1\n[comfyui.env]\nX = "1"\n{WM}',
+    f'[ comfyui ]\nport = 5\n[ comfyui.env ]\n{WM}',
+    # a customized extra_args stays, and so do user-chosen watermark values
+    '[comfyui]\nextra_args = ["--lowvram"]\n[comfyui.env]\nPYTORCH_MPS_LOW_WATERMARK_RATIO = "0.3"\nPYTORCH_MPS_HIGH_WATERMARK_RATIO = "1.0"\n',
 ])
 def test_an_existing_comfyui_section_is_left_untouched(home, text):
     config = home / "engines.toml"
@@ -2135,6 +2144,67 @@ def test_an_existing_comfyui_section_is_left_untouched(home, text):
     before = config.stat().st_mtime_ns
     result = build_fn(home, "migrate_config")
     assert result.returncode == 0 and config.read_text() == text and config.stat().st_mtime_ns == before
+    assert not list(home.glob("engines.toml.bak-*"))
+
+
+OLD_ARGS = 'extra_args = ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline"]'
+NEW_ARGS = 'extra_args = ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline", "--cache-none"]'
+
+
+def test_an_old_generated_comfyui_section_gets_cache_none_and_the_watermarks_in_one_backup(home):
+    import tomllib
+    original = f'# mine\n[comfyui]\nport = 8844\n# flags\n{OLD_ARGS}\n\n[comfyui.env]\nPYTORCH_ENABLE_MPS_FALLBACK = "1"\n'
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    assert "extra_args gained --cache-none" in result.stdout and "added PYTORCH_MPS_LOW_WATERMARK_RATIO" in result.stdout
+    text = config.read_text()
+    assert text.startswith(f'# mine\n[comfyui]\nport = 8844\n# flags\n{NEW_ARGS}\n\n[comfyui.env]\nPYTORCH_ENABLE_MPS_FALLBACK = "1"\n# Reclaim')
+    assert text.endswith(WM)
+    data = tomllib.loads(text)["comfyui"]
+    assert data["extra_args"][-1] == "--cache-none"
+    assert data["env"] == {"PYTORCH_ENABLE_MPS_FALLBACK": "1", "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.5", "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.8"}
+    backups = list(home.glob("engines.toml.bak-*"))
+    assert len(backups) == 1 and backups[0].read_text() == original
+    before = config.stat().st_mtime_ns
+    again = build_fn(home, "migrate_config")
+    assert again.returncode == 0 and "nothing to migrate" in again.stdout
+    assert config.stat().st_mtime_ns == before and list(home.glob("engines.toml.bak-*")) == backups
+
+
+def test_the_watermarks_go_into_the_env_section_even_when_another_section_follows(home):
+    import tomllib
+    original = '[comfyui]\nport = 1\n[comfyui.env]\nA = "1"\n\n# next\n[other]\nx = 1\n'
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    data = tomllib.loads(config.read_text())
+    assert data["comfyui"]["env"]["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] == "0.8" and data["other"] == {"x": 1}
+    assert config.read_text().index("PYTORCH_MPS_LOW") < config.read_text().index("[other]")
+
+
+def test_a_comfyui_section_without_an_env_section_gets_a_new_one(home):
+    import tomllib
+    config, result = config_migrate(home, '[comfyui]\nport = 1')
+    assert result.returncode == 0, result.stderr
+    assert config.read_text().startswith('[comfyui]\nport = 1\n\n[comfyui.env]\n')
+    assert tomllib.loads(config.read_text())["comfyui"]["env"]["PYTORCH_MPS_LOW_WATERMARK_RATIO"] == "0.5"
+
+
+def test_only_the_missing_watermark_is_added_and_a_customized_extra_args_is_kept(home):
+    import tomllib
+    original = '[comfyui]\nextra_args = ["--lowvram", "--offline"]\n[comfyui.env]\nPYTORCH_MPS_LOW_WATERMARK_RATIO = "0.3"\n'
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    assert "--cache-none" not in config.read_text()
+    env = tomllib.loads(config.read_text())["comfyui"]["env"]
+    assert env == {"PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.3", "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.8"}
+
+
+def test_an_inline_env_table_is_left_alone_instead_of_producing_invalid_toml(home):
+    import tomllib
+    original = '[comfyui]\nenv = { A = "1" }\n'
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == original and tomllib.loads(config.read_text())
     assert not list(home.glob("engines.toml.bak-*"))
 
 
@@ -2156,20 +2226,20 @@ def test_a_fresh_install_gets_the_default_file_with_the_comfyui_section(home, tm
 def test_peer_url_removal_also_removes_the_comment_the_old_migration_wrote(home):
     note = "# oMLX asks the ds4 launcher to unload when it needs memory (added by the engines.toml migration)."
     peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
-    config, result = config_migrate(home, f'[omlx.env]\nOMLX_NAX = "1"\n{note}\n{peer}\n[ds4]\nhost = "0.0.0.0"\n[comfyui]\n')
+    config, result = config_migrate(home, f'[omlx.env]\nOMLX_NAX = "1"\n{note}\n{peer}\n[ds4]\nhost = "0.0.0.0"\n[comfyui.env]\n{WM}')
     assert result.returncode == 0, result.stderr
-    assert config.read_text() == '[omlx.env]\nOMLX_NAX = "1"\n[ds4]\nhost = "0.0.0.0"\n[comfyui]\n'
+    assert config.read_text() == f'[omlx.env]\nOMLX_NAX = "1"\n[ds4]\nhost = "0.0.0.0"\n[comfyui.env]\n{WM}'
 
 
 def test_peer_url_removal_keeps_other_comments_and_a_non_adjacent_note(home):
     note = "# oMLX asks the ds4 launcher to unload."
     peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
-    config, result = config_migrate(home, f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n{peer}\n[comfyui]\n')
+    config, result = config_migrate(home, f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n{peer}\n[comfyui.env]\n{WM}')
     assert result.returncode == 0, result.stderr
-    assert config.read_text() == f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n[comfyui]\n'
-    other = 'x = 1\n# oMLX asks something else\n' + f'[omlx.env]\n# oMLX asks something else\n{peer}\n[comfyui]\n'
+    assert config.read_text() == f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n[comfyui.env]\n{WM}'
+    other = 'x = 1\n# oMLX asks something else\n' + f'[omlx.env]\n# oMLX asks something else\n{peer}\n[comfyui.env]\n{WM}'
     config, result = config_migrate(home, other)
-    assert config.read_text() == 'x = 1\n# oMLX asks something else\n[omlx.env]\n# oMLX asks something else\n[comfyui]\n'
+    assert config.read_text() == f'x = 1\n# oMLX asks something else\n[omlx.env]\n# oMLX asks something else\n[comfyui.env]\n{WM}'
 
 
 def test_peer_url_removal_preserves_config_and_backs_up_once(home):
@@ -2190,9 +2260,9 @@ def test_peer_url_removal_preserves_config_and_backs_up_once(home):
 
 
 @pytest.mark.parametrize("text", [
-    '[omlx]\nport = 9000\n[comfyui]\n',
-    '[omlx.env]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:9999"\n[comfyui]\n',
-    '[other]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"\n[comfyui]\n',
+    f'[omlx]\nport = 9000\n[comfyui.env]\n{WM}',
+    f'[omlx.env]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:9999"\n[comfyui.env]\n{WM}',
+    f'[other]\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"\n[comfyui.env]\n{WM}',
     '[omlx.env\ninvalid TOML',
 ])
 def test_config_noop_never_writes_or_backs_up(home, text):
