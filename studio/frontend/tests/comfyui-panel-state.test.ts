@@ -5,6 +5,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  FALLBACK_SAMPLER_OPTIONS,
+  SAMPLER_OPTIONS,
+  SCHEDULER_OPTIONS,
   type ComfyParams,
   type ComfyTemplate,
   MAX_LORAS,
@@ -20,6 +23,7 @@ import {
   queueLabel,
   randomSeed,
   reconcileParams,
+  samplerOptionsFromApi,
   snapSide,
   templatesFromApi,
 } from "../src/features/images/comfyui/comfyui-panel-state.ts";
@@ -344,4 +348,20 @@ test("graph import accepts an API-format object and rejects the rest", () => {
   const editor = parseGraphJson('{"nodes": [], "links": []}');
   assert.equal(editor.ok, false);
   assert.ok(!editor.ok && /API Format/.test(editor.error));
+});
+
+test("sampler lists come from ComfyUI and fall back list by list", () => {
+  const live = samplerOptionsFromApi({
+    samplers: ["euler", "res_multistep", "euler", "", 7],
+    schedulers: ["simple", "kl_optimal"],
+    source: "comfyui",
+  });
+  assert.deepEqual(live.samplers, ["euler", "res_multistep"]);
+  assert.deepEqual(live.schedulers, ["simple", "kl_optimal"]);
+  const partial = samplerOptionsFromApi({ samplers: [], schedulers: ["beta"] });
+  assert.deepEqual(partial.samplers, SAMPLER_OPTIONS);
+  assert.deepEqual(partial.schedulers, ["beta"]);
+  assert.deepEqual(samplerOptionsFromApi(null), FALLBACK_SAMPLER_OPTIONS);
+  assert.deepEqual(samplerOptionsFromApi({ samplers: "euler" }), FALLBACK_SAMPLER_OPTIONS);
+  assert.deepEqual(FALLBACK_SAMPLER_OPTIONS.schedulers, SCHEDULER_OPTIONS);
 });
