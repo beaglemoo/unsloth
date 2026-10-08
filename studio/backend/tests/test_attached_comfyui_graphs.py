@@ -241,7 +241,7 @@ def test_img2img_denoise_is_clamped_and_rounded(asked, expected):
     assert resolved["denoise"] == expected and graph["8"]["inputs"]["denoise"] == expected
 
 
-@pytest.mark.parametrize("asked,expected", [(1000, 992), (99999, 2048), (10, 256), (768, 768), (None, 1024)])
+@pytest.mark.parametrize("asked,expected", [(1000, 992), (99999, 1536), (2048, 1536), (10, 256), (768, 768), (None, 1024)])
 def test_edit_reference_resolution_snaps_and_clamps(asked, expected):
     params = {"prompt": "x", "seed": 1, "images": {"image": "a.png"}}
     if asked is not None:
@@ -250,6 +250,13 @@ def test_edit_reference_resolution_snaps_and_clamps(asked, expected):
     assert resolved["reference_resolution"] == expected
     assert graph["5"]["inputs"]["resolution"] == expected and graph["4"]["inputs"]["image"] == "a.png"
     assert graph["6"]["inputs"]["denoise"] == 1 and "denoise" not in resolved
+
+
+def test_the_shipped_edit_template_caps_the_reference_resolution_at_1536():
+    edit = template_by_id("qwen-image-2.1-edit")
+    assert edit.limits["reference_resolution"] == [256, 1536]
+    assert edit.summary()["limits"]["reference_resolution"] == [256, 1536]
+    assert g.DEFAULT_LIMITS["reference_resolution"] == [256, 2048]  # other templates keep the generic cap
 
 
 def test_reference_resolution_zero_only_when_it_is_the_template_default():
