@@ -771,7 +771,9 @@ export function ComfyuiCreatePanel({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col" data-comfyui-panel="">
+    // No min-h-0: inside the settings scroller a shrinkable panel is shorter than its controls, so the
+    // sticky Generate bar pins to the panel's bottom edge and covers the last row (Add LoRA).
+    <div className="flex flex-1 flex-col" data-comfyui-panel="">
       <div className="flex flex-1 flex-col gap-4">{body}</div>
       <div className="sticky bottom-0 z-10 -mx-1 mt-4 flex flex-col items-center gap-2 bg-gradient-to-t from-background via-background to-transparent px-1 pt-3">
         {waiting ? (
