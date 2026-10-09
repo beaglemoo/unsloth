@@ -251,6 +251,16 @@ export function hasSlot(template: ComfyTemplate, slot: string): boolean {
   return template.slots.includes(slot);
 }
 
+/** A short note for a template that binds none of steps, sampler and scheduler (a distilled model with
+ *  a fixed schedule, like Qwen-Image 2.1 Turbo); null when the panel shows those controls. */
+export function fixedSamplingNote(template: ComfyTemplate): string | null {
+  if (hasSlot(template, "steps") || hasSlot(template, "sampler") || hasSlot(template, "scheduler")) {
+    return null;
+  }
+  const steps = Math.round(template.defaults.steps);
+  return `Steps and sampler are fixed by this template (${steps} ${steps === 1 ? "step" : "steps"}).`;
+}
+
 /** Every model file the template needs that ComfyUI lacks, as "folder/name". */
 export function missingModelList(template: ComfyTemplate): string[] {
   const missing = template.missingModels;
