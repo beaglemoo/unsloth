@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ def _user_dir(tmp_path, monkeypatch):
 
 SHIPPED_IDS = [
     "qwen-image-2.1-t2i",
+    "qwen-image-2.1-turbo-t2i",
     "qwen-image-2.1-t2i-uncensored",
     "qwen-image-2.1-img2img",
     "qwen-image-2.1-edit",
@@ -170,6 +172,77 @@ def test_user_loras_chain_after_the_uncensored_lora():
     assert graph["unsloth_lora_1"]["inputs"]["model"] == ["unsloth_lora_0", 0]
     assert graph["6"]["inputs"]["model"] == ["unsloth_lora_1", 0]
     assert graph["9"]["inputs"]["model"] == ["1", 0]
+    assert resolved["loras"] == ["u0.safetensors:0.5", "u1.safetensors:0.7"]
+
+
+TURBO_ID = "qwen-image-2.1-turbo-t2i"
+TURBO_SIGMAS = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0]
+
+
+def turbo() -> g.Template:
+    return template_by_id(TURBO_ID)
+
+
+def test_turbo_template_is_listed_after_the_default_and_is_valid():
+    shipped_ids = [t.id for t in g.load_templates() if t.source == "shipped"]
+    assert shipped_ids[:2] == ["qwen-image-2.1-t2i", TURBO_ID]
+    template = turbo()
+    assert template.name == "Qwen-Image 2.1 Turbo (text to image, 8 steps)" and template.kind == "t2i"
+    g.validate_api_graph(template.graph)
+    assert set(template.slots) == {"prompt", "seed", "width", "height", "batch_size"}
+    assert template.summary()["supports_lora"] is True
+    assert template.required_models["diffusion_models"] == ["qwen_image_2.1_turbo_bf16.safetensors"]
+    assert {k: v for k, v in template.required_models.items() if k != "diffusion_models"} == {
+        k: v for k, v in shipped().required_models.items() if k != "diffusion_models"
+    }
+
+
+def test_turbo_graph_uses_the_fixed_sigma_schedule_through_sampler_custom():
+    graph = turbo().graph
+    sampler = graph["10"]
+    assert sampler["class_type"] == "SamplerCustom"
+    assert sampler["inputs"]["cfg"] == 1.0 and sampler["inputs"]["add_noise"] is True
+    assert sampler["inputs"]["positive"] == ["4", 0] and sampler["inputs"]["negative"] == ["4", 1]
+    assert sampler["inputs"]["model"] == ["1", 0] and sampler["inputs"]["latent_image"] == ["5", 0]
+    assert graph[sampler["inputs"]["sampler"][0]]["inputs"] == {"sampler_name": "euler"}
+    sigma_node = graph[sampler["inputs"]["sigmas"][0]]
+    assert sigma_node["class_type"] == "ManualSigmas"
+    # ComfyUI's ManualSigmas parses the string with this regex; 9 values are 8 steps.
+    parsed = [float(v) for v in re.findall(r"[-+]?(?:\d*\.*\d+)", sigma_node["inputs"]["sigmas"])]
+    assert parsed == TURBO_SIGMAS and len(parsed) - 1 == 8
+    assert graph["7"]["inputs"]["samples"] == ["10", 0]
+    assert not any(n["class_type"] == "KSampler" for n in graph.values())
+
+
+def test_turbo_maps_prompt_seed_and_size_and_injects_no_steps_or_sampler():
+    template = turbo()
+    graph, resolved = g.build_graph(template, {"prompt": "a fox", "seed": 11, "width": 768, "height": 512, "batch_size": 2})
+    assert graph["4"]["inputs"]["prompt"] == "a fox" and graph["4"]["inputs"]["negative_prompt"] == ""
+    assert graph["10"]["inputs"]["noise_seed"] == 11 and graph["10"]["inputs"]["cfg"] == 1.0
+    assert (graph["5"]["inputs"]["width"], graph["5"]["inputs"]["height"], graph["5"]["inputs"]["batch_size"]) == (768, 512, 2)
+    assert graph["8"]["class_type"] == "PreviewImage"
+    assert graph["9"] == template.graph["9"] and graph["6"] == template.graph["6"]
+    assert "steps" not in graph["10"]["inputs"] and "scheduler" not in graph["10"]["inputs"]
+    assert (resolved["steps"], resolved["cfg"], resolved["sampler"], resolved["scheduler"]) == (8, 1.0, "euler", "manual")
+
+
+def test_turbo_ignores_requested_steps_cfg_sampler_scheduler_and_negative_prompt():
+    template = turbo()
+    asked = {"prompt": "x", "seed": 1, "steps": 50, "cfg": 7, "sampler": "dpmpp_2m", "scheduler": "karras", "negative_prompt": "blur"}
+    graph, resolved = g.build_graph(template, asked)
+    assert (resolved["steps"], resolved["cfg"], resolved["sampler"], resolved["scheduler"]) == (8, 1.0, "euler", "manual")
+    assert resolved["negative_prompt"] == "" and graph["4"]["inputs"]["negative_prompt"] == ""
+    assert graph["10"]["inputs"]["cfg"] == 1.0 and graph["6"]["inputs"]["sampler_name"] == "euler"
+    plain, _ = g.build_graph(template, {"prompt": "x", "seed": 1})
+    assert graph == plain
+
+
+def test_turbo_loras_chain_into_sampler_custom():
+    loras = [{"name": "u0.safetensors", "strength": 0.5}, {"name": "u1.safetensors", "strength": 0.7}]
+    graph, resolved = g.build_graph(turbo(), {"prompt": "x", "seed": 1, "loras": loras})
+    assert graph["unsloth_lora_0"]["inputs"]["model"] == ["1", 0]
+    assert graph["unsloth_lora_1"]["inputs"]["model"] == ["unsloth_lora_0", 0]
+    assert graph["10"]["inputs"]["model"] == ["unsloth_lora_1", 0]
     assert resolved["loras"] == ["u0.safetensors:0.5", "u1.safetensors:0.7"]
 
 
