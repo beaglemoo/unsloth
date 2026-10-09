@@ -1,0 +1,202 @@
+{
+  "schema": 1,
+  "id": "qwen-image-2.1-turbo-t2i",
+  "name": "Qwen-Image 2.1 Turbo (text to image, 8 steps)",
+  "kind": "t2i",
+  "graph": {
+    "1": {
+      "class_type": "UNETLoader",
+      "inputs": {
+        "unet_name": "qwen_image_2.1_turbo_bf16.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    "2": {
+      "class_type": "CLIPLoader",
+      "inputs": {
+        "clip_name": "qwen3vl_8b_bf16.safetensors",
+        "type": "qwen_image",
+        "device": "cpu"
+      }
+    },
+    "3": {
+      "class_type": "VAELoader",
+      "inputs": {
+        "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+      }
+    },
+    "4": {
+      "class_type": "TextEncodeQwenImage21",
+      "inputs": {
+        "clip": [
+          "2",
+          0
+        ],
+        "vae": [
+          "3",
+          0
+        ],
+        "prompt": "",
+        "negative_prompt": "",
+        "resolution": 1024
+      }
+    },
+    "5": {
+      "class_type": "EmptyLatentImage",
+      "inputs": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      }
+    },
+    "6": {
+      "class_type": "KSamplerSelect",
+      "inputs": {
+        "sampler_name": "euler"
+      }
+    },
+    "7": {
+      "class_type": "VAEDecode",
+      "inputs": {
+        "samples": [
+          "10",
+          0
+        ],
+        "vae": [
+          "3",
+          0
+        ]
+      }
+    },
+    "8": {
+      "class_type": "SaveImage",
+      "inputs": {
+        "images": [
+          "7",
+          0
+        ],
+        "filename_prefix": "StoryPress"
+      }
+    },
+    "9": {
+      "class_type": "ManualSigmas",
+      "inputs": {
+        "sigmas": "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0"
+      }
+    },
+    "10": {
+      "class_type": "SamplerCustom",
+      "inputs": {
+        "model": [
+          "1",
+          0
+        ],
+        "add_noise": true,
+        "noise_seed": 0,
+        "cfg": 1.0,
+        "positive": [
+          "4",
+          0
+        ],
+        "negative": [
+          "4",
+          1
+        ],
+        "sampler": [
+          "6",
+          0
+        ],
+        "sigmas": [
+          "9",
+          0
+        ],
+        "latent_image": [
+          "5",
+          0
+        ]
+      }
+    }
+  },
+  "slots": {
+    "prompt": [
+      {
+        "node": "4",
+        "input": "prompt"
+      }
+    ],
+    "seed": [
+      {
+        "node": "10",
+        "input": "noise_seed"
+      }
+    ],
+    "width": [
+      {
+        "node": "5",
+        "input": "width"
+      }
+    ],
+    "height": [
+      {
+        "node": "5",
+        "input": "height"
+      }
+    ],
+    "batch_size": [
+      {
+        "node": "5",
+        "input": "batch_size"
+      }
+    ]
+  },
+  "lora": {
+    "model_source": [
+      "1",
+      0
+    ],
+    "consumers": [
+      {
+        "node": "10",
+        "input": "model"
+      }
+    ]
+  },
+  "defaults": {
+    "steps": 8,
+    "cfg": 1.0,
+    "width": 1024,
+    "height": 1024,
+    "sampler": "euler",
+    "scheduler": "manual"
+  },
+  "limits": {
+    "steps": [
+      8,
+      8
+    ],
+    "cfg": [
+      1,
+      1
+    ],
+    "side": [
+      256,
+      2048
+    ],
+    "multiple": 16,
+    "batch_size": [
+      1,
+      4
+    ]
+  },
+  "required_models": {
+    "diffusion_models": [
+      "qwen_image_2.1_turbo_bf16.safetensors"
+    ],
+    "text_encoders": [
+      "qwen3vl_8b_bf16.safetensors"
+    ],
+    "vae": [
+      "qwen_image_2.1_vae_bf16.safetensors"
+    ]
+  }
+}
