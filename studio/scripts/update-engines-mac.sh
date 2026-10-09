@@ -6,7 +6,8 @@
 #   update-engines-mac.sh [--dry-run] [--yes] [--force]
 #
 #   1. preflight: the engines must be idle (nothing generating, loading or starting), then
-#      build-engines-mac.sh --migrate-config removes the old generated OMLX_PEER_EVICT_URLS line; a
+#      build-engines-mac.sh --migrate-config removes the old generated OMLX_PEER_EVICT_URLS line and the
+#      retired OMLX_NAX / OMLX_QWEN35_* debug switches; a
 #      backup engines.toml.bak-<timestamp> is written first and every change is logged)
 #   2. stage: build-engines-mac.sh --stage-only builds and validates <venv>.new while the helpers
 #      keep serving, so they are down only for the swap, not for the multi-minute build
