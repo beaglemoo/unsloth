@@ -3,7 +3,9 @@
 # Read by the omlx-launch and comfyui-launch wrappers and by the Studio
 # desktop tray. Written by studio/scripts/build-engines-mac.sh only when it is
 # missing, so edit freely. build-engines-mac.sh and update-engines-mac.sh remove
-# the retired OMLX_PEER_EVICT_URLS setting from old generated files, replace the old default ComfyUI
+# the retired OMLX_PEER_EVICT_URLS setting and the retired debug switches (OMLX_NAX,
+# OMLX_QWEN35_SPARSE_BOUNDARIES, OMLX_QWEN35_QMM_NAX_VARIANT, only when they still have
+# the old generated values) from old generated files, replace the old default ComfyUI
 # extra_args with the one that has --cache-none and add the missing MPS watermark keys (backup:
 # engines.toml.bak-<timestamp>; a customized extra_args is never touched). "~" is expanded in every path.
 #
@@ -20,9 +22,6 @@ port = 8843
 # extra_args = []
 
 [omlx.env]
-OMLX_QWEN35_SPARSE_BOUNDARIES = "1"
-OMLX_NAX = "1"
-OMLX_QWEN35_QMM_NAX_VARIANT = "0"
 MallocSpaceEfficient = "1"
 OMLX_SUPERVISED = "launchd"
 
