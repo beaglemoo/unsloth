@@ -2078,6 +2078,9 @@ def test_generated_config_has_omlx_and_comfyui():
     config = tomllib.loads((ENGINES / "engines.default.toml").read_text())
     assert set(config) == {"omlx", "comfyui"}
     assert "OMLX_PEER_EVICT_URLS" not in config["omlx"]["env"]
+    for retired in ("OMLX_NAX", "OMLX_QWEN35_SPARSE_BOUNDARIES", "OMLX_QWEN35_QMM_NAX_VARIANT"):
+        assert retired not in config["omlx"]["env"]
+    assert config["omlx"]["env"] == {"MallocSpaceEfficient": "1", "OMLX_SUPERVISED": "launchd"}
     comfy = config["comfyui"]
     assert comfy["port"] == 8844 and "host" not in comfy
     assert comfy["extra_args"] == ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline", "--cache-none"]
@@ -2210,10 +2213,10 @@ def test_an_inline_env_table_is_left_alone_instead_of_producing_invalid_toml(hom
 
 def test_both_migrations_apply_in_one_pass_and_one_backup(home):
     peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
-    original = f'[omlx.env]\nOMLX_NAX = "1"\n{peer}\n'
+    original = f'[omlx.env]\nMallocSpaceEfficient = "1"\n{peer}\n'
     config, result = config_migrate(home, original)
     assert result.returncode == 0, result.stderr
-    assert config.read_text() == '[omlx.env]\nOMLX_NAX = "1"\n\n' + COMFYUI_BLOCK
+    assert config.read_text() == '[omlx.env]\nMallocSpaceEfficient = "1"\n\n' + COMFYUI_BLOCK
     assert [b.read_text() for b in home.glob("engines.toml.bak-*")] == [original]
 
 
@@ -2226,17 +2229,17 @@ def test_a_fresh_install_gets_the_default_file_with_the_comfyui_section(home, tm
 def test_peer_url_removal_also_removes_the_comment_the_old_migration_wrote(home):
     note = "# oMLX asks the ds4 launcher to unload when it needs memory (added by the engines.toml migration)."
     peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
-    config, result = config_migrate(home, f'[omlx.env]\nOMLX_NAX = "1"\n{note}\n{peer}\n[ds4]\nhost = "0.0.0.0"\n[comfyui.env]\n{WM}')
+    config, result = config_migrate(home, f'[omlx.env]\nMallocSpaceEfficient = "1"\n{note}\n{peer}\n[ds4]\nhost = "0.0.0.0"\n[comfyui.env]\n{WM}')
     assert result.returncode == 0, result.stderr
-    assert config.read_text() == f'[omlx.env]\nOMLX_NAX = "1"\n[ds4]\nhost = "0.0.0.0"\n[comfyui.env]\n{WM}'
+    assert config.read_text() == f'[omlx.env]\nMallocSpaceEfficient = "1"\n[ds4]\nhost = "0.0.0.0"\n[comfyui.env]\n{WM}'
 
 
 def test_peer_url_removal_keeps_other_comments_and_a_non_adjacent_note(home):
     note = "# oMLX asks the ds4 launcher to unload."
     peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
-    config, result = config_migrate(home, f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n{peer}\n[comfyui.env]\n{WM}')
+    config, result = config_migrate(home, f'[omlx.env]\n{note}\nMallocSpaceEfficient = "1"\n# my own comment\n{peer}\n[comfyui.env]\n{WM}')
     assert result.returncode == 0, result.stderr
-    assert config.read_text() == f'[omlx.env]\n{note}\nOMLX_NAX = "1"\n# my own comment\n[comfyui.env]\n{WM}'
+    assert config.read_text() == f'[omlx.env]\n{note}\nMallocSpaceEfficient = "1"\n# my own comment\n[comfyui.env]\n{WM}'
     other = 'x = 1\n# oMLX asks something else\n' + f'[omlx.env]\n# oMLX asks something else\n{peer}\n[comfyui.env]\n{WM}'
     config, result = config_migrate(home, other)
     assert config.read_text() == f'x = 1\n# oMLX asks something else\n[omlx.env]\n# oMLX asks something else\n[comfyui.env]\n{WM}'
@@ -2244,19 +2247,58 @@ def test_peer_url_removal_keeps_other_comments_and_a_non_adjacent_note(home):
 
 def test_peer_url_removal_preserves_config_and_backs_up_once(home):
     import tomllib
-    original = '# saved\n[omlx]\nport = 9000\n[omlx.env]\nOMLX_NAX = "1"\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"\n[ds4]\nhost = "0.0.0.0"\n'
+    original = '# saved\n[omlx]\nport = 9000\n[omlx.env]\nMallocSpaceEfficient = "1"\nOMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"\n[ds4]\nhost = "0.0.0.0"\n'
     config, result = config_migrate(home, original)
     assert result.returncode == 0, result.stderr
     backups = list(home.glob("engines.toml.bak-*"))
     assert len(backups) == 1 and backups[0].read_text() == original
     data = tomllib.loads(config.read_text())
     assert data["omlx"]["port"] == 9000
-    assert data["omlx"]["env"] == {"OMLX_NAX": "1"}
+    assert data["omlx"]["env"] == {"MallocSpaceEfficient": "1"}
     assert data["ds4"] == {"host": "0.0.0.0"}
     before = config.stat().st_mtime_ns
     assert build_fn(home, "migrate_config").returncode == 0
     assert config.stat().st_mtime_ns == before
     assert list(home.glob("engines.toml.bak-*")) == backups
+
+
+RETIRED_LINES = 'OMLX_QWEN35_SPARSE_BOUNDARIES = "1"\nOMLX_NAX = "1"\nOMLX_QWEN35_QMM_NAX_VARIANT = "0"\n'
+
+
+def test_the_retired_debug_switches_are_removed_with_a_backup_and_a_second_run_does_nothing(home):
+    import tomllib
+    original = f'# saved\n[omlx]\nport = 9000\n[omlx.env]\n{RETIRED_LINES}MallocSpaceEfficient = "1"\nOMLX_SUPERVISED = "launchd"\n[comfyui.env]\n{WM}'
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    assert "removed retired debug switches: OMLX_QWEN35_SPARSE_BOUNDARIES, OMLX_NAX, OMLX_QWEN35_QMM_NAX_VARIANT" in result.stdout
+    assert config.read_text() == f'# saved\n[omlx]\nport = 9000\n[omlx.env]\nMallocSpaceEfficient = "1"\nOMLX_SUPERVISED = "launchd"\n[comfyui.env]\n{WM}'
+    assert tomllib.loads(config.read_text())["omlx"]["env"] == {"MallocSpaceEfficient": "1", "OMLX_SUPERVISED": "launchd"}
+    backups = list(home.glob("engines.toml.bak-*"))
+    assert len(backups) == 1 and backups[0].read_text() == original
+    before = config.stat().st_mtime_ns
+    again = build_fn(home, "migrate_config")
+    assert again.returncode == 0 and "nothing to migrate" in again.stdout
+    assert config.stat().st_mtime_ns == before and list(home.glob("engines.toml.bak-*")) == backups
+
+
+def test_a_customized_retired_switch_and_lookalikes_in_other_sections_are_kept(home):
+    original = (
+        '[omlx.env]\nOMLX_NAX = "0"\n# OMLX_QWEN35_SPARSE_BOUNDARIES = "1"\nOMLX_QWEN35_QMM_NAX_VARIANT = "1"\n'
+        f'[other]\nOMLX_NAX = "1"\n[comfyui.env]\n{WM}'
+    )
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == original
+    assert not list(home.glob("engines.toml.bak-*"))
+
+
+def test_the_retired_switches_and_the_peer_url_go_in_one_pass_and_one_backup(home):
+    peer = 'OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001"'
+    original = f'[omlx.env]\n{RETIRED_LINES}{peer}\nMallocSpaceEfficient = "1"\n[comfyui.env]\n{WM}'
+    config, result = config_migrate(home, original)
+    assert result.returncode == 0, result.stderr
+    assert config.read_text() == f'[omlx.env]\nMallocSpaceEfficient = "1"\n[comfyui.env]\n{WM}'
+    assert [b.read_text() for b in home.glob("engines.toml.bak-*")] == [original]
 
 
 @pytest.mark.parametrize("text", [
