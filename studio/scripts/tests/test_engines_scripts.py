@@ -1729,6 +1729,81 @@ def test_a_failed_comfyui_install_stops_the_build_and_swaps_nothing(home):
     assert not (home / "comfyui").exists() and not (home / "comfyui.new" / ".staged").exists()
 
 
+def recording_python(venv: Path, fail_on=""):
+    """A fake venv python that logs each call and fails the call whose -c text contains fail_on."""
+    log = venv.parent / "py-calls"
+    body = (
+        f'echo "$*" >>"{log}"\n'
+        f'if [ -n "{fail_on}" ]; then case "$*" in *"{fail_on}"*) echo "boom" >&2; exit 1;; esac; fi\n'
+        "exit 0\n"
+    )
+    fake_python(venv / "bin" / "python", body)
+    return log
+
+
+@pytest.mark.parametrize("kernels,expected", [(1, 3), (0, 2)])
+def test_validate_omlx_checks_the_web_package_server_imports_and_kernels_only_when_built(home, kernels, expected):
+    venv = home / "omlx.new"
+    log = recording_python(venv)
+    result = build_fn(home, f'validate_omlx "{venv}" {kernels}')
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    assert len(calls) == expected
+    assert "omlx_web" in calls[0] and "omlx.server" in calls[0] and "omlx.admin.routes" in calls[0]
+    assert "omlx.expert_streaming.integrate" in calls[0] and "templates/dashboard.html" in calls[0]
+    assert ("native_kernel_status" in calls[1]) == (kernels == 1)
+    assert calls[-1].endswith("-m omlx.cli serve --help")
+
+
+@pytest.mark.parametrize("fail_on,kernels", [
+    ("omlx_web", 0),  # old pin without the dashboard package
+    ("omlx.server", 1),
+    ("native_kernel_status", 1),  # a kernel that did not build
+    ("serve --help", 0),
+])
+def test_validate_omlx_fails_on_each_missing_piece(home, fail_on, kernels):
+    venv = home / "omlx.new"
+    recording_python(venv, fail_on)
+    result = build_fn(home, f'validate_omlx "{venv}" {kernels}')
+    assert result.returncode != 0 and "boom" in result.stderr
+
+
+def test_the_kernel_check_is_not_run_when_the_kernels_were_not_built(home):
+    venv = home / "omlx.new"
+    log = recording_python(venv, "native_kernel_status")
+    assert build_fn(home, f'validate_omlx "{venv}" 0').returncode == 0
+    assert "native_kernel_status" not in log.read_text()
+
+
+@pytest.mark.parametrize("pip_fails_with_kernels,expected_arg", [(False, "1"), (True, "0")])
+def test_stage_omlx_validates_with_the_kernel_result_after_any_fallback(home, pip_fails_with_kernels, expected_arg):
+    src = home.parent / "src-engines"
+    src.mkdir(exist_ok=True)
+    fail = '[ ! -e "$ENGINES_HOME/pip-ran" ] && { : >"$ENGINES_HOME/pip-ran"; return 1; }; ' if pip_fails_with_kernels else ""
+    snippet = (
+        f'ENGINES_SRC="{src}"; mkdir -p "$BUILD_ROOT"; HAVE_UV=0; FORCE=0; OMLX_COMMIT=abc; OMLX_PYTHON=3.13; '
+        'OMLX_WITH_CUSTOM_KERNEL=1; OMLX_EXTRAS=; '
+        'make_venv() { mkdir -p "$1/bin"; }; export_tree() { mkdir -p "$2"; }; '
+        f'pip_install() {{ {fail}return 0; }}; '
+        'validate_omlx() { echo "validate $*" >>"$ENGINES_HOME/calls"; }; stage_omlx'
+    )
+    result = build_fn(home, snippet)
+    assert result.returncode == 0, result.stderr
+    assert (home / "calls").read_text().strip() == f"validate {home}/omlx.new {expected_arg}"
+    assert (home / "omlx.new" / ".staged").read_text().splitlines()[2] == f"omlx_kernels={expected_arg}"
+
+
+def test_the_live_omlx_venv_is_never_revalidated(home):
+    # validate_omlx has exactly one caller: stage_omlx, on the venv it just built.
+    callers = [
+        f"{p.name}:{n}"
+        for p in SCRIPTS.glob("*.sh")
+        for n, line in enumerate(p.read_text().splitlines(), 1)
+        if "validate_omlx" in line and not line.lstrip().startswith("#") and "validate_omlx()" not in line
+    ]
+    assert len(callers) == 1 and callers[0].startswith("build-engines-mac.sh"), callers
+
+
 def full_main(home, build_comfyui, snippet="main", **env):
     """main() with the oMLX and ComfyUI stages stubbed; records what ran."""
     stubs = (

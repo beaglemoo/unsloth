@@ -221,8 +221,15 @@ discard_stale_staged() { # <new dir>
   rm -rf "$1"
 }
 
-validate_omlx() { # <venv dir>
-  "$1/bin/python" -c "import omlx, mlx.core, mlx_lm, mlx_vlm; print('omlx', omlx.__version__)"
+# Only ever called on a freshly staged venv (stage_omlx). The live venv is never re-validated
+# here: an old pin has no omlx_web and would fail the check for the wrong reason.
+validate_omlx() { # <venv dir> <kernels 0|1: 1 when the custom kernels were built>
+  # omlx_web carries the dashboard; without it the server quietly serves the API only. The other
+  # imports load the server, admin routes and expert-streaming integration the helper runs.
+  "$1/bin/python" -c "import omlx, omlx_web, mlx.core, mlx_lm, mlx_vlm, omlx.server, omlx.admin.routes, omlx.expert_streaming.integrate; from importlib.resources import files; assert files('omlx_web').joinpath('templates/dashboard.html').is_file(), 'omlx_web templates missing'; print('omlx', omlx.__version__)"
+  if [ "${2:-0}" = 1 ]; then
+    "$1/bin/python" -c "from omlx.custom_kernels import native_kernel_status as s; bad={k: v['import_error'] for k, v in s().items() if not v['available']}; assert not bad, bad"
+  fi
   # Startup smoke test: the entry point the helper execs must load and parse its CLI.
   "$1/bin/python" -m omlx.cli serve --help >/dev/null
 }
@@ -256,7 +263,7 @@ stage_omlx() {
     pip_install "$new" "$target" >"$BUILD_ROOT/omlx-install.log" 2>&1 \
       || { tail -n 30 "$BUILD_ROOT/omlx-install.log" >&2; die "omlx install failed (log: $BUILD_ROOT/omlx-install.log)"; }
   fi
-  validate_omlx "$new"
+  validate_omlx "$new" "$kernels"
   # Record the requested key (not the fallback result) so a fallback does not loop forever.
   record_staged "$new" omlx "$want" "omlx_kernels=$kernels"
   rm -rf "$src"
