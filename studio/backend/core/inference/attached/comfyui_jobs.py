@@ -188,7 +188,8 @@ _WORKFLOWS = {"t2i": "create", "img2img": "img2img", "edit": "edit"}
 
 
 def _is_sampler(class_type: str) -> bool:
-    return class_type.startswith("KSampler") or "Sampler" in class_type
+    # KSamplerSelect only picks a sampler object; it does no denoising and sends no progress.
+    return not class_type.endswith("Select") and (class_type.startswith("KSampler") or "Sampler" in class_type)
 
 
 class ComfyJobRunner:

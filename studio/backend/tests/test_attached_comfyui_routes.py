@@ -390,9 +390,10 @@ def test_samplers_fall_back_on_an_unexpected_payload(client, world, payload):
 def test_templates_list_shipped_with_missing_models(client, world):
     body = client.get(url("/templates")).json()
     assert body["comfyui_reachable"] is True
-    template, uncensored, img2img, edit = body["templates"]
+    template, turbo, uncensored, img2img, edit = body["templates"]
     assert (img2img["id"], img2img["kind"]) == ("qwen-image-2.1-img2img", "img2img")
     assert (edit["id"], edit["kind"]) == ("qwen-image-2.1-edit", "edit")
+    assert turbo["id"] == "qwen-image-2.1-turbo-t2i" and turbo["kind"] == "t2i"
     assert uncensored["id"] == "qwen-image-2.1-t2i-uncensored" and uncensored["name"] == "Qwen-Image 2.1 (uncensored)"
     assert uncensored["supports_lora"] is True
     assert uncensored["missing_models"] == {"loras": ["qwen-image-2.1-uncensored-lora.safetensors"]}
@@ -419,7 +420,7 @@ def test_import_list_and_delete_a_user_graph(client, world):
     assert body["template"]["id"] == "user:my-sd" and body["checked_nodes"] is True
     assert body["slot_targets"]["prompt"] == [{"node": "6", "input": "text"}]
     ids = [t["id"] for t in client.get(url("/templates")).json()["templates"]]
-    assert ids == [TEMPLATE, "qwen-image-2.1-t2i-uncensored", "qwen-image-2.1-img2img", "qwen-image-2.1-edit", "user:my-sd"]
+    assert ids == [TEMPLATE, "qwen-image-2.1-turbo-t2i", "qwen-image-2.1-t2i-uncensored", "qwen-image-2.1-img2img", "qwen-image-2.1-edit", "user:my-sd"]
     assert client.delete(url("/templates/user:my-sd")).json() == {"deleted": "user:my-sd"}
     assert client.delete(url("/templates/user:my-sd")).status_code == 404
     shipped = client.delete(url(f"/templates/{TEMPLATE}"))
@@ -572,7 +573,7 @@ def test_generate_image_errors_are_params_errors_before_admission(client, world)
 
 def test_templates_list_the_image_templates_with_kinds_and_slots(client, world):
     listed = {t["id"]: t for t in client.get(url("/templates")).json()["templates"]}
-    assert [t["kind"] for t in listed.values()] == ["t2i", "t2i", "img2img", "edit"]
+    assert [t["kind"] for t in listed.values()] == ["t2i", "t2i", "t2i", "img2img", "edit"]
     img2img, edit, t2i = listed[IMG2IMG], listed[EDIT], listed[TEMPLATE]
     assert img2img["image_slots"] == edit["image_slots"] == [{"name": "image", "label": "Input image", "required": True}]
     assert t2i["image_slots"] == []
