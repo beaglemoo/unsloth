@@ -60,6 +60,7 @@ import {
   buildGenerateRequest,
   defaultParams,
   editOutputSize,
+  fixedSamplingNote,
   hasSlot,
   keepsInputSize,
   missingModelList,
@@ -829,6 +830,11 @@ export function ComfyuiCreatePanel({
           </PanelField>
         ) : null}
 
+        {fixedSamplingNote(template) ? (
+          <p className="pt-1 text-xs leading-snug text-muted-foreground">
+            {fixedSamplingNote(template)}
+          </p>
+        ) : null}
         {hasSlot(template, "steps") ? (
           <div className="pt-1">
             <ParamSlider

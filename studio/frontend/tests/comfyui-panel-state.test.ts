@@ -16,6 +16,8 @@ import {
   clampNumber,
   defaultParams,
   describeComfyFailure,
+  fixedSamplingNote,
+  hasSlot,
   loraRowsFromRecipe,
   missingModelList,
   parseGraphJson,
@@ -376,6 +378,7 @@ import {
   editOutputSize,
   keepsInputSize,
   pickTemplateForInput,
+  recallFromImage,
   sizeForInput,
 } from "../src/features/images/comfyui/comfyui-panel-state.ts";
 
@@ -525,4 +528,72 @@ test("the cancel answer separates no job, confirmed and pending (a slow ComfyUI)
   assert.equal(cancelOutcomeFromApi({ cancelled: false }), "none");
   assert.equal(cancelOutcomeFromApi(null), "none");
   assert.equal(cancelOutcomeFromApi("x"), "none");
+});
+
+// ---------------------------------------------------------------- Turbo: a fixed schedule
+
+const TURBO = {
+  ...QWEN,
+  id: "qwen-image-2.1-turbo-t2i",
+  name: "Qwen-Image 2.1 Turbo (text to image, 8 steps)",
+  defaults: { steps: 8, cfg: 1.0, width: 1024, height: 1024, sampler: "euler", scheduler: "manual" },
+  limits: { steps: [8, 8], cfg: [1, 1], side: [256, 2048], multiple: 16, batch_size: [1, 4] },
+  slots: ["prompt", "seed", "width", "height", "batch_size"],
+};
+const turbo = () => templatesFromApi({ templates: [TURBO] }).templates[0];
+
+test("a template without steps, cfg, sampler and scheduler slots hides them and says why", () => {
+  const t = turbo();
+  for (const slot of ["steps", "cfg", "sampler", "scheduler", "negative_prompt"]) {
+    assert.equal(hasSlot(t, slot), false, slot);
+  }
+  assert.equal(fixedSamplingNote(t), "Steps and sampler are fixed by this template (8 steps).");
+  assert.equal(fixedSamplingNote(qwen()), null);
+  // Only one of the three missing is not "fixed": the other control still shows.
+  assert.equal(fixedSamplingNote(qwen({ slots: QWEN.slots.filter((s) => s !== "steps") })), null);
+});
+
+test("the Turbo request carries no steps, cfg, sampler, scheduler or negative prompt", () => {
+  const t = turbo();
+  const p = { ...defaultParams(t), prompt: "a fox", negativePrompt: "blur", seed: "5", steps: 50, cfg: 7, sampler: "dpmpp_2m", scheduler: "karras" };
+  assert.equal(defaultParams(t).steps, 8);
+  assert.equal(reconcileParams(p, t).steps, 8);
+  const sent = buildGenerateRequest(t, reconcileParams(p, t), {});
+  assert.ok(sent.ok);
+  for (const key of ["steps", "cfg", "sampler", "scheduler", "negative_prompt"]) {
+    assert.equal(key in sent.body, false, key);
+  }
+  assert.equal(sent.body.template_id, "qwen-image-2.1-turbo-t2i");
+  assert.equal(sent.body.seed, 5);
+  assert.equal(sent.body.width, 1024);
+});
+
+test("Recipe > Restore of a Turbo record finds the template and still sends no fixed values", () => {
+  const t = turbo();
+  const recall = recallFromImage({
+    engine: "comfyui",
+    comfyui_template: "qwen-image-2.1-turbo-t2i",
+    prompt: "a fox",
+    negative_prompt: null,
+    width: 768,
+    height: 512,
+    steps: 8,
+    guidance: 1,
+    seed: 3,
+    batch_size: 1,
+    loras: [],
+    sampler: "euler",
+    scheduler: "manual",
+  });
+  assert.ok(recall);
+  const applied = applyRecall(recall, [qwen(), t]);
+  assert.ok(applied);
+  assert.equal(applied.found, true);
+  assert.equal(applied.template.id, "qwen-image-2.1-turbo-t2i");
+  assert.equal(applied.params.steps, 8);
+  assert.equal(applied.params.width, 768);
+  const sent = buildGenerateRequest(applied.template, applied.params, {});
+  assert.ok(sent.ok);
+  for (const key of ["steps", "cfg", "sampler", "scheduler"]) assert.equal(key in sent.body, false, key);
+  assert.equal(sent.body.width, 768);
 });
