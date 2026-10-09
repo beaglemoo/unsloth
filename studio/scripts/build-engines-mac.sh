@@ -29,7 +29,9 @@
 #   --rollback-venvs   put <venv>.old back (names: omlx, comfyui; default both)
 #   --migrate-config   only migrate an existing engines.toml (the full and --stage-only runs do it
 #                      too; update-engines-mac.sh calls this explicitly). It removes the legacy
-#                      [omlx.env] OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" line, turns the old
+#                      [omlx.env] OMLX_PEER_EVICT_URLS = "http://127.0.0.1:8001" line and the
+#                      retired debug switches OMLX_NAX = "1", OMLX_QWEN35_SPARSE_BOUNDARIES = "1" and
+#                      OMLX_QWEN35_QMM_NAX_VARIANT = "0" (exact generated lines only), turns the old
 #                      generated [comfyui] extra_args (exactly that line) into one with --cache-none,
 #                      and adds the two PYTORCH_MPS_*_WATERMARK_RATIO keys to [comfyui.env] when missing.
 #                      The original is copied to engines.toml.bak-<timestamp> first, every change is
@@ -456,6 +458,21 @@ if env:
         for i in sorted(drop, reverse=True):
             del lines[i]
         changes.append(f"[omlx.env] removed {PEER}")
+
+    # Debug switches oMLX 0.7.1 no longer reads. Only the exact generated lines go; another value or a
+    # comment means the user touched them, so they stay.
+    RETIRED = [
+        'OMLX_QWEN35_SPARSE_BOUNDARIES = "1"',
+        'OMLX_NAX = "1"',
+        'OMLX_QWEN35_QMM_NAX_VARIANT = "0"',
+    ]
+    env = span("omlx.env")
+    retired_lines = [i for i in range(env[0] + 1, env[1]) if lines[i].strip() in RETIRED]
+    if retired_lines:
+        names = [lines[i].strip().split(" = ")[0] for i in retired_lines]
+        for i in sorted(retired_lines, reverse=True):
+            del lines[i]
+        changes.append("[omlx.env] removed retired debug switches: " + ", ".join(names))
 
 # A config written before ComfyUI existed gets the default [comfyui] section appended; an existing
 # [comfyui] (or [comfyui.*]) is the user's and is never touched.
