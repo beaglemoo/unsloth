@@ -526,6 +526,41 @@ def test_uncensored_template_submits_with_user_loras_chained_after_it(world):
     assert result.images[0]["comfyui_template"] == "qwen-image-2.1-t2i-uncensored"
 
 
+def test_turbo_job_reports_the_fixed_eight_steps_and_records_them(world):
+    world.fake.models["diffusion_models"] = ["qwen_image_2.1_turbo_bf16.safetensors"]
+    snapshots = []
+    snap = lambda: snapshots.append(r.progress())  # noqa: E731
+    frames = [
+        msg("execution_start"), snap,
+        msg("executing", node = "6"), snap,  # KSamplerSelect: not a denoise step
+        msg("executing", node = "10"), snap,
+        msg("progress", value = 3, max = 8, node = "10"), snap,
+        msg("executing", node = "7"),
+        msg("execution_success"),
+    ]
+    r = runner(FakeConnect(FakeWS(frames)))
+    original = world.fake.handle
+    world.fake.handle = lambda req: (original(req), world.fake.finish())[0] if req.url.path == "/prompt" else original(req)
+    asked = {**PARAMS, "steps": 50, "sampler": "dpmpp_2m", "scheduler": "karras", "cfg": 5}
+    result = go(r.run("qwen-image-2.1-turbo-t2i", asked, client = world.fake.client()))
+    assert snapshots[0]["total_steps"] == 8
+    assert snapshots[1]["phase"] != "denoise"
+    assert (snapshots[3]["step"], snapshots[3]["total_steps"], snapshots[3]["phase"]) == (3, 8, "denoise")
+    sent = world.fake.submitted[0]["prompt"]
+    assert sent["10"]["class_type"] == "SamplerCustom" and sent["10"]["inputs"]["noise_seed"] == 7
+    assert "steps" not in sent["10"]["inputs"] and sent["10"]["inputs"]["cfg"] == 1.0
+    [record] = result.images
+    assert (record["steps"], record["guidance"], record["sampler"], record["scheduler"]) == (8, 1.0, "euler", "manual")
+    assert record["comfyui_template"] == "qwen-image-2.1-turbo-t2i" and record["model"] == "comfyui:qwen-image-2.1-turbo-t2i"
+
+
+def test_turbo_template_reports_a_missing_diffusion_model(world):
+    with pytest.raises(jobs.ComfyModelsMissing) as caught:
+        go(runner().run("qwen-image-2.1-turbo-t2i", dict(PARAMS), client = world.fake.client()))
+    assert caught.value.missing == {"diffusion_models": ["qwen_image_2.1_turbo_bf16.safetensors"]}
+    assert world.admissions == 0 and world.fake.submitted == []
+
+
 # ------------------------------------------------- cancellable prompts (orphan fix)
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
