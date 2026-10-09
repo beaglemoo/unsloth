@@ -428,7 +428,8 @@ def build_graph(template: Template, params: dict) -> tuple[dict, dict]:
 
     Values outside ``limits`` are clamped, sizes snap down to ``limits.multiple``, a seed of ``None`` or
     below zero becomes a random one, and every ``SaveImage`` becomes a ``PreviewImage`` so ComfyUI keeps
-    no copy of the output. ``params`` keys: the slot names plus ``loras`` (a list of ``{name, strength}``)
+    no copy of the output. ``steps``, ``cfg``, ``sampler`` and ``scheduler`` come from ``params`` only when the
+    template binds them; otherwise the template's ``defaults`` are the fixed values. ``params`` keys: the slot names plus ``loras`` (a list of ``{name, strength}``)
     and ``images`` (``{image slot: file name as ComfyUI's LoadImage reads it}``, one for every image slot).
     """
     graph = copy.deepcopy(template.graph)
@@ -440,7 +441,7 @@ def build_graph(template: Template, params: dict) -> tuple[dict, dict]:
     resolved: dict[str, Any] = {"prompt": prompt}
     values: dict[str, Any] = {"prompt": prompt}
 
-    negative = params.get("negative_prompt")
+    negative = params.get("negative_prompt") if slots.get("negative_prompt") else None
     values["negative_prompt"] = resolved["negative_prompt"] = negative if isinstance(negative, str) else ""
 
     seed = params.get("seed")
@@ -452,11 +453,13 @@ def build_graph(template: Template, params: dict) -> tuple[dict, dict]:
         raise ComfyParamError(f"seed must be a whole number from 0 to {MAX_SEED}.")
     values["seed"] = resolved["seed"] = seed
 
-    steps = params.get("steps")
+    # A parameter the template does not bind is fixed by it: the request value is ignored, so the
+    # effective parameters (and the gallery record) say what the graph really ran with.
+    steps = params.get("steps") if slots.get("steps") else None
     steps = defaults.get("steps", 25) if steps is None else steps
     values["steps"] = resolved["steps"] = int(_clamp(_num(steps, "steps"), limits["steps"]))
 
-    cfg = params.get("cfg")
+    cfg = params.get("cfg") if slots.get("cfg") else None
     cfg = defaults.get("cfg", 1.0) if cfg is None else cfg
     values["cfg"] = resolved["cfg"] = round(float(_clamp(_num(cfg, "cfg"), limits["cfg"])), 4)
 
@@ -484,7 +487,7 @@ def build_graph(template: Template, params: dict) -> tuple[dict, dict]:
         )
 
     for name in ("sampler", "scheduler"):
-        value = params.get(name)
+        value = params.get(name) if slots.get(name) else None
         value = defaults.get(name) if value is None else value
         if value is not None:
             if not isinstance(value, str) or not value.strip() or len(value) > 64:
