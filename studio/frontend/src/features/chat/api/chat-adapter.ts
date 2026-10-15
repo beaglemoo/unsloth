@@ -757,7 +757,8 @@ export function useThreadAutosaveHandle(): ThreadAutosaveHandle {
 }
 
 /** Match errors meaning the KV cache filled: llama-server's "exceeds the available context
- *  size" and _friendly_error's "Message too long". Substrings, since both have drifted. */
+ *  size", _friendly_error's "Message too long" and oMLX's "Prompt is too long: N tokens > M
+ *  maximum context length (context_length_exceeded)". Substrings, since all have drifted. */
 export function isContextLimitError(message: string): boolean {
   if (!message) return false;
   const m = message.toLowerCase();
@@ -767,6 +768,8 @@ export function isContextLimitError(message: string): boolean {
     m.includes("exceeds the available context") ||
     m.includes("message too long") ||
     m.includes("context window") ||
+    m.includes("context_length_exceeded") ||
+    m.includes("maximum context length") ||
     (m.includes("n_ctx") && (m.includes("exceed") || m.includes("full")))
   );
 }
