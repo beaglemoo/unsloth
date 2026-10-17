@@ -978,7 +978,7 @@ fn run_install_with_event_mode(
     if let Some(msg) = installer_refusal(cfg!(feature = "attached-engines")) {
         error!("[install] refused: {}", msg);
         if event_mode.emit_terminal_events() {
-            emit_failed(&app, msg);
+            emit_failed(&app, msg, false);
         }
         return Err(msg.to_string());
     }
