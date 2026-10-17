@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from core.inference.attached import AttachedEngineBusy, AttachedEngineError, desktop_settings
 from core.inference.attached.comfyui_client import ComfyuiClient
 from core.inference.attached.failures import engines_home
-from core.inference.attached.omlx_client import OmlxClient
+from core.inference.attached.omlx_client import BUSY_MESSAGE, OmlxClient
 from loggers import get_logger
 from utils.attached_engines_settings import AttachedEnginesConfig, get_config
 
@@ -232,6 +232,62 @@ def _comfyui_held() -> bool:
         return bool(_comfyui_holds)
 
 
+class OmlxRequestHold:
+    """Studio's claim on an oMLX request from admission until the request or its stream has ended.
+
+    ``before_omlx_use`` used to return without recording anything, while the callers still await credentials
+    and message preparation before they contact oMLX. In that gap a ComfyUI job or a local or media load could
+    unload the idle oMLX and be admitted, and the request then auto-loaded its model beside that workload.
+    The claim is registered under the arbiter lock on admission; competing admissions that would unload oMLX
+    are refused with oMLX's own busy message while any claim exists. Claims share (a count, not a mutex).
+    ``release`` is idempotent; callers release in a ``finally`` (a stream: when its generator ends or closes).
+    A claim older than ``_OMLX_HOLD_MAX_AGE_S`` is ignored so a lost release can never wedge the arbiter.
+    """
+
+    __slots__ = ("active", "since")
+
+    def __init__(self):
+        self.active = False
+        self.since = 0.0
+
+    def release(self) -> None:
+        with _omlx_holds_lock:
+            self.active = False
+            _omlx_holds.discard(self)
+
+
+_OMLX_HOLD_MAX_AGE_S = 1800.0
+_omlx_holds: set[OmlxRequestHold] = set()
+_omlx_holds_lock = threading.Lock()
+
+
+def new_omlx_hold() -> OmlxRequestHold:
+    """An unregistered claim for an oMLX request; ``before_omlx_use`` registers it on admission."""
+    return OmlxRequestHold()
+
+
+def _register_omlx_hold(hold: OmlxRequestHold) -> None:
+    with _omlx_holds_lock:
+        hold.active = True
+        hold.since = time.monotonic()
+        _omlx_holds.add(hold)
+
+
+def omlx_holds() -> int:
+    """How many oMLX requests hold a claim right now (expired claims are dropped, with a warning)."""
+    now = time.monotonic()
+    with _omlx_holds_lock:
+        for hold in [h for h in _omlx_holds if now - h.since > _OMLX_HOLD_MAX_AGE_S]:
+            hold.active = False
+            _omlx_holds.discard(hold)
+            logger.warning("Dropped an oMLX request claim held for over %d s.", int(_OMLX_HOLD_MAX_AGE_S))
+        return len(_omlx_holds)
+
+
+def _omlx_held() -> bool:
+    return omlx_holds() > 0
+
+
 def _studio_media_resident() -> Optional[str]:
     """Which Studio image or video model is resident, loading, or about to load, if any.
     Reads loaded modules only: nothing is imported or constructed."""
@@ -325,7 +381,13 @@ def _freed_action(urls: list[str]) -> str:
     return f"Freed ComfyUI memory: {', '.join(urls)}"
 
 
-async def _admit(reason: str, *, local: bool, media_hold: Optional[MediaHold] = None) -> ArbiterResult:
+async def _admit(
+    reason: str,
+    *,
+    local: bool,
+    media_hold: Optional[MediaHold] = None,
+    omlx_hold: Optional[OmlxRequestHold] = None,
+) -> ArbiterResult:
     try:
         config = get_config()
         if not config.enabled:
@@ -349,6 +411,9 @@ async def _admit(reason: str, *, local: bool, media_hold: Optional[MediaHold] = 
                 if refusal:
                     raise AttachedAdmissionError(refusal)
             if local:
+                if _omlx_held():
+                    # Same refusal as oMLX's 409 model_busy on an unload: an oMLX request is being served or about to be.
+                    raise AttachedAdmissionError(BUSY_MESSAGE)
                 if config.arbitrate_comfyui:
                     if _comfyui_held():
                         raise AttachedAdmissionError(
@@ -367,6 +432,8 @@ async def _admit(reason: str, *, local: bool, media_hold: Optional[MediaHold] = 
                 if actions:
                     _record(reason, actions)
                 return ArbiterResult(acted = bool(actions), actions = tuple(actions))
+            if omlx_hold is not None:
+                _register_omlx_hold(omlx_hold)
             return ArbiterResult()
     except Exception as exc:
         if media_hold is not None:
@@ -409,13 +476,15 @@ async def free_for_local(reason: Reason, *, media_hold: Optional[MediaHold] = No
     return await _admit(reason, local = True, media_hold = media_hold)
 
 
-async def before_omlx_use() -> ArbiterResult:
-    return await _admit("omlx_use", local = False)
+async def before_omlx_use(hold: Optional[OmlxRequestHold] = None) -> ArbiterResult:
+    """Admit an oMLX request. On success ``hold`` (when given) is registered under the arbiter lock, so competing
+    admissions that would unload oMLX are refused until the caller releases it. Nothing is registered on a refusal."""
+    return await _admit("omlx_use", local = False, omlx_hold = hold)
 
 
-async def before_omlx_load() -> ArbiterResult:
+async def before_omlx_load(hold: Optional[OmlxRequestHold] = None) -> ArbiterResult:
     """``before_omlx_use``, then free idle ComfyUI memory (Studio's and its peers') to make room for the load."""
-    result = await before_omlx_use()
+    result = await before_omlx_use(hold)
     if result.error or result.skipped:
         return result
     try:
@@ -445,6 +514,8 @@ async def before_comfyui_job(hold: Optional[ComfyJobHold] = None) -> ArbiterResu
         if not config.arbitrate_comfyui:
             return ArbiterResult(skipped = "arbitration_off")
         async with _lock():
+            if _omlx_held():
+                raise AttachedAdmissionError(BUSY_MESSAGE)
             cancel_comfyui_idle_free()
             busy = _local_workload() or await _media_resident_async()
             if busy:
