@@ -48017,6 +48017,7 @@ async def _external_image_generation(
         base_url = validate_provider_base_url(base_url)
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from None
+    await _admit_attached_omlx_provider(config["provider_type"], base_url)
 
     async with provider_config_guard(
         provider_id, shared_by_owner = bool(config.get("shared_by_owner"))
