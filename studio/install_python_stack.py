@@ -8606,7 +8606,14 @@ def _fork_zoo_pin_installed(*, strict: bool) -> bool:
     except PackageNotFoundError:
         found = "(not installed)"
     if found == expected:
-        return True
+        # Two zoo commits can carry one version (2026.10.6 did), so the version alone cannot tell
+        # them apart: the commit uv/pip recorded in direct_url.json must be the pinned one too.
+        recorded = ((_recorded_direct_url("unsloth_zoo") or {}).get("vcs_info") or {}).get("commit_id")
+        pinned = _fork_zoo_pin()["commit"]
+        if recorded == pinned:
+            return True
+        found = f"{found} @ {recorded or '(no recorded commit)'}"
+        expected = f"{expected} @ {pinned}"
     message = f"unsloth-zoo is {found} after the install but studio/fork-pins.toml pins {expected}"
     if strict:
         raise SystemExit(f"fork install: {message}")
