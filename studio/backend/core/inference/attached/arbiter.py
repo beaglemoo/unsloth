@@ -241,14 +241,30 @@ class OmlxRequestHold:
     The claim is registered under the arbiter lock on admission; competing admissions that would unload oMLX
     are refused with oMLX's own busy message while any claim exists. Claims share (a count, not a mutex).
     ``release`` is idempotent; callers release in a ``finally`` (a stream: when its generator ends or closes).
-    A claim older than ``_OMLX_HOLD_MAX_AGE_S`` is ignored so a lost release can never wedge the arbiter.
+    A claim whose owner task is still alive is never expired, however long its request runs (a tool loop can
+    outlast any fixed limit and its later provider turns are not re-admitted). A claim older than
+    ``_OMLX_HOLD_MAX_AGE_S`` whose owner is gone (finished, collected, or unknown) was leaked and is ignored so a
+    lost release can never wedge the arbiter. The owner is the task that registered the claim; a stream re-points it
+    to the task iterating it (``touch``).
     """
 
-    __slots__ = ("active", "since")
+    __slots__ = ("active", "since", "last_seen", "_owner")
 
     def __init__(self):
         self.active = False
         self.since = 0.0
+        self.last_seen = 0.0
+        self._owner: Optional[weakref.ref] = None
+
+    def touch(self) -> None:
+        """Record that the current task is working on this request now (a stream chunk is being produced)."""
+        with _omlx_holds_lock:
+            self._owner = _current_task_ref()
+            self.last_seen = time.monotonic()
+
+    def owner_alive(self) -> bool:
+        owner = self._owner() if self._owner is not None else None
+        return owner is not None and not owner.done()
 
     def release(self) -> None:
         with _omlx_holds_lock:
@@ -266,21 +282,30 @@ def new_omlx_hold() -> OmlxRequestHold:
     return OmlxRequestHold()
 
 
+def _current_task_ref() -> Optional[weakref.ref]:
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return None
+    return weakref.ref(task) if task is not None else None
+
+
 def _register_omlx_hold(hold: OmlxRequestHold) -> None:
     with _omlx_holds_lock:
         hold.active = True
-        hold.since = time.monotonic()
+        hold.since = hold.last_seen = time.monotonic()
+        hold._owner = _current_task_ref()
         _omlx_holds.add(hold)
 
 
 def omlx_holds() -> int:
-    """How many oMLX requests hold a claim right now (expired claims are dropped, with a warning)."""
+    """How many oMLX requests hold a claim right now (leaked claims, old with a finished owner, are dropped with a warning)."""
     now = time.monotonic()
     with _omlx_holds_lock:
-        for hold in [h for h in _omlx_holds if now - h.since > _OMLX_HOLD_MAX_AGE_S]:
+        for hold in [h for h in _omlx_holds if now - h.since > _OMLX_HOLD_MAX_AGE_S and not h.owner_alive()]:
             hold.active = False
             _omlx_holds.discard(hold)
-            logger.warning("Dropped an oMLX request claim held for over %d s.", int(_OMLX_HOLD_MAX_AGE_S))
+            logger.warning("Dropped an oMLX request claim held for over %d s by a finished owner.", int(_OMLX_HOLD_MAX_AGE_S))
         return len(_omlx_holds)
 
 
