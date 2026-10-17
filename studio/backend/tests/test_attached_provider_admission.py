@@ -131,6 +131,46 @@ def test_speech_connection_to_the_omlx_origin_is_refused_while_busy(studio, busy
     studio["gate"].assert_awaited_once()
 
 
+def external_image(provider_id = "userconn"):
+    from models.inference import DiffusionGenerateRequest
+
+    body = DiffusionGenerateRequest(prompt = "a fox", provider_id = provider_id, model = "flux")
+    request = NS(headers = {}, state = NS(), scope = {})
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(inference._external_image_generation(body, request))
+    return caught.value
+
+
+@pytest.mark.parametrize("busy", ["training", "local"])
+def test_external_image_connection_to_the_omlx_origin_is_refused_while_busy(studio, busy):
+    studio[busy] = True
+    studio["saved"]["userconn"] = saved_connection()
+    error = external_image()
+    assert error.status_code == 503
+    assert error.headers == {"Retry-After": "15"}
+    studio["gate"].assert_awaited_once()
+
+
+def test_external_image_connection_to_the_omlx_origin_passes_when_idle(studio):
+    studio["saved"]["userconn"] = saved_connection()
+    assert external_image().status_code == PASSED
+    studio["gate"].assert_awaited_once()
+
+
+def test_external_image_attached_provider_is_refused_while_training(studio):
+    studio["training"] = True
+    studio["saved"][ATTACHED_OMLX_ID] = saved_connection(id = ATTACHED_OMLX_ID, provider_type = "omlx")
+    assert external_image(ATTACHED_OMLX_ID).status_code == 503
+    studio["gate"].assert_awaited_once()
+
+
+def test_external_image_other_destinations_are_not_arbitrated(studio):
+    studio["training"] = True
+    studio["saved"]["userconn"] = saved_connection(base_url = "http://127.0.0.1:8080/v1")
+    assert external_image().status_code == PASSED
+    studio["gate"].assert_not_awaited()
+
+
 @pytest.mark.parametrize("provider_type,base_url,expected", [
     ("omlx", None, True),
     ("custom", "http://127.0.0.1:8843/v1", True),
