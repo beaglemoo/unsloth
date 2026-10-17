@@ -11740,16 +11740,74 @@ async def _admit_attached_local_load(media_hold = None):
     return result
 
 
-async def _admit_attached_omlx_provider(provider_type, base_url) -> None:
-    """Gate a provider request that reaches the attached oMLX, whatever connection named it."""
+async def _admit_attached_omlx_provider(provider_type, base_url, hold = None) -> None:
+    """Gate a provider request that reaches the attached oMLX, whatever connection named it.
+
+    ``hold`` (an arbiter ``OmlxRequestHold``) is registered under the arbiter lock on admission, so a ComfyUI job or a
+    local load cannot unload oMLX between this call and the upstream request; the caller releases it (see ``_holds_omlx``)."""
     from core.inference.attached.arbiter import before_omlx_use, targets_omlx
 
     if not targets_omlx(provider_type, base_url):
         return
-    result = await before_omlx_use()
+    result = await (before_omlx_use(hold) if hold is not None else before_omlx_use())
     if result.error:
         raise HTTPException(status_code = 503, detail = result.error,
                             headers = {"Retry-After": "15"})
+
+
+class _HeldStream:
+    """A streaming body that releases an oMLX request claim when it ends, errors, is closed, or is dropped unread."""
+
+    def __init__(self, body, hold):
+        self._body = body
+        self._hold = hold
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return await self._body.__anext__()
+        except BaseException:
+            self._hold.release()
+            raise
+
+    async def aclose(self):
+        try:
+            close = getattr(self._body, "aclose", None)
+            if close is not None:
+                await close()
+        finally:
+            self._hold.release()
+
+    def __del__(self):
+        try:
+            self._hold.release()
+        except Exception:
+            pass
+
+
+def _holds_omlx(func):
+    """Give ``func`` an arbiter claim (``_omlx_hold=``) that outlives admission: released when it returns or raises
+    (cancellation included), or, for a ``StreamingResponse``, when the body stream finishes, fails or is closed."""
+
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        from core.inference.attached.arbiter import new_omlx_hold
+
+        hold = new_omlx_hold()
+        try:
+            response = await func(*args, _omlx_hold = hold, **kwargs)
+        except BaseException:
+            hold.release()
+            raise
+        if isinstance(response, StreamingResponse) and hold.active:
+            response.body_iterator = _HeldStream(response.body_iterator, hold)
+        else:
+            hold.release()
+        return response
+
+    return wrapper
 
 
 def release_chat_gpu_claim() -> bool:
@@ -23836,7 +23894,8 @@ def _refuse_decision_connection(provider_type: Optional[str], api_type: Optional
         )
 
 
-async def _external_tts_speech(body: AudioSpeechRequest, request: Request) -> Response:
+@_holds_omlx
+async def _external_tts_speech(body: AudioSpeechRequest, request: Request, *, _omlx_hold = None) -> Response:
     """Proxy CreateSpeech to a saved connection, so read-aloud skips the local model slot."""
     provider_id = (body.provider_id or "").strip()
     external_model = (body.model or "").strip()
@@ -23869,7 +23928,7 @@ async def _external_tts_speech(body: AudioSpeechRequest, request: Request) -> Re
         base_url = validate_provider_base_url(base_url)
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from None
-    await _admit_attached_omlx_provider(config["provider_type"], base_url)
+    await _admit_attached_omlx_provider(config["provider_type"], base_url, _omlx_hold)
     async with provider_config_guard(
         provider_id, shared_by_owner = bool(config.get("shared_by_owner"))
     ):
@@ -24119,6 +24178,7 @@ async def openai_audio_speech(
     return Response(content = content, media_type = media_type)
 
 
+@_holds_omlx
 async def _external_stt_transcription(
     *,
     provider_id: str,
@@ -24131,6 +24191,7 @@ async def _external_stt_transcription(
     encrypted_api_key: Optional[str],
     request: Request,
     timestamp_granularities: Optional[list[str]] = None,
+    _omlx_hold = None,
 ) -> Response:
     provider_id = provider_id.strip()
     if not provider_id:
@@ -24163,7 +24224,7 @@ async def _external_stt_transcription(
         base_url = validate_provider_base_url(base_url)
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from None
-    await _admit_attached_omlx_provider(config["provider_type"], base_url)
+    await _admit_attached_omlx_provider(config["provider_type"], base_url, _omlx_hold)
 
     async with provider_config_guard(
         provider_id, shared_by_owner = bool(config.get("shared_by_owner"))
@@ -27916,6 +27977,7 @@ def _provider_compaction_truncation(messages: list[dict]) -> dict:
     }
 
 
+@_holds_omlx
 async def _proxy_to_external_provider(
     payload: ChatCompletionRequest,
     request: Request,
@@ -27923,6 +27985,7 @@ async def _proxy_to_external_provider(
     *,
     managed = None,
     early_close_status = None,
+    _omlx_hold = None,
 ) -> Response:
     """Managed upstream streams are tracked for swap cancel; early_close_status defaults to cancelled."""
     provider_type = payload.provider_type
@@ -28040,7 +28103,7 @@ async def _proxy_to_external_provider(
         except ValueError as exc:
             raise HTTPException(status_code = 400, detail = str(exc)) from None
         # Every route to the attached oMLX is admitted here, once the effective type and destination are known.
-        await _admit_attached_omlx_provider(provider_type, base_url)
+        await _admit_attached_omlx_provider(provider_type, base_url, _omlx_hold)
 
     if provider_type == "openai_codex":
         from core.inference.openai_codex_auth import (
@@ -28433,6 +28496,8 @@ async def _proxy_to_external_provider(
                 )
                 yield "data: [DONE]\n\n"
             finally:
+                if _omlx_hold is not None:
+                    _omlx_hold.release()
                 await client.close()
                 await _stop_local_disconnect_cancel_watcher(disconnect_task)
 
@@ -28951,6 +29016,8 @@ async def _proxy_to_external_provider(
                 await gen.aclose()
             except RuntimeError:
                 pass  # httpcore cleanup may raise on Python 3.13 with httpcore 1.0.x
+            if _omlx_hold is not None:
+                _omlx_hold.release()
             await client.close()
 
     def _tracked_stream():
@@ -47950,8 +48017,9 @@ def _stop_external_image_runs() -> bool:
     return bool(runs)
 
 
+@_holds_omlx
 async def _external_image_generation(
-    body: DiffusionGenerateRequest, request: Request
+    body: DiffusionGenerateRequest, request: Request, *, _omlx_hold = None
 ) -> DiffusionGenerateResponse:
     from PIL import Image
 
@@ -48017,7 +48085,7 @@ async def _external_image_generation(
         base_url = validate_provider_base_url(base_url)
     except ValueError as exc:
         raise HTTPException(status_code = 400, detail = str(exc)) from None
-    await _admit_attached_omlx_provider(config["provider_type"], base_url)
+    await _admit_attached_omlx_provider(config["provider_type"], base_url, _omlx_hold)
 
     async with provider_config_guard(
         provider_id, shared_by_owner = bool(config.get("shared_by_owner"))

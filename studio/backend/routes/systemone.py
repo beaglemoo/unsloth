@@ -365,27 +365,32 @@ async def _connection_decide(
         base_url = await asyncio.to_thread(validate_provider_base_url, config["base_url"])
     except ValueError as exc:
         raise _error(503, "api_usage_error", str(exc)) from None
-    from core.inference.attached.arbiter import before_omlx_use, targets_omlx
+    from core.inference.attached.arbiter import before_omlx_use, new_omlx_hold, targets_omlx
 
-    if targets_omlx(config["provider_type"], base_url):
-        admitted = await before_omlx_use()
-        if admitted.error:
-            raise _error(503, "api_usage_error", admitted.error, retry_after = 15)
-    api_key = await arun_as(OWNER, _connection_key(provider_id, config))
-    client = ExternalProviderClient(config["provider_type"], base_url, api_key)
+    # Held from admission until the decision returns or fails, so a ComfyUI job or local load cannot unload oMLX in between.
+    omlx_hold = new_omlx_hold()
     try:
-        result = await client.create_decision(connection.model, state, questions)
-    except httpx.HTTPStatusError as exc:
-        raise _upstream_error(config["display_name"], exc.response) from None
-    except (httpx.HTTPError, ValueError) as exc:
-        raise _error(
-            502, "api_error", f"Couldn't reach '{config['display_name']}': {type(exc).__name__}"
-        ) from None
-    if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
-        raise _error(
-            502, "api_error", f"'{config['display_name']}' did not answer in the System One format."
-        )
-    return result
+        if targets_omlx(config["provider_type"], base_url):
+            admitted = await before_omlx_use(omlx_hold)
+            if admitted.error:
+                raise _error(503, "api_usage_error", admitted.error, retry_after = 15)
+        api_key = await arun_as(OWNER, _connection_key(provider_id, config))
+        client = ExternalProviderClient(config["provider_type"], base_url, api_key)
+        try:
+            result = await client.create_decision(connection.model, state, questions)
+        except httpx.HTTPStatusError as exc:
+            raise _upstream_error(config["display_name"], exc.response) from None
+        except (httpx.HTTPError, ValueError) as exc:
+            raise _error(
+                502, "api_error", f"Couldn't reach '{config['display_name']}': {type(exc).__name__}"
+            ) from None
+        if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
+            raise _error(
+                502, "api_error", f"'{config['display_name']}' did not answer in the System One format."
+            )
+        return result
+    finally:
+        omlx_hold.release()
 
 
 async def _connection_key(provider_id: str, config: dict) -> str:

@@ -130,6 +130,10 @@ def _no_real_comfyui_or_engine_state(monkeypatch, tmp_path):
     # desktop.json and the *.fail markers are never read from ~/.unsloth.
     monkeypatch.setenv("STUDIO_COMFYUI_URL", "")
     monkeypatch.setenv("UNSLOTH_ENGINES_HOME", str(tmp_path / "engines-home"))
+    # A test that admits an oMLX request and never releases it must not refuse the next test's local load.
+    arbiter = sys.modules.get("core.inference.attached.arbiter")
+    if arbiter is not None:
+        arbiter._omlx_holds.clear()
 
 
 @pytest.fixture(autouse = True)
