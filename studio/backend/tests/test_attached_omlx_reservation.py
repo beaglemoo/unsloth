@@ -182,14 +182,128 @@ def test_a_competitor_and_an_oMLX_admission_racing_never_both_win(studio):
     run(scenario())
 
 
-def test_a_stale_reservation_is_ignored_and_logged(studio, monkeypatch):
+def clock_at(monkeypatch):
+    """A controllable ``monotonic`` for the arbiter only (the event loop keeps the real one)."""
+    import time as real_time
+
+    now = [1000.0]
+    monkeypatch.setattr(arbiter, "time", NS(monotonic = lambda: now[0], time = real_time.time))
+    return now
+
+
+def test_a_leaked_reservation_is_ignored_and_logged(studio, monkeypatch):
     warnings = []
     monkeypatch.setattr(arbiter.logger, "warning", lambda *a, **k: warnings.append(a))
-    hold = admitted_hold()
+    now = clock_at(monkeypatch)
+    hold = admitted_hold()  # its owner task ended inside run() without a release: leaked
     assert arbiter.omlx_holds() == 1
-    hold.since -= arbiter._OMLX_HOLD_MAX_AGE_S + 1
+    now[0] += arbiter._OMLX_HOLD_MAX_AGE_S + 1
     assert run(arbiter.free_for_local("local_load")).error is None, "an expired claim must not wedge the arbiter"
     assert arbiter.omlx_holds() == 0 and not hold.active and warnings
+
+
+def test_a_reservation_without_an_owner_is_leaked_past_the_age(studio, monkeypatch):
+    now = clock_at(monkeypatch)
+    hold = admitted_hold()
+    hold._owner = None
+    now[0] += arbiter._OMLX_HOLD_MAX_AGE_S + 1
+    assert arbiter.omlx_holds() == 0 and not hold.active
+
+
+def test_a_live_owner_keeps_its_reservation_past_the_age(studio, monkeypatch):
+    """A tool loop outlasts the age limit; its next provider turn is not re-admitted, so the claim must hold."""
+    now = clock_at(monkeypatch)
+    turns = []
+
+    async def scenario():
+        resume, finished = asyncio.Event(), asyncio.Event()
+        hold = arbiter.new_omlx_hold()
+
+        async def tool_loop():
+            assert (await arbiter.before_omlx_use(hold)).error is None
+            turns.append("first provider turn")
+            await resume.wait()  # tool calls running for longer than the age limit
+            assert hold.active, "the claim must still be held for the next provider turn"
+            turns.append("second provider turn")
+            hold.release()
+            finished.set()
+
+        task = asyncio.create_task(tool_loop())
+        await until(lambda: hold.active)
+        now[0] += arbiter._OMLX_HOLD_MAX_AGE_S + 1
+        assert arbiter.omlx_holds() == 1 and hold.active
+        results, _media, _job = await competitors()
+        assert refused(results), results
+        assert studio.omlx_unloads == 0
+        resume.set()
+        await finished.wait()
+        await task
+        assert arbiter.omlx_holds() == 0
+        assert (await arbiter.free_for_local("local_load")).error is None
+
+    run(scenario())
+    assert turns == ["first provider turn", "second provider turn"]
+
+
+def test_a_finished_owner_loses_the_reservation_past_the_age(studio, monkeypatch):
+    now = clock_at(monkeypatch)
+
+    async def scenario():
+        hold = arbiter.new_omlx_hold()
+
+        async def abandoned():
+            await arbiter.before_omlx_use(hold)  # returns without releasing
+
+        await asyncio.create_task(abandoned())
+        assert hold.active and arbiter.omlx_holds() == 1
+        now[0] += arbiter._OMLX_HOLD_MAX_AGE_S - 1
+        assert arbiter.omlx_holds() == 1, "young enough to keep"
+        now[0] += 2
+        assert arbiter.omlx_holds() == 0 and not hold.active
+        assert (await arbiter.free_for_local("local_load")).error is None
+
+    run(scenario())
+
+
+def test_a_stream_repoints_the_owner_to_the_task_iterating_it(studio, monkeypatch):
+    now = clock_at(monkeypatch)
+
+    async def body():
+        yield "a"
+        yield "b"
+        await asyncio.Event().wait()
+
+    async def scenario():
+        hold = arbiter.new_omlx_hold()
+
+        async def handler():
+            await arbiter.before_omlx_use(hold)
+            return inference._HeldStream(body(), hold)
+
+        stream = await asyncio.create_task(handler())  # the handler task is done; the claim is young
+        proceed, iterating, ended = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def respond():
+            assert await stream.__anext__() == "a"
+            iterating.set()
+            await proceed.wait()  # between chunks, long past the age limit
+            assert await stream.__anext__() == "b"
+            ended.set()  # the response task ends without exhausting or closing the stream
+
+        task = asyncio.create_task(respond())
+        await iterating.wait()
+        now[0] += arbiter._OMLX_HOLD_MAX_AGE_S + 1
+        assert arbiter.omlx_holds() == 1 and hold.active, "the iterating task owns the claim"
+        assert refused({"local": await arbiter.free_for_local("local_load")})
+        proceed.set()
+        await task
+        assert ended.is_set()
+        now[0] += arbiter._OMLX_HOLD_MAX_AGE_S + 1
+        assert arbiter.omlx_holds() == 0 and not hold.active, "a finished iterator that never released is leaked"
+        stream._hold = arbiter.new_omlx_hold()  # keep __del__ from touching the dropped claim's state
+        await stream._body.aclose()
+
+    run(scenario())
 
 
 def test_a_fresh_reservation_is_kept(studio):
