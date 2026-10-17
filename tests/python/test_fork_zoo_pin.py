@@ -67,6 +67,7 @@ def test_the_overlay_installs_the_pin_and_verifies_the_version(monkeypatch, pins
     monkeypatch.setattr(ips, "_step", lambda *a, **k: None)
     monkeypatch.setattr(ips, "pip_install", lambda label, *a, **k: installs.append((label, a, k)))
     monkeypatch.setattr("importlib.metadata.version", lambda name: "2026.10.6")
+    monkeypatch.setattr(ips, "_recorded_direct_url", lambda name: {"vcs_info": {"commit_id": COMMIT}})
     assert ips._overlay_local_core_package("unsloth-zoo", "/src/unsloth") is True
     assert installs[0][1] == (
         "--no-cache-dir",
@@ -132,3 +133,13 @@ def test_without_fork_mode_the_overlay_is_unchanged(monkeypatch, env):
     assert ips._unsloth_zoo_git_spec() == "unsloth-zoo @ git+https://github.com/unslothai/unsloth-zoo"
     monkeypatch.setenv("UNSLOTH_ZOO_REF", "v1")
     assert ips._unsloth_zoo_git_spec().endswith("@v1")
+
+
+def test_the_right_version_from_the_wrong_commit_fails_the_install(monkeypatch, pins_file):
+    monkeypatch.setenv("STUDIO_LOCAL_NONEDITABLE", "1")
+    monkeypatch.setattr(ips, "_step", lambda *a, **k: None)
+    monkeypatch.setattr(ips, "pip_install", lambda *a, **k: None)
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "2026.10.6")
+    monkeypatch.setattr(ips, "_recorded_direct_url", lambda name: {"vcs_info": {"commit_id": "0" * 40}})
+    with pytest.raises(SystemExit, match = "pins 2026.10.6 @"):
+        ips._overlay_local_core_package("unsloth-zoo", "/src/unsloth")
