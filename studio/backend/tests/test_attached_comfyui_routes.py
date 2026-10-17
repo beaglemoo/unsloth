@@ -306,6 +306,7 @@ def test_progress_when_idle_has_the_diffusion_shape_plus_comfyui_fields(client):
     assert body == {
         "active": False, "step": 0, "total_steps": 0, "fraction": 0.0, "eta_seconds": None, "phase": None,
         "preview": None, "preview_seq": 0, "queue_position": None, "prompt_id": None, "engine": "comfyui",
+        "target": None,
     }
 
 
