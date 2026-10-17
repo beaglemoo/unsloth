@@ -87,7 +87,7 @@ test("the Images page keeps ComfyUI behind one panel and one effective-engine co
   // the engine switch only renders while ComfyUI is available
   assert.match(page, /comfyAvailable && pageMode === "create" && \(\s*<PillTabs/);
   // one writer for the sidebar's supported list: ComfyUI publishes Create only
-  assert.match(page, /if \(comfyMode\) \{\s*setSupported\(\["create"\]\);/);
+  assert.match(page, /if \(comfyMode \|\| external\) \{\s*setSupported\(\["create"\]\);/);
   assert.equal(page.match(/setSupported\(/g)?.length, 3);
   // Studio's footer (Generate, Stop, Reapply) is replaced, not shared, in ComfyUI mode
   assert.match(page, /\{!comfyMode && \(\s*<div className="relative z-10 flex shrink-0 flex-wrap justify-center gap-2/);
