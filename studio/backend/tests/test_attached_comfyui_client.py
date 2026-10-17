@@ -121,10 +121,10 @@ def test_parse_queue_accepts_tuples_of_extra_data_less_entries():
 
 
 def test_system_stats_and_version():
-    stats = {"system": {"comfyui_version": "0.39.0", "ram_free": 5}, "devices": [{"name": "mps"}]}
+    stats = {"system": {"comfyui_version": "0.41.3", "ram_free": 5}, "devices": [{"name": "mps"}]}
     client = _client(lambda r: httpx.Response(200, json = stats))
     assert run(client.system_stats()) == stats
-    assert run(client.version()) == "0.39.0"
+    assert run(client.version()) == "0.41.3"
 
 
 @pytest.mark.parametrize("response", [httpx.Response(500), httpx.Response(200, json = [1]), httpx.Response(200, content = b"x")])

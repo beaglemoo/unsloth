@@ -1,5 +1,6 @@
-# Frozen from the StoryPress ComfyUI runtime venv (Python 3.13.14, torch 2.12.1, ComfyUI v0.39.0
-# b0b74356, the stack proven with Qwen-Image 2.1 on this Mac), 2026-10-07:
+# ComfyUI v0.41.3 8713616f, edited from the v0.39 freeze, 2026-10-17 (torch stack unchanged).
+# The v0.39 freeze came from the StoryPress ComfyUI runtime venv (Python 3.13.14, torch 2.12.1,
+# ComfyUI v0.39.0 b0b74356, the stack proven with Qwen-Image 2.1 on this Mac), 2026-10-07:
 #   uv pip freeze --python "$HOME/Library/Application Support/StoryPressRuntime/ComfyUI/.venv/bin/python"
 # Used by build-engines-mac.sh as `-c` when installing studio/engines/comfyui/requirements.txt, so the
 # ComfyUI venv is reproducible. Regenerate it, and bump the submodule, together.
@@ -16,17 +17,17 @@ blake3==1.0.9
 certifi==2026.7.22
 charset-normalizer==3.5.1
 click==8.5.0
-comfy-aimdo==0.5.5
+comfy-aimdo==0.5.6
 comfy-angle==0.1.1
 comfy-kitchen==0.2.37
-comfyui-embedded-docs==0.5.13
-comfyui-frontend-package==1.53.10
-comfyui-workflow-templates==0.11.76
-comfyui-workflow-templates-core==0.3.367
-comfyui-workflow-templates-json==0.1.102
+comfyui-embedded-docs==0.5.14
+comfyui-frontend-package==1.55.17
+comfyui-workflow-templates==0.11.87
+comfyui-workflow-templates-core==0.3.378
+comfyui-workflow-templates-json==0.1.113
 comfyui-workflow-templates-media-api==0.3.84
 comfyui-workflow-templates-media-assets-01==0.1.48
-comfyui-workflow-templates-media-assets-02==0.1.9
+comfyui-workflow-templates-media-assets-02==0.1.16
 comfyui-workflow-templates-media-image==0.3.160
 comfyui-workflow-templates-media-other==0.3.229
 comfyui-workflow-templates-media-video==0.3.101
