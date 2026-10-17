@@ -12497,7 +12497,10 @@ class _HeldStream:
 
     async def __anext__(self):
         try:
-            return await self._body.__anext__()
+            self._hold.touch()
+            chunk = await self._body.__anext__()
+            self._hold.touch()
+            return chunk
         except BaseException:
             self._hold.release()
             raise
