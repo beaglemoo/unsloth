@@ -11,9 +11,10 @@
 #   2. edit `commit` and `version` here, in one commit
 #   3. run `studio/scripts/update-fork.sh` (or build-fork-mac.sh --install) and check
 #      `~/.unsloth/studio/unsloth_studio/bin/python -c "import importlib.metadata as m; print(m.version('unsloth_zoo'))"`
-# Recorded 2026-10-04 from the live ~/.unsloth/studio venv (direct_url.json commit_id).
+# Recorded 2026-10-04 from the live ~/.unsloth/studio venv (direct_url.json commit_id); bumped 2026-10-17 to
+# the zoo main commit that pins mlx==0.32.4 (the PyPI 2026.10.6 build pins 0.32.3, Studio needs 0.32.4).
 
 [unsloth-zoo]
-version = "2026.9.9"
+version = "2026.10.6"
 url = "https://github.com/unslothai/unsloth-zoo"
-commit = "867a86383371ebeb8ab1948d085540d134c07b4c"
+commit = "9e560677fbe7460cf9d2e047d8825689cacb02b7"
