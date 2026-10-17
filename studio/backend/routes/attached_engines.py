@@ -146,6 +146,7 @@ async def attached_status(since: float = 0):
         "enabled": True,
         "omlx": omlx,
         "comfyui": comfyui,
+        "omlx_request_holds": arbiter.omlx_holds(),
         "models_hash": _models_hash(omlx_ids),
         "notices": arbiter.recent_notices(since),
     }
@@ -257,8 +258,9 @@ async def _resolve_omlx_dir(client: OmlxClient, model_id: str) -> str:
     return dir_id
 
 
-async def _admit_omlx_use(admit = None):
-    result = await (admit or arbiter.before_omlx_use)()
+async def _admit_omlx_use(admit = None, hold = None):
+    admit = admit or arbiter.before_omlx_use
+    result = await (admit(hold) if hold is not None else admit())
     try:
         result.require_clear()
     except AttachedEngineError as exc:
@@ -276,11 +278,16 @@ async def omlx_load(body: OmlxModelRequest):
     config = get_config()
     client = _omlx(config)
     dir_id = await _resolve_omlx_dir(client, body.model_id)
-    notice = await _admit_omlx_use(arbiter.before_omlx_load)
+    # Held until the load answers, so a ComfyUI job or local load cannot unload the model that is loading.
+    hold = arbiter.new_omlx_hold()
     try:
-        await client.load(dir_id)
-    except AttachedEngineError as exc:
-        raise HTTPException(status_code = 502, detail = str(exc)) from exc
+        notice = await _admit_omlx_use(arbiter.before_omlx_load, hold)
+        try:
+            await client.load(dir_id)
+        except AttachedEngineError as exc:
+            raise HTTPException(status_code = 502, detail = str(exc)) from exc
+    finally:
+        hold.release()
     return {"loaded": dir_id, "actions": list(notice.actions)}
 
 
