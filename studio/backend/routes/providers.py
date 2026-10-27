@@ -46,6 +46,7 @@ from core.inference.providers import (
 )
 from core.inference.pricing import pricing_snapshot
 from core.inference.external_provider import ExternalProviderClient
+from core.inference.attached.arbiter import new_omlx_hold
 
 from core.inference import openai_codex_auth, openai_codex_client
 from core.inference.provider_model_capabilities import (
@@ -745,10 +746,15 @@ async def _test_custom_provider_connectivity(
     model_id: str,
     api_type: str = "chat_completions",
     base_url: str = "",
+    admit=None,
 ) -> ProviderTestResult:
     """Probe a custom OpenAI-compatible endpoint without assuming /chat/completions. TTS-only gateways such as
     Kokoro expose ``/models`` and ``/audio/speech`` but not ``/chat/completions``. Try those first, then fall
-    back to a chat probe."""
+    back to a chat probe.
+
+    ``admit`` (an async callable, idempotent) is awaited before the first request that runs inference, so a
+    connection to the attached oMLX is arbitrated and held; a ``/models`` listing alone never calls it. An
+    ``HTTPException`` it raises propagates (the probes below swallow other errors)."""
     model_id = (model_id or "").strip()
     models_error: Exception | None = None
     models = None
@@ -802,6 +808,9 @@ async def _test_custom_provider_connectivity(
             ),
             models_count = None,
         )
+
+    if admit is not None:
+        await admit()
 
     if api_type == "responses":
         last_failure = "Responses endpoint returned no completion."
@@ -891,11 +900,13 @@ async def _test_custom_provider_connectivity(
         )
 
 
-async def _test_decision_connectivity(client, model_id: str) -> ProviderTestResult:
+async def _test_decision_connectivity(client, model_id: str, admit=None) -> ProviderTestResult:
     if not model_id:
         return ProviderTestResult(
             success = False, message = "Connection failed: add a model ID to test with."
         )
+    if admit is not None:
+        await admit()
     try:
         result = await client.create_decision(
             model_id,
@@ -1001,12 +1012,28 @@ async def test_provider(
             success = True, message = "Connected successfully.", models_count = None
         )
 
+    # Probes that run inference reach oMLX like any other request to it: admitted once, and held until the test ends.
+    omlx_hold = new_omlx_hold()
+    admitted = False
+
+    async def admit_inference():
+        nonlocal admitted
+        if admitted:
+            return
+        # Imported here: routes.inference imports this module.
+        from routes.inference import _admit_attached_omlx_provider
+
+        await _admit_attached_omlx_provider(payload.provider_type, base_url, omlx_hold)
+        admitted = True
+
     try:
         if answers_decisions_only(payload.provider_type, payload.api_type):
-            return await _test_decision_connectivity(client, (payload.model_id or "").strip())
+            return await _test_decision_connectivity(
+                client, (payload.model_id or "").strip(), admit_inference
+            )
         if payload.provider_type == "custom":
             return await _test_custom_provider_connectivity(
-                client, payload.model_id or "", payload.api_type, base_url
+                client, payload.model_id or "", payload.api_type, base_url, admit_inference
             )
         if info.get("model_list_mode") == "curated":
             await client.verify_models_endpoint_lightweight()
@@ -1032,6 +1059,11 @@ async def test_provider(
             message = f"Connected successfully. Found {len(models)} model(s).",
             models_count = len(models),
         )
+    except HTTPException as exc:
+        # The arbiter's refusal (oMLX is busy, or Studio holds memory), shown in the dialog as is.
+        return ProviderTestResult(
+            success = False, message = f"Connection failed: {exc.detail}", models_count = None
+        )
     except Exception as exc:
         _log_provider_failure("providers.test_failed", exc, provider_type = payload.provider_type)
         return ProviderTestResult(
@@ -1042,7 +1074,10 @@ async def test_provider(
             models_count = None,
         )
     finally:
-        await client.close()
+        try:
+            await client.close()
+        finally:
+            omlx_hold.release()
 
 
 _MODEL_CAPABILITY_CACHE_TTL_SECONDS = 3600.0
