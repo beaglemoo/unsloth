@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -183,3 +184,60 @@ def test_a_fork_install_with_no_checkout_never_reaches_a_pypi_install(monkeypatc
     with pytest.raises(SystemExit, match = "release index"):
         ips.install_python_stack()
     assert calls == []
+
+
+# The fork is detected from the shipped marker, not from STUDIO_LOCAL_NONEDITABLE (a direct run of the
+# installer and `setup.sh --local` set nothing).
+@pytest.fixture
+def bare_fork_env(monkeypatch, pins_file):
+    for var in ("STUDIO_LOCAL_NONEDITABLE", "STUDIO_LOCAL_REPO", "UNSLOTH_ZOO_REF"):
+        # setenv first so the teardown restores a variable the code under test assigns directly.
+        monkeypatch.setenv(var, "")
+        monkeypatch.delenv(var)
+
+
+@pytest.mark.fork
+def test_the_marker_alone_makes_the_install_non_editable_and_pinned(bare_fork_env):
+    assert ips._is_fork_install()
+    assert ips._local_overlay_non_editable()
+    assert ips._unsloth_zoo_git_spec().endswith(f"@{COMMIT}")
+
+
+def test_without_the_marker_nothing_is_forced(bare_fork_env):
+    assert not ips._is_fork_install()
+    assert not ips._local_overlay_non_editable()
+    assert ips._resolve_fork_local_repo("") == ""
+    assert ips._unsloth_zoo_git_spec() == "unsloth-zoo @ git+https://github.com/unslothai/unsloth-zoo"
+
+
+@pytest.mark.fork
+def test_a_direct_run_defaults_to_this_checkout_and_sets_the_fork_env(bare_fork_env):
+    assert ips._resolve_fork_local_repo("") == str(STUDIO_DIR.parent)
+    assert os.environ["STUDIO_LOCAL_NONEDITABLE"] == "1"
+    assert os.environ["STUDIO_LOCAL_REPO"] == str(STUDIO_DIR.parent)
+
+
+@pytest.mark.fork
+def test_an_explicit_checkout_is_kept(bare_fork_env):
+    assert ips._resolve_fork_local_repo("/src/unsloth") == "/src/unsloth"
+
+
+@pytest.mark.fork
+def test_a_fork_install_without_any_checkout_refuses_an_index_install(bare_fork_env, monkeypatch):
+    monkeypatch.setattr(ips, "__file__", "/nonexistent/studio/install_python_stack.py")
+    monkeypatch.setattr(ips, "_FORK_DEFAULT_REPO", "/nonexistent/fork")
+    monkeypatch.setattr(ips, "_is_fork_install", lambda: True)
+    with pytest.raises(SystemExit, match = "release index"):
+        ips._resolve_fork_local_repo("")
+
+
+def test_the_installer_entry_resolves_the_fork_checkout_before_any_install_step():
+    """install_python_stack() defaults the checkout (and forces non-editable) before it reads the
+    environment any further, so a run with no env vars cannot reach the index branches."""
+    body = ips.install_python_stack.__wrapped__ if hasattr(ips.install_python_stack, "__wrapped__") else ips.install_python_stack
+    import inspect
+
+    src = inspect.getsource(body)
+    resolve = src.index('_resolve_fork_local_repo(os.environ.get("STUDIO_LOCAL_REPO", ""))')
+    assert resolve < src.index("_refuse_fork_index_install(local_repo)")
+    assert resolve < src.index("_core_index_install_allowed(local_repo)")
