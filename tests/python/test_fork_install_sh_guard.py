@@ -66,3 +66,16 @@ def test_setup_sh_guard_lets_the_update_local_flow_through():
     # `unsloth studio update --local` exports STUDIO_LOCAL_INSTALL=1; the guard sits after --local is parsed
     assert text.index("export STUDIO_LOCAL_INSTALL=1") < guard
     assert guard < text.index("_DEFAULT_LLAMA_PR_FORCE=")
+
+
+def test_setup_sh_local_in_the_fork_is_non_editable_with_the_pinned_zoo():
+    """setup.sh --local must export STUDIO_LOCAL_NONEDITABLE=1 when the fork marker ships next to it
+    (install_python_stack.py then installs from the checkout with zoo from studio/fork-pins.toml).
+    Read as source: the script is never executed here."""
+    text = SETUP_SH.read_text(encoding = "utf-8")
+    local_arm = text.index("export STUDIO_LOCAL_INSTALL=1")
+    flag = text.index("export STUDIO_LOCAL_NONEDITABLE=1", local_arm)
+    block = text[local_arm:flag]
+    assert '"$SCRIPT_DIR/_fork.py"' in block
+    assert flag < text.index('[ "${STUDIO_LOCAL_INSTALL:-0}" != "1" ] && [ "${UNSLOTH_FORK_ALLOW_INSTALL_SH:-}" != "1" ]')
+    assert (SETUP_SH.parent / "_fork.py").is_file()
