@@ -13,10 +13,10 @@ sys.path.insert(0, str(STUDIO_DIR))
 import install_python_stack as ips
 
 PINS = STUDIO_DIR / "fork-pins.toml"
-COMMIT = "9e560677fbe7460cf9d2e047d8825689cacb02b7"
+COMMIT = "aeb831ae1da152bfee9bd580df2e70c858fe2a71"
 GOOD = f'''# comment
 [unsloth-zoo]
-version = "2026.10.6"   # trailing comment
+version = "2026.10.9"   # trailing comment
 url = "https://github.com/unslothai/unsloth-zoo"
 commit = "{COMMIT}"
 '''
@@ -66,7 +66,7 @@ def test_the_overlay_installs_the_pin_and_verifies_the_version(monkeypatch, pins
     monkeypatch.setenv("STUDIO_LOCAL_NONEDITABLE", "1")
     monkeypatch.setattr(ips, "_step", lambda *a, **k: None)
     monkeypatch.setattr(ips, "pip_install", lambda label, *a, **k: installs.append((label, a, k)))
-    monkeypatch.setattr("importlib.metadata.version", lambda name: "2026.10.6")
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "2026.10.9")
     monkeypatch.setattr(ips, "_recorded_direct_url", lambda name: {"vcs_info": {"commit_id": COMMIT}})
     assert ips._overlay_local_core_package("unsloth-zoo", "/src/unsloth") is True
     assert installs[0][1] == (
@@ -83,7 +83,7 @@ def test_a_zoo_version_that_differs_from_the_pin_fails_the_install(monkeypatch, 
     monkeypatch.setattr(ips, "_step", lambda *a, **k: None)
     monkeypatch.setattr(ips, "pip_install", lambda *a, **k: None)
     monkeypatch.setattr("importlib.metadata.version", lambda name: "2099.1.1")
-    with pytest.raises(SystemExit, match = "pins 2026.10.6"):
+    with pytest.raises(SystemExit, match = "pins 2026.10.9"):
         ips._overlay_local_core_package("unsloth-zoo", "/src/unsloth")
 
 
@@ -105,7 +105,7 @@ def test_the_repair_source_spec_is_the_pin_too(monkeypatch, pins_file):
     "text",
     [
         "",
-        "[unsloth-zoo]\nversion = \"2026.10.6\"\n",
+        "[unsloth-zoo]\nversion = \"2026.10.9\"\n",
         GOOD.replace(COMMIT, "main"),
         GOOD.replace('url = "https://github.com/unslothai/unsloth-zoo"', 'url = "git://x"'),
     ],
@@ -139,7 +139,7 @@ def test_the_right_version_from_the_wrong_commit_fails_the_install(monkeypatch, 
     monkeypatch.setenv("STUDIO_LOCAL_NONEDITABLE", "1")
     monkeypatch.setattr(ips, "_step", lambda *a, **k: None)
     monkeypatch.setattr(ips, "pip_install", lambda *a, **k: None)
-    monkeypatch.setattr("importlib.metadata.version", lambda name: "2026.10.6")
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "2026.10.9")
     monkeypatch.setattr(ips, "_recorded_direct_url", lambda name: {"vcs_info": {"commit_id": "0" * 40}})
-    with pytest.raises(SystemExit, match = "pins 2026.10.6 @"):
+    with pytest.raises(SystemExit, match = "pins 2026.10.9 @"):
         ips._overlay_local_core_package("unsloth-zoo", "/src/unsloth")
