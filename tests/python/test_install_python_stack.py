@@ -2935,7 +2935,7 @@ class TestForkInstallSkipsTheReleaseIndex:
         body = source[source.index("def install_python_stack()"):]
         # the no-torch branch guards its index install, the dev-install branch has a fork twin ahead of it
         assert re.search(
-            r"elif NO_TORCH:.*?if _core_index_install_allowed\(local_repo\):\s+desktop_min_ver",
+            r"elif NO_TORCH:.*?if _core_index_install_allowed\(local_repo\):\s+unsloth_spec, zoo_spec = _desktop_unsloth_spec",
             body,
             re.S,
         )
@@ -3131,8 +3131,8 @@ class TestDesktopBackendVersionConstraint:
     def test_core_installs_pass_the_zoo_spec(self):
         src = inspect.getsource(ips)
         assert src.count("unsloth_spec, zoo_spec = _desktop_unsloth_spec(package_name)") == 2
-        assert src.count("                unsloth_spec,\n                zoo_spec,\n") == 1
-        assert src.count("            unsloth_spec,\n            zoo_spec,\n") == 1
+        # Both calls sit one level deeper in the fork: the no-torch one under `if _core_index_install_allowed`.
+        assert src.count("                unsloth_spec,\n                zoo_spec,\n") == 2
 
 
 class TestRecordlessDistributionRecovery:
