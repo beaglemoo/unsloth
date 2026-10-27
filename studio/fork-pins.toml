@@ -13,8 +13,11 @@
 #      `~/.unsloth/studio/unsloth_studio/bin/python -c "import importlib.metadata as m; print(m.version('unsloth_zoo'))"`
 # Recorded 2026-10-04 from the live ~/.unsloth/studio venv (direct_url.json commit_id); bumped 2026-10-17 to
 # the zoo main commit that pins mlx==0.32.4 (the PyPI 2026.10.6 build pins 0.32.3, Studio needs 0.32.4).
+# Bumped 2026-10-27 to zoo main aeb831ae (2026.10.9, mlx==0.32.4, mlx-lm <=0.32.2, mlx-vlm <=0.7.9): upstream
+# Studio imports unsloth_zoo.mlx.loader._ensure_deepseek_v41_omlx_layout, which the 2026.10.9 release commit
+# d139fd20 lacks; same version string, so the installer also checks the recorded commit_id.
 
 [unsloth-zoo]
-version = "2026.10.6"
+version = "2026.10.9"
 url = "https://github.com/unslothai/unsloth-zoo"
-commit = "9e560677fbe7460cf9d2e047d8825689cacb02b7"
+commit = "aeb831ae1da152bfee9bd580df2e70c858fe2a71"
