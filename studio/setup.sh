@@ -48,6 +48,11 @@ if [ "$#" -gt 0 ]; then
             --local)
                 export STUDIO_LOCAL_INSTALL=1
                 export STUDIO_LOCAL_REPO="$REPO_ROOT"
+                # beaglemoo fork: a --local install is non-editable with unsloth-zoo from studio/fork-pins.toml,
+                # never the editable overlay on top of upstream core packages (install_python_stack.py reads it).
+                if [ -f "$SCRIPT_DIR/_fork.py" ] || [ -f "$SCRIPT_DIR/fork-pins.toml" ]; then
+                    export STUDIO_LOCAL_NONEDITABLE=1
+                fi
                 ;;
         esac
     done
@@ -1472,7 +1477,11 @@ if [ "$_LLAMA_ONLY" = "1" ]; then
     substep "llama.cpp only mode"
 fi
 if [ "${STUDIO_LOCAL_INSTALL:-0}" = "1" ]; then
-    substep "local mode: overlaying $REPO_ROOT (editable) + unsloth-zoo from git main"
+    if [ "${STUDIO_LOCAL_NONEDITABLE:-0}" = "1" ]; then
+        substep "local mode: overlaying $REPO_ROOT (non-editable) + unsloth-zoo from studio/fork-pins.toml"
+    else
+        substep "local mode: overlaying $REPO_ROOT (editable) + unsloth-zoo from git main"
+    fi
 fi
 # ── Clean up stale caches ──
 rm -rf "$REPO_ROOT/unsloth_compiled_cache"
