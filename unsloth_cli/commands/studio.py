@@ -4533,6 +4533,12 @@ def update(
         if verbose:
             typer.echo("  refresh-launcher  skipped (Tauri update)")
         return
+    if fork_marker is not None:
+        # The refresh runs install.sh: the fork's copy exits 1, but with none on disk it would
+        # fetch and execute upstream's from unsloth.ai. The fork has no shortcuts to refresh.
+        if verbose:
+            typer.echo("  refresh-launcher  skipped (fork build)")
+        return
     _refresh_desktop_shortcuts(verbose = verbose)
 
 
