@@ -8538,6 +8538,23 @@ def _local_overlay_non_editable() -> bool:
     return os.environ.get("STUDIO_LOCAL_NONEDITABLE", "").strip().lower() in ("1", "true", "yes")
 
 
+def _refuse_fork_index_install(local_repo: str) -> None:
+    """Fork install without a --local checkout: exit before anything reaches the release index.
+
+    Every core-package branch below that has no local_repo (the final `else`, `--package`, the
+    metadata repair's index staging) installs `unsloth` and a bare `unsloth-zoo` from PyPI through
+    upstream's `_desktop_unsloth_spec`. The fork never takes either from there; zoo comes from the
+    pin in studio/fork-pins.toml and unsloth from the checkout. `unsloth studio update` and the
+    hidden `setup` refuse before reaching this, so this is the fail-closed backstop for a direct run.
+    """
+    if _local_overlay_non_editable() and not local_repo:
+        raise SystemExit(
+            "fork install: STUDIO_LOCAL_NONEDITABLE is set but STUDIO_LOCAL_REPO is not; refusing to "
+            "install unsloth or unsloth-zoo from the release index. Update with "
+            "studio/scripts/update-fork.sh."
+        )
+
+
 def _core_index_install_allowed(local_repo: str) -> bool:
     """False for the fork's non-editable --local install: the core packages then come from the
     checkout (and unsloth-zoo from its git overlay), never from the release index.
@@ -12106,6 +12123,7 @@ def install_python_stack() -> int:
     # --package installs a different package name (for testing).
     package_name = os.environ.get("STUDIO_PACKAGE_NAME", "unsloth")
     local_repo = os.environ.get("STUDIO_LOCAL_REPO", "")
+    _refuse_fork_index_install(local_repo)
     # Clean-machine CI overlays only unsloth, not the full local source pair.
     ci_source_overlay = os.environ.get("UNSLOTH_CI_SOURCE_OVERLAY", "")
     # Includes lettered steps 8b, 8c (Windows), 11b, 11c, 13b; 11c always spends its slot.
