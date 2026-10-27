@@ -5,5 +5,5 @@
 [submodule "studio/engines/comfyui"]
 	path = studio/engines/comfyui
 	url = https://github.com/Comfy-Org/ComfyUI.git
-	branch = release/v0.41
+	branch = master
 	shallow = true
