@@ -1,7 +1,7 @@
 [submodule "studio/engines/omlx"]
 	path = studio/engines/omlx
 	url = https://github.com/beaglemoo/omlx.git
-	branch = chore/merge-upstream-0.7.2
+	branch = chore/merge-upstream-0.7.3rc1
 [submodule "studio/engines/comfyui"]
 	path = studio/engines/comfyui
 	url = https://github.com/Comfy-Org/ComfyUI.git
