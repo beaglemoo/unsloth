@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Dictation (STT) sidecars take part in attached-engine arbitration, in both directions.
 
-A sidecar that is loading or resident counts as local memory, so oMLX and ComfyUI are refused next to it, and a
-sidecar load that allocates is admitted as a local load, with a claim that spans its startup.
+oMLX and ComfyUI admission unloads an idle sidecar and is refused only while one is loading or transcribing (or
+cannot be unloaded). A sidecar load that allocates is admitted as a local load, with a claim that spans its startup.
 """
 from __future__ import annotations
 
@@ -30,51 +30,36 @@ def run(coro):
     return asyncio.run(coro)
 
 
+_REAL_RELEASE = arbiter._release_idle_stt
+
+IDLE = {"model": None, "engine": None, "device": None, "loading": False}
+RESIDENT = {"model": MODEL, "engine": "transformers", "device": "cuda", "loading": False}
+LOADING = {"model": None, "engine": "mtmd", "device": None, "loading": True}
+
+
 @pytest.fixture
-def idle_studio(monkeypatch):
-    """No chat model, slot or training; no dictation sidecar until a test says so."""
-    import core.inference.llama_cpp as llama_mod
-    from core.inference import model_slots
+def dictation(monkeypatch):
+    """A fake dictation registry with the real release logic. ``busy`` models a transcription in flight: like the
+    sidecars, ``unload(wait=False)`` leaves a busy sidecar resident."""
+    state = {"stt": dict(IDLE), "busy": False, "unloads": [], "unload_fails": False}
 
-    monkeypatch.setattr(inference, "get_llama_cpp_backend", lambda: NS(is_active = False))
-    monkeypatch.setattr(llama_mod, "chat_load_active", lambda: False)
-    monkeypatch.setattr(inference, "_peek_inference_backend", lambda: None)
-    monkeypatch.setattr(inference, "_resident_npu_model", lambda: None, raising = False)
-    monkeypatch.setattr(model_slots, "slots", [])
-    monkeypatch.setattr(model_slots, "stuck", [])
-    monkeypatch.setattr(model_slots, "loading", None)
+    def resident():
+        return dict(state["stt"])
+
+    def unload(engines = None, *, wait = True, expected_model = None):
+        state["unloads"].append(wait)
+        if state["unload_fails"]:
+            return ["transformers"]
+        if not state["busy"] and not state["stt"]["loading"]:
+            state["stt"] = dict(IDLE)
+        return []
+
+    monkeypatch.setattr(stt_registry, "resident", resident)
+    monkeypatch.setattr(stt_registry, "unload", unload)
+    monkeypatch.setattr(arbiter, "_release_idle_stt", _REAL_RELEASE)
     monkeypatch.setattr(arbiter, "_training_active", lambda: False)
-    state = {"stt": {"model": None, "engine": None, "device": None, "loading": False}}
-    monkeypatch.setattr(stt_registry, "resident", lambda: dict(state["stt"]))
+    monkeypatch.setattr(arbiter, "_local_memory_active", lambda: False)
     return state
-
-
-STT_STATES = {
-    "resident": {"model": MODEL, "engine": "transformers", "device": "cuda", "loading": False},
-    "resident_cpu": {"model": "ggml-small", "engine": "gguf", "device": "whisper.cpp", "loading": False},
-    "loading": {"model": None, "engine": "mtmd", "device": None, "loading": True},
-}
-
-
-# --- direction 1: oMLX and ComfyUI are refused next to a dictation sidecar -----------------------
-
-
-def test_an_idle_dictation_stack_leaves_the_memory_probe_clear(idle_studio):
-    assert not inference._attached_local_memory_active()
-
-
-@pytest.mark.parametrize("state", list(STT_STATES))
-def test_a_loading_or_resident_sidecar_counts_as_local_memory(idle_studio, state):
-    idle_studio["stt"] = STT_STATES[state]
-    assert inference._attached_local_memory_active()
-
-
-def test_a_broken_stt_registry_never_breaks_the_probe(idle_studio, monkeypatch):
-    def boom():
-        raise RuntimeError("cannot import the sidecar")
-
-    monkeypatch.setattr(stt_registry, "resident", boom)
-    assert not inference._attached_local_memory_active()
 
 
 @pytest.fixture
@@ -82,18 +67,88 @@ def enabled(monkeypatch):
     monkeypatch.setattr(arbiter, "get_config", lambda: replace(DEFAULT_CONFIG, enabled = True))
 
 
-@pytest.mark.parametrize("state", list(STT_STATES))
-def test_omlx_use_is_refused_while_dictation_is_loading_or_resident(idle_studio, enabled, state):
-    idle_studio["stt"] = STT_STATES[state]
+# --- direction 1: oMLX and ComfyUI evict an idle dictation sidecar, and wait for a busy one -------
+
+
+def test_the_memory_probe_does_not_count_dictation(dictation):
+    """Dictation is not a reason to refuse by itself; admission frees it or refuses on its own state."""
+    dictation["stt"] = dict(RESIDENT)
+    assert not inference._attached_local_memory_active()
+
+
+def test_an_idle_resident_sidecar_is_unloaded_and_omlx_is_admitted(dictation, enabled):
+    dictation["stt"] = dict(RESIDENT)
     result = run(arbiter.before_omlx_use())
-    assert result.error and "local model loaded" in result.error
+    assert not result.error
+    assert dictation["unloads"] == [False]
+    assert dictation["stt"] == IDLE
 
 
-@pytest.mark.parametrize("state", list(STT_STATES))
-def test_a_comfyui_job_is_refused_while_dictation_is_loading_or_resident(idle_studio, enabled, state):
-    idle_studio["stt"] = STT_STATES[state]
+def test_an_idle_resident_sidecar_is_unloaded_and_a_comfyui_job_is_admitted(dictation, enabled, monkeypatch):
+    async def none(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(arbiter, "_unload_omlx", none)
+    monkeypatch.setattr(arbiter, "_free_urls", none)
+    monkeypatch.setattr(arbiter, "_comfyui_targets", lambda config: (None, []))
+    dictation["stt"] = dict(RESIDENT)
     result = run(arbiter.before_comfyui_job())
-    assert result.error and "local model loaded" in result.error
+    assert not result.error
+    assert dictation["unloads"] == [False]
+    assert dictation["stt"] == IDLE
+
+
+def test_no_sidecar_means_nothing_is_unloaded(dictation, enabled):
+    assert not run(arbiter.before_omlx_use()).error
+    assert dictation["unloads"] == []
+
+
+def test_a_transcription_in_flight_refuses_omlx(dictation, enabled):
+    dictation["stt"], dictation["busy"] = dict(RESIDENT), True
+    result = run(arbiter.before_omlx_use())
+    assert result.error and "transcribing" in result.error
+    assert dictation["stt"] == RESIDENT
+
+
+def test_a_transcription_in_flight_refuses_a_comfyui_job(dictation, enabled):
+    dictation["stt"], dictation["busy"] = dict(RESIDENT), True
+    result = run(arbiter.before_comfyui_job())
+    assert result.error and "transcribing" in result.error
+
+
+@pytest.mark.parametrize("job", ["omlx", "comfyui"])
+def test_a_loading_sidecar_refuses_and_is_left_alone(dictation, enabled, job):
+    dictation["stt"] = dict(LOADING)
+    result = run(arbiter.before_omlx_use() if job == "omlx" else arbiter.before_comfyui_job())
+    assert result.error and "loading a dictation model" in result.error
+    assert dictation["unloads"] == []
+
+
+@pytest.mark.parametrize("job", ["omlx", "comfyui"])
+def test_a_failed_eviction_fails_closed(dictation, enabled, job):
+    dictation["stt"], dictation["unload_fails"] = dict(RESIDENT), True
+    result = run(arbiter.before_omlx_use() if job == "omlx" else arbiter.before_comfyui_job())
+    assert result.error and "could not unload its dictation model" in result.error
+
+
+@pytest.mark.parametrize("job", ["omlx", "comfyui"])
+def test_a_registry_that_raises_fails_closed(dictation, enabled, monkeypatch, job):
+    def boom(*args, **kwargs):
+        raise RuntimeError("sidecar import failed")
+
+    monkeypatch.setattr(stt_registry, "resident", boom)
+    result = run(arbiter.before_omlx_use() if job == "omlx" else arbiter.before_comfyui_job())
+    assert result.error and "could not unload its dictation model" in result.error
+
+
+def test_the_omlx_proxy_turns_a_busy_sidecar_into_a_retryable_503(dictation, enabled):
+    import routes.attached_engines as attached_routes
+
+    dictation["stt"], dictation["busy"] = dict(RESIDENT), True
+    with pytest.raises(HTTPException) as caught:
+        run(attached_routes._admit_omlx_use())
+    assert caught.value.status_code == 503
+    assert caught.value.headers == {"Retry-After": "15"}
 
 
 # --- direction 2: a dictation load that allocates is admitted as a local load --------------------
@@ -215,7 +270,7 @@ def test_a_dictation_load_is_left_alone_when_arbitration_is_off(entry, stt, worl
     assert len(stt["loads"]) == 1
 
 
-def test_oMLX_use_is_refused_while_the_dictation_claim_is_held(world, idle_studio):
+def test_oMLX_use_is_refused_while_the_dictation_claim_is_held(world, dictation):
     """A load that has been admitted but whose sidecar has not published its loading state yet."""
     hold = arbiter.new_media_hold("stt")
     result = run(arbiter.free_for_local("local_load", media_hold = hold))

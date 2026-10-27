@@ -134,6 +134,8 @@ def _no_real_comfyui_or_engine_state(monkeypatch, tmp_path):
     arbiter = sys.modules.get("core.inference.attached.arbiter")
     if arbiter is not None:
         arbiter._omlx_holds.clear()
+        # No dictation sidecar to read or free; tests of that path restore the real function.
+        monkeypatch.setattr(arbiter, "_release_idle_stt", lambda: None)
 
 
 @pytest.fixture(autouse = True)

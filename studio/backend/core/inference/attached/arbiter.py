@@ -390,6 +390,42 @@ def _local_workload() -> Optional[str]:
     return None
 
 
+_STT_RELEASE_TIMEOUT_S = 30.0
+
+
+def _release_idle_stt() -> Optional[str]:
+    """Free an idle dictation sidecar so oMLX or a ComfyUI job can use the memory; what still blocks, if anything.
+
+    Blocking, so it runs on a worker thread. ``stt_registry.unload(wait=False)`` is the registry's public stop: it
+    leaves a sidecar that is loading or transcribing alone (they hold the sidecar's lock or count their requests),
+    so whatever is still resident or loading afterwards is busy. Any failure to read or free it blocks."""
+    from core.inference import stt_registry
+
+    def busy() -> bool:
+        state = stt_registry.resident()
+        return bool(state.get("model") or state.get("loading"))
+
+    if not busy():
+        return None
+    if stt_registry.resident().get("loading"):
+        return "is loading a dictation model"
+    failed = stt_registry.unload(wait = False)
+    if failed:
+        return f"could not unload its dictation model ({', '.join(failed)})"
+    if busy():
+        return "is transcribing dictation audio"
+    logger.info("Unloaded an idle dictation model to admit oMLX or a ComfyUI job")
+    return None
+
+
+async def _stt_blocker() -> Optional[str]:
+    """``_release_idle_stt`` off the event loop and bounded: a sidecar that cannot be read or freed in time blocks."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_release_idle_stt), _STT_RELEASE_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        return f"could not unload its dictation model ({type(exc).__name__})"
+
+
 async def _unload_omlx(config: AttachedEnginesConfig) -> list[str]:
     """Unload every oMLX model. An oMLX the user switched off in the desktop shell and that does not answer holds nothing, so it is not a failure."""
     client = OmlxClient(config.omlx_url)
@@ -434,6 +470,9 @@ async def _admit(
                 media = await _media_resident_async()
                 if media:
                     raise AttachedAdmissionError(f"Studio {media}; unload it to use oMLX.")
+                stt = await _stt_blocker()
+                if stt:
+                    raise AttachedAdmissionError(f"Studio {stt}; finish or unload it to use oMLX.")
             if not local and config.arbitrate_comfyui:
                 if _comfyui_held():
                     raise AttachedAdmissionError("Studio has a ComfyUI job starting; retry shortly to use oMLX.")
@@ -548,6 +587,7 @@ async def before_comfyui_job(hold: Optional[ComfyJobHold] = None) -> ArbiterResu
                 raise AttachedAdmissionError(BUSY_MESSAGE)
             cancel_comfyui_idle_free()
             busy = _local_workload() or await _media_resident_async()
+            busy = busy or await _stt_blocker()
             if busy:
                 raise AttachedAdmissionError(f"Studio {busy}; finish or unload it to run a ComfyUI job.")
             _, peers = _comfyui_targets(config)

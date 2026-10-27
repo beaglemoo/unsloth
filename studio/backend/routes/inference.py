@@ -11721,23 +11721,7 @@ def _attached_local_memory_active() -> bool:
         model_slots.in_slot(None, primary_active)
         or model_slots.resident()
         or model_slots.any_loading()
-        or _stt_memory_active()
     )
-
-
-def _stt_memory_active() -> bool:
-    """True while any dictation sidecar is loading or resident, whatever engine or device.
-
-    Every engine counts, CPU ones included: the sidecars do not report a device the same way (mtmd always says
-    ``llama.cpp``), and on Apple Silicon the weights share the memory oMLX and ComfyUI draw on.
-    ``stt_registry.resident`` reads each sidecar's own loading and loaded state and never raises."""
-    try:
-        from core.inference import stt_registry
-
-        state = stt_registry.resident()
-        return bool(state.get("model") or state.get("loading"))
-    except Exception:  # noqa: BLE001 - a probe that cannot read dictation must not break admission
-        return False
 
 
 async def _admit_attached_stt_load(sidecar, model, engine):
