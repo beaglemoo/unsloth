@@ -1457,7 +1457,7 @@ function RecipePopover({
           {image.engine === "comfyui" ? (
             <RecipeRow label="Engine" value={`ComfyUI${image.comfyui_template ? ` · ${image.comfyui_template}` : ""}`} wrap />
           ) : null}
-          {image.sampler ? (
+          {image.engine === "comfyui" && image.sampler ? (
             <RecipeRow label="Sampler" value={image.scheduler ? `${image.sampler} · ${image.scheduler}` : image.sampler} />
           ) : null}
           {image.model && image.engine !== "comfyui" ? <RecipeRow label="Model" value={image.model} /> : null}
@@ -1550,7 +1550,7 @@ function RecipePopover({
           {fastCfgLabel(image.cfg_interval_end) ? (
             <RecipeRow label="Fast CFG" value={fastCfgLabel(image.cfg_interval_end) ?? ""} />
           ) : null}
-          {samplerRecipeLabel(image.sampler, image.schedule_type) ? (
+          {image.engine !== "comfyui" && samplerRecipeLabel(image.sampler, image.schedule_type) ? (
             <RecipeRow
               label="Sampler"
               value={samplerRecipeLabel(image.sampler, image.schedule_type) ?? ""}
