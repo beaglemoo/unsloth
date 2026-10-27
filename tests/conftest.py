@@ -64,6 +64,17 @@ os.environ.setdefault("UNSLOTH_VULKAN_DEVICE_PROBE", "0")
 
 
 @pytest.fixture(autouse = True)
+def _no_fork_marker(monkeypatch, request):
+    """Run the installer tests as upstream Unsloth: install_python_stack detects the beaglemoo
+    fork from studio/_fork.py and then forces a non-editable, pinned install. A None entry in
+    sys.modules hides the marker (unsloth_cli/tests/conftest.py does the same). Tests of the
+    fork behaviour use the `fork` marker."""
+    if request.node.get_closest_marker("fork"):
+        return
+    monkeypatch.setitem(sys.modules, "studio._fork", None)
+
+
+@pytest.fixture(autouse = True)
 def _contain_installer_venv_root(tmp_path_factory, monkeypatch):
     """Imported in the body because tests/_shared is added to sys.path further down this file."""
     from installer_venv_root import contain_installer_venv_root
