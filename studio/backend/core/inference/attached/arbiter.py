@@ -319,6 +319,9 @@ def _studio_media_resident() -> Optional[str]:
     for module_name, attribute, noun in (
         ("core.inference.diffusion", "_diffusion_backend", "an image model"),
         ("core.inference.sd_cpp_backend", "_sd_cpp_backend", "an image model"),
+        # The MLX engine (the default image engine on Apple Silicon) and the MLX router's own engines are this singleton
+        # and the diffusers one above; the router object itself is not a second backend.
+        ("core.inference.mlx_diffusion_backend", "_mlx_diffusion_backend", "an image model"),
         ("core.inference.video", "_backend", "a video model"),
     ):
         backend = getattr(sys.modules.get(module_name), attribute, None)

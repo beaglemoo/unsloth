@@ -807,6 +807,9 @@ def backends(monkeypatch):
     for name in ("core.inference.diffusion", "core.inference.sd_cpp_backend", "core.inference.video"):
         monkeypatch.setitem(sys.modules, name, types.SimpleNamespace(
             _diffusion_backend = None, _sd_cpp_backend = None, _backend = None))
+    monkeypatch.setitem(
+        sys.modules, "core.inference.mlx_diffusion_backend", types.SimpleNamespace(_mlx_diffusion_backend = None)
+    )
     monkeypatch.setattr(arbiter, "_studio_media_resident", _REAL_MEDIA_PROBE)
     arbiter._media_holds.clear()
     yield sys.modules
@@ -825,6 +828,18 @@ def test_the_probe_reports_a_loading_image_or_video_model(backends):
     backends["core.inference.sd_cpp_backend"]._sd_cpp_backend = None
     backends["core.inference.video"]._backend = _backend(False, ("org/video",))
     assert _REAL_MEDIA_PROBE() == "is loading a video model"
+
+
+def test_the_probe_sees_the_mlx_image_engine(backends):
+    """The MLX engine keeps its model in its own singleton, which the diffusers and sd.cpp ones do not reflect."""
+    mlx = backends["core.inference.mlx_diffusion_backend"]
+    assert _REAL_MEDIA_PROBE() is None
+    mlx._mlx_diffusion_backend = _backend(False, ("org/mlx-image",))
+    assert _REAL_MEDIA_PROBE() == "is loading an image model"
+    mlx._mlx_diffusion_backend = _backend(True, ())
+    assert _REAL_MEDIA_PROBE() == "has an image model loaded"
+    mlx._mlx_diffusion_backend = _backend(False, ())
+    assert _REAL_MEDIA_PROBE() is None
 
 
 def test_the_probe_prefers_loaded_and_survives_a_backend_that_cannot_say(backends):
