@@ -11721,7 +11721,43 @@ def _attached_local_memory_active() -> bool:
         model_slots.in_slot(None, primary_active)
         or model_slots.resident()
         or model_slots.any_loading()
+        or _stt_memory_active()
     )
+
+
+def _stt_memory_active() -> bool:
+    """True while any dictation sidecar is loading or resident, whatever engine or device.
+
+    Every engine counts, CPU ones included: the sidecars do not report a device the same way (mtmd always says
+    ``llama.cpp``), and on Apple Silicon the weights share the memory oMLX and ComfyUI draw on.
+    ``stt_registry.resident`` reads each sidecar's own loading and loaded state and never raises."""
+    try:
+        from core.inference import stt_registry
+
+        state = stt_registry.resident()
+        return bool(state.get("model") or state.get("loading"))
+    except Exception:  # noqa: BLE001 - a probe that cannot read dictation must not break admission
+        return False
+
+
+async def _admit_attached_stt_load(sidecar, model, engine):
+    """Admit a dictation load that will allocate, as a local load. Returns the arbiter claim (release it in a
+    ``finally`` once the load and its use are done) or None when ``model`` is already resident.
+
+    The claim is registered under the arbiter lock, so oMLX and ComfyUI are refused from admission until the
+    sidecar publishes its own loading state, the same way an image or video load is held."""
+    from core.inference.attached.arbiter import new_media_hold
+
+    resolved = _stt_resolved_model_id(model, engine)
+    if resolved is not None and getattr(sidecar, "loaded_model", None) == resolved:
+        return None
+    hold = new_media_hold("stt")
+    try:
+        await _admit_attached_local_load(hold)
+    except BaseException:
+        hold.release()
+        raise
+    return hold
 
 
 async def _admit_attached_local_load(media_hold = None):
@@ -25154,6 +25190,8 @@ async def stt_load(
     )
     sidecar = _stt_sidecar_for(engine)
     load_stt, _ = _stt_lifecycle()
+    # Before the watcher and the try below: a refusal is a 503, not the 500 the handlers there would make of it.
+    stt_hold = await _admit_attached_stt_load(sidecar, payload.model, engine)
     cancel_event = threading.Event()
     disconnect_watcher = asyncio.create_task(
         _await_stt_disconnect_then_cancel(request, sidecar, cancel_event)
@@ -25178,6 +25216,8 @@ async def stt_load(
         logger.error(f"STT load error: {e}", exc_info = True)
         raise HTTPException(status_code = 500, detail = safe_error_detail(e))
     finally:
+        if stt_hold is not None:
+            stt_hold.release()
         await _stop_local_disconnect_cancel_watcher(disconnect_watcher)
     # The load lock is released and another account may have switched engines, so claim only ours.
     loaded = sidecar.loaded_model
@@ -25337,6 +25377,8 @@ async def _transcribe_audio_result(
     transcribe = (
         functools.partial(sidecar.transcribe, task = "translate") if translate else sidecar.transcribe
     )
+    # Before the try below, whose handlers would turn a refusal into a 500.
+    stt_hold = await _admit_attached_stt_load(sidecar, model, serving_engine)
     cancel_event = threading.Event() if request is not None or on_progress is not None else None
     disconnect_watcher = (
         asyncio.create_task(_await_stt_disconnect_then_cancel(request, sidecar, cancel_event))
@@ -25439,6 +25481,8 @@ async def _transcribe_audio_result(
         logger.error(f"Transcription error: {e}", exc_info = True)
         raise HTTPException(status_code = 500, detail = safe_error_detail(e))
     finally:
+        if stt_hold is not None:
+            stt_hold.release()
         if disconnect_watcher is not None:
             await _stop_local_disconnect_cancel_watcher(disconnect_watcher)
     speakers = result.get("speakers") if isinstance(result, dict) else None

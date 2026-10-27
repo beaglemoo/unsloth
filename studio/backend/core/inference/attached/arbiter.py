@@ -173,7 +173,7 @@ _media_holds_lock = threading.Lock()
 
 
 def new_media_hold(kind: str) -> MediaHold:
-    """An unregistered claim for an ``image`` or ``video`` load; admission registers it."""
+    """An unregistered claim for an ``image``, ``video`` or ``stt`` (dictation) load; admission registers it."""
     return MediaHold(kind)
 
 
@@ -188,6 +188,8 @@ def _media_held() -> Optional[str]:
         kinds = {hold.kind for hold in _media_holds}
     if not kinds:
         return None
+    if kinds == {"stt"}:
+        return "is loading a dictation model"
     return "is loading a video model" if kinds == {"video"} else "is loading an image model"
 
 
