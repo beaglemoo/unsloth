@@ -143,3 +143,43 @@ def test_the_right_version_from_the_wrong_commit_fails_the_install(monkeypatch, 
     monkeypatch.setattr(ips, "_recorded_direct_url", lambda name: {"vcs_info": {"commit_id": "0" * 40}})
     with pytest.raises(SystemExit, match = "pins 2026.10.9 @"):
         ips._overlay_local_core_package("unsloth-zoo", "/src/unsloth")
+
+
+@pytest.mark.parametrize("repo", ["", "/src/unsloth"])
+def test_the_core_index_guard_only_refuses_a_fork_install_without_a_checkout(monkeypatch, repo):
+    monkeypatch.setenv("STUDIO_LOCAL_NONEDITABLE", "1")
+    if repo:
+        ips._refuse_fork_index_install(repo)
+        return
+    with pytest.raises(SystemExit, match = "release index"):
+        ips._refuse_fork_index_install(repo)
+
+
+@pytest.mark.parametrize("env", ["", "0", "false"])
+def test_the_core_index_guard_is_off_outside_fork_mode(monkeypatch, env):
+    monkeypatch.setenv("STUDIO_LOCAL_NONEDITABLE", env)
+    ips._refuse_fork_index_install("")
+
+
+@pytest.mark.parametrize("no_torch", [True, False])
+@pytest.mark.parametrize("package", ["unsloth", "other"])
+def test_a_fork_install_with_no_checkout_never_reaches_a_pypi_install(monkeypatch, no_torch, package):
+    """Upstream's `_desktop_unsloth_spec` branches (no-torch, final else, --package) install unsloth
+    and a bare unsloth-zoo from the index; in fork mode the installer exits before any of them."""
+    import contextlib
+
+    calls = []
+    monkeypatch.setenv("STUDIO_LOCAL_NONEDITABLE", "1")
+    monkeypatch.delenv("STUDIO_LOCAL_REPO", raising = False)
+    monkeypatch.delenv("SKIP_STUDIO_BASE", raising = False)
+    monkeypatch.setenv("STUDIO_PACKAGE_NAME", package)
+    monkeypatch.setattr(ips, "NO_TORCH", no_torch)
+    monkeypatch.setattr(
+        ips.install_manifest, "pass_lock", lambda *a, **k: contextlib.nullcontext(True)
+    )
+    for name in ("pip_install", "pip_install_try", "_desktop_unsloth_spec"):
+        monkeypatch.setattr(ips, name, lambda *a, _n = name, **k: calls.append(_n))
+    monkeypatch.setattr(ips.subprocess, "run", lambda *a, **k: calls.append("subprocess"))
+    with pytest.raises(SystemExit, match = "release index"):
+        ips.install_python_stack()
+    assert calls == []
