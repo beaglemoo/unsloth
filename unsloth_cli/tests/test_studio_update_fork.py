@@ -117,6 +117,21 @@ def test_local_update_still_runs_and_is_forced_non_editable(monkeypatch, tmp_pat
     assert seen["STUDIO_LOCAL_NONEDITABLE"] == "1"
 
 
+def test_a_fork_update_never_refreshes_launchers_from_the_network(monkeypatch, tmp_path):
+    checkout = _checkout(tmp_path)
+    studio, seen = _neutered(monkeypatch)
+    refreshed = []
+    monkeypatch.setattr(studio, "_refresh_desktop_shortcuts", lambda *a, **k: refreshed.append(1))
+    monkeypatch.setattr(studio, "_fetch_installer", lambda *a, **k: refreshed.append("fetch"))
+    monkeypatch.setattr(studio, "_fork_marker", lambda: _marker())
+    monkeypatch.setenv("STUDIO_LOCAL_REPO", str(checkout))
+    monkeypatch.delenv("UNSLOTH_TAURI_UPDATE", raising = False)
+    result = CliRunner().invoke(studio.studio_app, ["update", "--local"])
+    assert result.exit_code == 0, result.output
+    assert seen["setup_calls"] == 1
+    assert refreshed == []
+
+
 def test_local_update_defaults_to_the_fork_checkout(monkeypatch, tmp_path):
     checkout = _checkout(tmp_path)
     studio, seen = _neutered(monkeypatch)
