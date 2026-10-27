@@ -8529,13 +8529,59 @@ def _unsloth_zoo_git_spec() -> str:
     return _UNSLOTH_ZOO_GIT_URL + ("@" + ref if ref else "")
 
 
+_FORK_MARKER_FILES = ("_fork.py", _FORK_PINS_NAME)
+_FORK_DEFAULT_REPO = "~/Homelab/unsloth/unsloth"
+
+
+def _is_fork_install() -> bool:
+    """True when this installer ships in the beaglemoo fork, whatever the environment says.
+
+    The fork marker (studio/_fork.py) and the pin file sit next to this script; upstream has neither.
+    A None entry for `studio._fork` in sys.modules hides the marker, the same switch the CLI tests use
+    to run as upstream.
+    """
+    if sys.modules.get("studio._fork", ...) is None:
+        return False
+    here = Path(__file__).resolve().parent
+    return any((here / name).is_file() for name in _FORK_MARKER_FILES)
+
+
 def _local_overlay_non_editable() -> bool:
-    """STUDIO_LOCAL_NONEDITABLE=1 installs the --local checkout as a regular package.
+    """Install the --local checkout as a regular package (STUDIO_LOCAL_NONEDITABLE=1, or any fork install).
 
     The fork's desktop build sets it so the running backend is not tied to the git working
-    tree and fully replaces the files of any previously installed wheel.
+    tree and fully replaces the files of any previously installed wheel. A fork install is
+    non-editable even when nothing set the variable (a direct run, setup.sh --local).
     """
-    return os.environ.get("STUDIO_LOCAL_NONEDITABLE", "").strip().lower() in ("1", "true", "yes")
+    if os.environ.get("STUDIO_LOCAL_NONEDITABLE", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    return _is_fork_install()
+
+
+def _resolve_fork_local_repo(local_repo: str) -> str:
+    """Fork install: pin non-editable mode and make sure there is a --local checkout.
+
+    STUDIO_LOCAL_REPO wins; else the checkout this script lives in; else the conventional fork
+    checkout (what `unsloth studio update --local` defaults to). Without any, exit before
+    anything reaches the release index. Not a fork install: returned unchanged.
+    """
+    if not _is_fork_install():
+        return local_repo
+    os.environ["STUDIO_LOCAL_NONEDITABLE"] = "1"
+    if not local_repo.strip():
+        own = Path(__file__).resolve().parent.parent
+        for candidate in (own, Path(_FORK_DEFAULT_REPO).expanduser()):
+            if (candidate / "pyproject.toml").is_file() and (candidate / "studio" / "_fork.py").is_file():
+                local_repo = str(candidate)
+                break
+    if not local_repo.strip():
+        raise SystemExit(
+            "fork install: no local checkout found (set STUDIO_LOCAL_REPO or keep the fork at "
+            f"{_FORK_DEFAULT_REPO}); refusing to install unsloth or unsloth-zoo from the release "
+            "index. Update with studio/scripts/update-fork.sh."
+        )
+    os.environ["STUDIO_LOCAL_REPO"] = local_repo
+    return local_repo
 
 
 def _refuse_fork_index_install(local_repo: str) -> None:
@@ -8544,14 +8590,14 @@ def _refuse_fork_index_install(local_repo: str) -> None:
     Every core-package branch below that has no local_repo (the final `else`, `--package`, the
     metadata repair's index staging) installs `unsloth` and a bare `unsloth-zoo` from PyPI through
     upstream's `_desktop_unsloth_spec`. The fork never takes either from there; zoo comes from the
-    pin in studio/fork-pins.toml and unsloth from the checkout. `unsloth studio update` and the
-    hidden `setup` refuse before reaching this, so this is the fail-closed backstop for a direct run.
+    pin in studio/fork-pins.toml and unsloth from the checkout. `_resolve_fork_local_repo` defaults the
+    checkout, `unsloth studio update` and the hidden `setup` refuse before reaching this, so this is
+    the fail-closed backstop for a direct run.
     """
     if _local_overlay_non_editable() and not local_repo:
         raise SystemExit(
-            "fork install: STUDIO_LOCAL_NONEDITABLE is set but STUDIO_LOCAL_REPO is not; refusing to "
-            "install unsloth or unsloth-zoo from the release index. Update with "
-            "studio/scripts/update-fork.sh."
+            "fork install: no STUDIO_LOCAL_REPO; refusing to install unsloth or unsloth-zoo from "
+            "the release index. Update with studio/scripts/update-fork.sh."
         )
 
 
@@ -12122,7 +12168,7 @@ def install_python_stack() -> int:
     skip_base = os.environ.get("SKIP_STUDIO_BASE", "0") == "1"
     # --package installs a different package name (for testing).
     package_name = os.environ.get("STUDIO_PACKAGE_NAME", "unsloth")
-    local_repo = os.environ.get("STUDIO_LOCAL_REPO", "")
+    local_repo = _resolve_fork_local_repo(os.environ.get("STUDIO_LOCAL_REPO", ""))
     _refuse_fork_index_install(local_repo)
     # Clean-machine CI overlays only unsloth, not the full local source pair.
     ci_source_overlay = os.environ.get("UNSLOTH_CI_SOURCE_OVERLAY", "")
