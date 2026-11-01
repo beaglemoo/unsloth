@@ -150,3 +150,107 @@ def test_a_draining_diffusers_load_blocks_admission(world):
         _admit().require_clear()
     draining[0] = ()
     _admit().require_clear()
+
+
+# -- failed chat unload ------------------------------------------------------
+
+
+class _Proc:
+    pid = 424242
+
+    def __init__(self):
+        self.alive = True
+
+    def is_alive(self):
+        return self.alive
+
+    def join(self, timeout = None):
+        pass
+
+
+class _BrokenQueue:
+    """The command queue's pipe is gone, so the unload command cannot be written."""
+
+    def put(self, *_a, **_k):
+        raise OSError("broken pipe")
+
+    def get(self, *_a, **_k):
+        import queue
+
+        raise queue.Empty
+
+    get_nowait = get
+
+
+@pytest.fixture
+def orchestrator(world, monkeypatch):
+    import core.inference.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod.time, "sleep", lambda *_a, **_k: None)
+    orch = orch_mod.InferenceOrchestrator()
+    orch._proc = _Proc()
+    orch._cmd_queue = _BrokenQueue()
+    orch._resp_queue = _BrokenQueue()
+    orch.models["/models/Qwen-MLX"] = {"is_mlx": True}
+    orch.active_model_name = "/models/Qwen-MLX"
+    world.chat = orch
+    yield orch
+    # The orchestrator's atexit hook must find no worker to shut down.
+    orch._proc = None
+
+
+def test_a_failed_chat_unload_keeps_oMLX_out_until_the_worker_is_gone(world, orchestrator):
+    import routes.inference as inf_mod
+
+    with pytest.raises(arbiter.AttachedAdmissionError, match = "local model loaded"):
+        _admit().require_clear()
+
+    # The queue write fails: unload_model() reports False, drops the model name and leaves the worker running.
+    assert orchestrator.unload_model("/models/Qwen-MLX") is False
+    assert orchestrator.active_model_name is None
+    assert orchestrator.is_worker_alive()
+    assert inf_mod._attached_local_memory_active()
+    with pytest.raises(arbiter.AttachedAdmissionError, match = "local model loaded"):
+        _admit().require_clear()
+
+    # The worker exits (or is killed): its weights are gone, so oMLX is admissible again.
+    orchestrator._proc.alive = False
+    assert not inf_mod._attached_local_memory_active()
+    _admit().require_clear()
+
+
+def test_a_worker_kept_alive_after_a_successful_unload_does_not_block_oMLX(world, orchestrator, monkeypatch):
+    import routes.inference as inf_mod
+
+    # The unload command is acknowledged; the worker stays up idle (for example a sidecar keeps it).
+    class _Queue(_BrokenQueue):
+        def put(self, *_a, **_k):
+            pass
+
+    orchestrator._cmd_queue = _Queue()
+    monkeypatch.setattr(orchestrator, "_wait_response", lambda *_a, **_k: {"type": "unloaded"})
+    monkeypatch.setattr(orchestrator, "_shutdown_subprocess", lambda *_a, **_k: False)
+    orchestrator.models["/models/other"] = {"is_mlx": True}
+    assert orchestrator.unload_model("/models/Qwen-MLX") is True
+    assert orchestrator.is_worker_alive()
+    assert not inf_mod._attached_local_memory_active()
+    _admit().require_clear()
+
+
+def test_a_later_successful_unload_clears_the_failed_unload_claim(world, orchestrator, monkeypatch):
+    import routes.inference as inf_mod
+
+    assert orchestrator.unload_model("/models/Qwen-MLX") is False
+    assert inf_mod._attached_local_memory_active()
+
+    class _Queue(_BrokenQueue):
+        def put(self, *_a, **_k):
+            pass
+
+    orchestrator._cmd_queue = _Queue()
+    orchestrator.models["/models/Qwen-MLX"] = {"is_mlx": True}
+    orchestrator.active_model_name = "/models/Qwen-MLX"
+    monkeypatch.setattr(orchestrator, "_wait_response", lambda *_a, **_k: {"type": "unloaded"})
+    monkeypatch.setattr(orchestrator, "_shutdown_subprocess", lambda *_a, **_k: False)
+    assert orchestrator.unload_model("/models/Qwen-MLX") is True
+    assert not inf_mod._attached_local_memory_active()

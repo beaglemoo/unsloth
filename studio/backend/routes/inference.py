@@ -12040,10 +12040,16 @@ def _loaded_slot_ident() -> Optional[str]:
 
 
 
+def _worker_survived_failed_unload(backend) -> bool:
+    survived = getattr(backend, "worker_holds_unreleased_memory", None)
+    return bool(survived()) if callable(survived) else False
+
+
 def _attached_local_memory_active() -> bool:
     """True while Studio holds a local model: the primary, any kept extra slot (resident,
     loading or stuck), or a load in flight. A stuck slot counts even when its worker is gone,
-    because its server was never confirmed stopped."""
+    because its server was never confirmed stopped. A chat worker that a failed unload left alive counts too: the
+    orchestrator drops the model name even then, so the live process is what still holds the weights."""
     from core.inference.llama_cpp import chat_load_active
 
     def primary_active() -> bool:
@@ -12053,7 +12059,8 @@ def _attached_local_memory_active() -> bool:
         return bool(llama.is_active or chat_load_active()
                     or getattr(backend, "_managed_engine", None) is not None
                     or getattr(backend, "active_model_name", None)
-                    or tuple(getattr(backend, "loading_models", ()) or ()))
+                    or tuple(getattr(backend, "loading_models", ()) or ())
+                    or _worker_survived_failed_unload(backend))
 
     return bool(
         model_slots.in_slot(None, primary_active)

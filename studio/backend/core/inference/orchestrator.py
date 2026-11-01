@@ -470,6 +470,9 @@ class InferenceOrchestrator:
         self._send_order_lock = threading.RLock()
         # Set during a switch so a _gen_lock winner bails instead of starting on the outgoing model.
         self._unload_pending = False
+        # Fork: an unload that did not confirm the worker released its model (the command failed, or the worker outlived
+        # a shutdown). unload_model() clears active_model_name regardless, so attached admission reads this instead.
+        self._unload_left_worker = False
         self._worker_reserved_for: Optional[str] = None
 
         # Compare mode bypasses _gen_lock; a dispatcher thread routes responses to mailboxes by request_id.
@@ -700,6 +703,7 @@ class InferenceOrchestrator:
                 daemon = True,
             )
             self._proc = _spawned_proc
+            self._unload_left_worker = False
             _spawned_proc.start()
         from utils.process_lifetime import adopt_pid
 
@@ -746,6 +750,11 @@ class InferenceOrchestrator:
         except Exception:
             self._teardown_not_sent()
             logger.debug("Could not tell the worker to let go of its batch", exc_info = True)
+
+    def worker_holds_unreleased_memory(self) -> bool:
+        """True while a worker that a failed unload left behind is still alive: its model is no longer named, but
+        its weights may still be resident. A live idle worker after a successful unload does not count."""
+        return bool(self._unload_left_worker and self.is_worker_alive())
 
     def is_worker_alive(self) -> bool:
         """True while the inference subprocess is running, even with no model active (a failed load
@@ -856,6 +865,7 @@ class InferenceOrchestrator:
             exitcode = getattr(self._proc, "exitcode", 0) if self._proc is not None else 0
             self._worker_stopped_deliberately = exitcode == 0
             self._proc = None
+            self._unload_left_worker = False
             return True
 
         self._teardown_going_out()
@@ -915,6 +925,7 @@ class InferenceOrchestrator:
         self._stop_ledger = None
         self._pending_teardowns = None
         self._reset_worker_scoped_state()
+        self._unload_left_worker = False
         logger.info("Inference subprocess shut down")
         return True
 
@@ -2646,7 +2657,8 @@ class InferenceOrchestrator:
                     "shutting the inference subprocess down to free the model",
                     _UNLOAD_GEN_LOCK_TIMEOUT,
                 )
-                self._shutdown_subprocess(timeout = 5)
+                if not self._shutdown_subprocess(timeout = 5):
+                    self._unload_left_worker = True
                 self.models.pop(model_name, None)
                 if self.active_model_name == model_name:
                     self.active_model_name = None
@@ -2658,7 +2670,8 @@ class InferenceOrchestrator:
                         "Unload: compare-mode dispatcher still active after idle "
                         "wait; shutting the inference subprocess down to free the model"
                     )
-                    self._shutdown_subprocess(timeout = 5)
+                    if not self._shutdown_subprocess(timeout = 5):
+                        self._unload_left_worker = True
                     self.models.pop(model_name, None)
                     if self.active_model_name == model_name:
                         self.active_model_name = None
@@ -2676,6 +2689,7 @@ class InferenceOrchestrator:
                     self._teardown_not_sent()
                     raise
                 self._wait_response("unloaded")
+                self._unload_left_worker = False
 
                 self.models.pop(model_name, None)
                 if self.active_model_name == model_name:
@@ -2693,6 +2707,9 @@ class InferenceOrchestrator:
 
             except Exception as exc:
                 logger.error("Error unloading model '%s': %s", model_name, exc)
+                # The name is dropped below either way; remember a worker that is still there so admission does not
+                # treat the memory as released (cleared by a successful unload or once the worker is confirmed gone).
+                self._unload_left_worker = self._ensure_subprocess_alive()
                 self.models.pop(model_name, None)
                 if self.active_model_name == model_name:
                     self.active_model_name = None
