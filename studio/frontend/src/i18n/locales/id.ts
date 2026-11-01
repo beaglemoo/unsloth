@@ -1369,6 +1369,7 @@ export const id = {
       connections: "Koneksi",
       data: "Data",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Jarak jauh & LAN",
       agents: "Agen",
       keyboardShortcuts: "Pintasan",

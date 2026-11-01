@@ -1379,6 +1379,7 @@ export const uk = {
       connections: "Підключення",
       data: "Дані",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Віддалений доступ і LAN",
       agents: "Агенти",
       keyboardShortcuts: "Сполучення клавіш",
