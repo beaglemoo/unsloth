@@ -1499,6 +1499,7 @@ export const es419 = {
       connections: "Conexiones",
       data: "Datos",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Remoto y LAN",
       agents: "Agentes",
       keyboardShortcuts: "Atajos",

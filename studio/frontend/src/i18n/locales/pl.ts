@@ -1501,6 +1501,7 @@ export const pl = {
       connections: "Połączenia",
       data: "Dane",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Zdalnie i LAN",
       agents: "Agenci",
       keyboardShortcuts: "Skróty",
