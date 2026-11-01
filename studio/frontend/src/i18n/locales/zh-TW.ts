@@ -1288,6 +1288,7 @@ export const zhTW = {
       connections: "連線",
       data: "資料",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "遠端與區域網路",
       agents: "代理程式",
       keyboardShortcuts: "快速鍵",

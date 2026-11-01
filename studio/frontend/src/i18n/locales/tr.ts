@@ -1352,6 +1352,7 @@ export const tr = {
       connections: "Bağlantılar",
       data: "Veriler",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Uzak ve LAN",
       agents: "Ajanlar",
       keyboardShortcuts: "Kısayollar",

@@ -1371,6 +1371,7 @@ export const nl = {
       connections: "Verbindingen",
       data: "Gegevens",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Extern en LAN",
       agents: "Agents",
       keyboardShortcuts: "Sneltoetsen",
