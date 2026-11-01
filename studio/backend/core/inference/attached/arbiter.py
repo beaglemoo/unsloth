@@ -335,9 +335,35 @@ def _studio_media_resident() -> Optional[str]:
             loading_repo_ids = getattr(backend, "loading_repo_ids", None)
             if callable(loading_repo_ids) and loading_repo_ids():
                 return f"is loading {noun}"
+            if _media_teardown_in_flight(backend):
+                return f"is still unloading {noun}"
         except Exception:
             continue
     return _media_held()
+
+
+# Counters each media backend raises for the whole of an unload: they outlive the moment ``status()`` stops reporting a
+# model, because the backend clears its state before it waits for the generation, joins a model builder it cannot
+# interrupt, or stops the server process, and only then frees the memory.
+_MEDIA_TEARDOWN_COUNTERS = (
+    "_unloading",  # MLX image engine
+    "_unload_waiters",  # diffusers
+    "_stopping_servers",  # sd.cpp servers still being stopped
+    "_teardown_waiters",  # video
+)
+
+
+def _media_teardown_in_flight(backend: Any) -> bool:
+    """True while ``backend`` is tearing a model down, after ``status()`` already says nothing is loaded. Read-only.
+    Called after the locked ``loading_repo_ids`` read, which orders it behind an unload that was publishing its state."""
+    draining = getattr(backend, "draining_repo_ids", None)
+    if callable(draining) and draining():
+        return True
+    for counter in _MEDIA_TEARDOWN_COUNTERS:
+        value = getattr(backend, counter, 0)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return True
+    return False
 
 
 _MEDIA_PROBE_TIMEOUT_S = 3.0
