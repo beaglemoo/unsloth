@@ -1496,6 +1496,7 @@ export const fa = {
       data: "داده",
       knowledge: "دانش",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "دسترسی از راه دور و LAN",
       agents: "عامل‌ها",
       keyboardShortcuts: "میان‌برها",

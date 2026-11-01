@@ -1520,6 +1520,7 @@ export const nl = {
       data: "Gegevens",
       knowledge: "Kennis",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Extern en LAN",
       agents: "Agents",
       keyboardShortcuts: "Sneltoetsen",

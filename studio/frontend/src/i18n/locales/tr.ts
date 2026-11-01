@@ -1501,6 +1501,7 @@ export const tr = {
       data: "Veriler",
       knowledge: "Bilgi",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Uzak ve LAN",
       agents: "Ajanlar",
       keyboardShortcuts: "Kısayollar",

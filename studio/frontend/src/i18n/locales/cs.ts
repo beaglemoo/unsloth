@@ -1508,6 +1508,7 @@ export const cs = {
       data: "Data",
       knowledge: "Znalosti",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Vzdálený přístup a LAN",
       agents: "Agenti",
       keyboardShortcuts: "Zkratky",

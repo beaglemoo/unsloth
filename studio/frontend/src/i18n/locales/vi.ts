@@ -1505,6 +1505,7 @@ export const vi = {
       data: "Dữ liệu",
       knowledge: "Tri thức",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Từ xa & LAN",
       agents: "Tác tử",
       keyboardShortcuts: "Phím tắt",

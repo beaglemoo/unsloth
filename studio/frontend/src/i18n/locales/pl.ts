@@ -1515,6 +1515,7 @@ export const pl = {
       data: "Dane",
       knowledge: "Wiedza",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Zdalnie i LAN",
       agents: "Agenci",
       keyboardShortcuts: "Skróty",

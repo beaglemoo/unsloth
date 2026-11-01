@@ -1441,6 +1441,7 @@ export const th = {
       data: "ข้อมูล",
       knowledge: "ความรู้",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "ระยะไกลและ LAN",
       agents: "เอเจนต์",
       keyboardShortcuts: "ทางลัด",
