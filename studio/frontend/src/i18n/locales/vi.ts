@@ -1338,6 +1338,7 @@ export const vi = {
       connections: "Kết nối",
       data: "Dữ liệu",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "Từ xa & LAN",
       agents: "Tác tử",
       keyboardShortcuts: "Phím tắt",

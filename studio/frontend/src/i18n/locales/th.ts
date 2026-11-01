@@ -1274,6 +1274,7 @@ export const th = {
       connections: "การเชื่อมต่อ",
       data: "ข้อมูล",
       apiKeys: "API",
+      attachedEngines: "Engines",
       remoteLan: "ระยะไกลและ LAN",
       agents: "เอเจนต์",
       keyboardShortcuts: "ทางลัด",
