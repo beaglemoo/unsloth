@@ -2164,7 +2164,7 @@ def test_generated_config_has_omlx_and_comfyui():
         "PYTORCH_MPS_LOW_WATERMARK_RATIO": "0.5",
         "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "0.8",
     }
-    assert comfy["model_dirs"] == ["~/Library/Application Support/StoryPressRuntime/ComfyUI/models"]
+    assert comfy["model_dirs"] == ["~/Models/comfyui"]
     # the migration copies from "# ComfyUI (bundled helper" to the end of the file
     assert (ENGINES / "engines.default.toml").read_text().count("# ComfyUI (bundled helper") == 1
 
