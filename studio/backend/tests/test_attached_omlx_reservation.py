@@ -789,6 +789,43 @@ def test_system_one_decision_holds_the_claim_and_releases(studio, monkeypatch, o
     assert arbiter.omlx_holds() == 0
 
 
+@pytest.mark.parametrize("headers", [{"X-Org": "a"}, {}])
+def test_system_one_decision_passes_saved_headers_to_the_held_client(studio, monkeypatch, headers):
+    from routes import systemone
+
+    config = {
+        "provider_type": "custom", "base_url": "http://127.0.0.1:8843/v1", "is_enabled": True,
+        "api_type": "chat_completions", "display_name": "My oMLX", "models": ["m"],
+        "extra_headers": headers,
+    }
+    built = []
+    monkeypatch.setattr(systemone, "run_as", lambda owner, fn, *args: config)
+    monkeypatch.setattr(systemone.catalog, "decision_models", lambda cfg: ["m"])
+    monkeypatch.setattr(systemone, "answers_decisions_only", lambda *args: False)
+
+    async def arun_as(owner, awaitable):
+        return await awaitable
+
+    async def key(provider_id, cfg):
+        assert arbiter.omlx_holds() == 1, "admission and the claim come before the key lookup"
+        return "k"
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            built.append((args, kwargs, arbiter.omlx_holds()))
+
+        async def create_decision(self, model, state, questions):
+            return {"answers": {}}
+
+    monkeypatch.setattr(systemone, "arun_as", arun_as)
+    monkeypatch.setattr(systemone, "_connection_key", key)
+    monkeypatch.setattr(systemone, "ExternalProviderClient", Client)
+    run(systemone._connection_decide(systemone.catalog.Connection("c", "m"), "state", {}))
+    (args, kwargs, holds), = built
+    assert holds == 1 and arbiter.omlx_holds() == 0
+    assert kwargs == ({"extra_headers": headers} if headers else {})
+
+
 def test_system_one_refusal_registers_no_claim(studio, monkeypatch):
     from routes import systemone
 
