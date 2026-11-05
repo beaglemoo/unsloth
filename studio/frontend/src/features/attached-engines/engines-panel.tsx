@@ -3,7 +3,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { formatBytes } from "@/features/hub";
+import { formatBytes } from "@/features/hub/lib/format";
 import { toast } from "@/lib/toast";
 import { SettingsRow } from "@/features/settings/components/settings-row";
 import { SettingsSection } from "@/features/settings/components/settings-section";
