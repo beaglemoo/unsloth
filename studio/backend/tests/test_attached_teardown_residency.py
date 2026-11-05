@@ -254,3 +254,120 @@ def test_a_later_successful_unload_clears_the_failed_unload_claim(world, orchest
     monkeypatch.setattr(orchestrator, "_shutdown_subprocess", lambda *_a, **_k: False)
     assert orchestrator.unload_model("/models/Qwen-MLX") is True
     assert not inf_mod._attached_local_memory_active()
+
+
+# -- failed load / reload cleanup, narrow-context fallback --------------------
+
+
+class _StubbornProc(_Proc):
+    """A worker that survives terminate and kill (an uninterruptible syscall)."""
+
+    exitcode = None
+    sentinel = None
+
+    def terminate(self):
+        pass
+
+    def kill(self):
+        pass
+
+
+@pytest.fixture
+def stubborn(orchestrator, monkeypatch):
+    import utils.process_lifetime as lifetime
+
+    # Never signal the fake pid for real.
+    monkeypatch.setattr(lifetime, "terminate_pid", lambda *_a, **_k: None)
+    orchestrator._proc = _StubbornProc()
+    return orchestrator
+
+
+def _prepare_load(orch, monkeypatch, narrow):
+    import core.inference.orchestrator as orch_mod
+
+    monkeypatch.setattr(orch_mod, "prepare_gpu_selection", lambda *_a, **_k: ([], "auto"))
+    monkeypatch.setattr(orch_mod, "get_device", lambda: NS(value = "cpu"))
+    monkeypatch.setattr("utils.transformers_version.needs_transformers_5", lambda _model: False)
+    monkeypatch.setattr("utils.transformers_version.sidecar_swap_kind", lambda: None)
+    monkeypatch.setattr(orch, "_narrow_context_in_place", narrow)
+    monkeypatch.setattr(orch, "_cancel_generation", lambda *_a, **_k: None)
+
+
+def _failing_narrow(*_a, **_k):
+    raise RuntimeError("narrow blew up")
+
+
+def _declined_narrow(*_a, **_k):
+    return False
+
+
+def _assert_admission_refused(world):
+    import routes.inference as inf_mod
+
+    assert inf_mod._attached_local_memory_active()
+    with pytest.raises(arbiter.AttachedAdmissionError):
+        _admit().require_clear()
+    assert "local model loaded" in (asyncio.run(arbiter.before_comfyui_job()).error or "")
+
+
+@pytest.mark.parametrize("narrow", [_failing_narrow, _declined_narrow], ids = ["failed-load", "narrow-fallback"])
+def test_a_failed_load_that_cannot_stop_the_worker_keeps_oMLX_and_ComfyUI_out(
+    world, stubborn, monkeypatch, narrow
+):
+    """The load handler clears the model name and the loading set; a surviving worker must still count."""
+    _prepare_load(stubborn, monkeypatch, narrow)
+    config = replace(arbiter.get_config(), arbitrate_comfyui = True)
+    monkeypatch.setattr(arbiter, "get_config", lambda: config)
+
+    async def _nothing_to_unload(_config):
+        return []
+
+    monkeypatch.setattr(arbiter, "_unload_omlx", _nothing_to_unload)
+
+    with pytest.raises(Exception):
+        stubborn.load_model(NS(identifier = "local.safetensors"))
+
+    # The state Codex observed: no model name, no loading entry, no chat-load marker, a live worker.
+    assert stubborn.active_model_name is None
+    assert not stubborn.models
+    assert not stubborn.loading_models
+    assert stubborn.is_worker_alive()
+    assert stubborn.worker_holds_unreleased_memory()
+    _assert_admission_refused(world)
+
+    # The worker finally exits: nothing holds the weights any more.
+    stubborn._proc.alive = False
+    assert not stubborn.worker_holds_unreleased_memory()
+    _admit().require_clear()
+    assert not asyncio.run(arbiter.before_comfyui_job()).error
+
+
+def test_a_later_successful_shutdown_clears_the_failed_load_claim(world, stubborn, monkeypatch):
+    import routes.inference as inf_mod
+
+    _prepare_load(stubborn, monkeypatch, _failing_narrow)
+    with pytest.raises(Exception):
+        stubborn.load_model(NS(identifier = "local.safetensors"))
+    assert stubborn.worker_holds_unreleased_memory()
+    assert inf_mod._attached_local_memory_active()
+
+    # The wedged syscall returns and the next shutdown attempt succeeds.
+    stubborn._proc.terminate = lambda: setattr(stubborn._proc, "alive", False)
+    assert stubborn._shutdown_subprocess(timeout = 0.1) is True
+    assert not stubborn.worker_holds_unreleased_memory()
+    assert not inf_mod._attached_local_memory_active()
+    _admit().require_clear()
+
+
+def test_a_successful_failed_load_cleanup_leaves_admission_open(world, orchestrator, monkeypatch):
+    """No behaviour change when the shutdown works: the worker exits on terminate."""
+    import utils.process_lifetime as lifetime
+
+    monkeypatch.setattr(lifetime, "terminate_pid", lambda *_a, **_k: setattr(orchestrator._proc, "alive", False))
+    orchestrator._proc.exitcode = 0
+    orchestrator._proc.sentinel = None
+    _prepare_load(orchestrator, monkeypatch, _failing_narrow)
+    with pytest.raises(Exception):
+        orchestrator.load_model(NS(identifier = "local.safetensors"))
+    assert not orchestrator.worker_holds_unreleased_memory()
+    _admit().require_clear()
