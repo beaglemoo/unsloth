@@ -50,7 +50,7 @@ logger = get_logger(__name__)
 JOB_TIMEOUT_ENV = "STUDIO_COMFYUI_JOB_TIMEOUT_S"
 DEFAULT_JOB_TIMEOUT_S = 1800.0
 OFF_MESSAGE = "ComfyUI is off, enable it in Settings > Engines."
-DEFAULT_MODEL_DIRS = ["~/Library/Application Support/StoryPressRuntime/ComfyUI/models"]
+DEFAULT_MODEL_DIRS = ["~/Models/comfyui"]
 
 
 class ComfyJobFailure(RuntimeError):
