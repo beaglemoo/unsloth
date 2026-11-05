@@ -933,6 +933,10 @@ class InferenceOrchestrator:
                 "Inference subprocess still alive after terminate/kill; "
                 "preserving its handle for the pre-swap liveness check"
             )
+            # Central record for every caller (unload, failed-load cleanup, context-narrow fallback, ...): the
+            # model name may be dropped, but the survivor's weights are still resident. Cleared by a later
+            # confirmed shutdown or a fresh spawn; worker_holds_unreleased_memory() also needs the process alive.
+            self._unload_left_worker = True
             return False
 
         # Termination can leave a partial queue frame that blocks even get_nowait().
@@ -2649,6 +2653,8 @@ class InferenceOrchestrator:
                 self._shutdown_subprocess(timeout = 5)
             except Exception as teardown_exc:
                 logger.warning("Could not shut the failed load's worker down: %s", teardown_exc)
+                # A teardown that raised may have left the worker running.
+                self._unload_left_worker = self._ensure_subprocess_alive()
             raise
         finally:
             self._release_load_downloads()
@@ -2993,8 +2999,7 @@ class InferenceOrchestrator:
                     "shutting the inference subprocess down to free the model",
                     _UNLOAD_GEN_LOCK_TIMEOUT,
                 )
-                if not self._shutdown_subprocess(timeout = 5):
-                    self._unload_left_worker = True
+                self._shutdown_subprocess(timeout = 5)
                 self.models.pop(model_name, None)
                 if self.active_model_name == model_name:
                     self.active_model_name = None
@@ -3006,8 +3011,7 @@ class InferenceOrchestrator:
                         "Unload: compare-mode dispatcher still active after idle "
                         "wait; shutting the inference subprocess down to free the model"
                     )
-                    if not self._shutdown_subprocess(timeout = 5):
-                        self._unload_left_worker = True
+                    self._shutdown_subprocess(timeout = 5)
                     self.models.pop(model_name, None)
                     if self.active_model_name == model_name:
                         self.active_model_name = None
