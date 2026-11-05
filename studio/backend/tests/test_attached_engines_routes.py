@@ -327,6 +327,17 @@ def test_sync_keeps_user_choices_and_adds_new_models(client, fake):
     assert row["is_enabled"] == 0  # never re-enabled by a sync
 
 
+def test_sync_writes_no_extra_headers_and_keeps_ones_a_user_saved(client, fake):
+    # Upstream #15097 added the extra_headers column; a sync must neither invent nor drop them.
+    client.post("/api/engines/attached/sync")
+    assert providers_db.get_provider(ATTACHED_OMLX_ID)["extra_headers"] == {}
+    providers_db.update_provider(ATTACHED_OMLX_ID, extra_headers = {"X-Test": "1"})
+    assert client.post("/api/engines/attached/sync").json()["rows"]["omlx"] == "updated"
+    fake.omlx_up = False
+    assert client.post("/api/engines/attached/sync").json()["rows"]["omlx"] == "kept_models"
+    assert providers_db.get_provider(ATTACHED_OMLX_ID)["extra_headers"] == {"X-Test": "1"}
+
+
 def test_sync_does_not_overwrite_a_choice_saved_while_it_is_reading(client, fake, monkeypatch):
     client.post("/api/engines/attached/sync")
     entered = threading.Event()
