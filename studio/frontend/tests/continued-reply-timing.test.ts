@@ -153,7 +153,7 @@ test("Continue carries the figures and the adapter adds them on every way a pass
   assert.match(adapter, /estimateTokenCount\(continuation \? passText\(\) : partialText\)/);
   assert.match(adapter, /const finalTiming = withPriorTiming\(/);
   assert.match(adapter, /const partialTiming = withPriorTiming\(/);
-  assert.match(adapter, /serverTimings: finalServerTimings \?\? undefined,/);
+  assert.match(adapter, /serverTimings:\s*finalServerTimings \?\?\s*approximateServerTimings\(/);
   assert.match(adapter, /startedAt: priorTiming\?\.startedAt \?\? streamStartTime,/);
   const live = adapter.slice(adapter.indexOf("const liveCustom = () => ({"), adapter.indexOf("const liveCustom = () => ({") + 400);
   assert.match(live, /resumeTiming: passSoFar \? addPass\(priorTiming, passSoFar\(\)\) : priorTiming,/);
