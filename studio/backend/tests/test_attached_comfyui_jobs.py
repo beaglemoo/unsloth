@@ -489,13 +489,14 @@ def test_admission_error_means_no_submit_and_no_idle_timer(world):
     assert world.fake.submitted == [] and world.scheduled == 0
 
 
-def test_missing_models_are_reported_before_admission(world):
+def test_missing_models_are_reported_before_admission(world, monkeypatch, tmp_path):
+    monkeypatch.setenv("UNSLOTH_ENGINES_CONFIG", str(tmp_path / "absent.toml"))
     world.fake.models["text_encoders"] = []
     world.fake.models["loras"] = []
     with pytest.raises(jobs.ComfyModelsMissing) as caught:
         go(runner().run("qwen-image-2.1-t2i", {**PARAMS, "loras": [{"name": "gone.safetensors", "strength": 1}]}, client = world.fake.client()))
     assert caught.value.missing == {"text_encoders": ["qwen3vl_8b_bf16.safetensors"], "loras": ["gone.safetensors"]}
-    assert "text_encoders/qwen3vl_8b_bf16.safetensors" in str(caught.value) and "StoryPressRuntime" in str(caught.value)
+    assert "text_encoders/qwen3vl_8b_bf16.safetensors" in str(caught.value) and "~/Models/comfyui" in str(caught.value)
     assert world.admissions == 0 and world.fake.submitted == []
 
 

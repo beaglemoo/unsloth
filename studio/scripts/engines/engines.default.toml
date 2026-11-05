@@ -29,8 +29,9 @@ OMLX_SUPERVISED = "launchd"
 [comfyui]
 port = 8844
 data_dir = "~/.unsloth/engines/comfyui-data"
-# Read-only shared weights, written into extra_model_paths.unsloth.yaml at every start.
-model_dirs = ["~/Library/Application Support/StoryPressRuntime/ComfyUI/models"]
+# Read-only shared weights, written into extra_model_paths.unsloth.yaml at every start. This is the
+# central model folder, shared with StoryPress's ComfyUI (ComfyUI layout: diffusion_models, text_encoders, vae, loras).
+model_dirs = ["~/Models/comfyui"]
 # The StoryPress-tested Apple Silicon flags plus no custom nodes and no internet for the web UI.
 # --cache-none drops cached node outputs after each job so image-edit jobs do not keep growing.
 extra_args = ["--lowvram", "--disable-smart-memory", "--cpu-vae", "--disable-all-custom-nodes", "--offline", "--cache-none"]
