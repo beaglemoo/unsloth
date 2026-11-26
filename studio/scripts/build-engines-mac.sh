@@ -7,6 +7,8 @@
 #                       studio/engines/comfyui-constraints.txt, plus src/ (an exported copy of the
 #                       submodule tree, run as `bin/python src/main.py`). The venv and src/ are one
 #                       swap unit. ComfyUI is not a pip package, so nothing installs the tree itself.
+#                       studio/engines/comfyui-patches/*.patch are applied to that exported src/ (never
+#                       the submodule); their hash is part of the comfyui marker.
 #   2. Write ~/.unsloth/engines/engines.toml if it is missing. An existing one is kept, but an
 #      old generated file is migrated (see --migrate-config).
 #
@@ -143,6 +145,41 @@ check_submodule_pins() {
 export_tree() { # <submodule dir> <dest>
   rm -rf "$2"; mkdir -p "$2"
   git -C "$1" archive HEAD | tar -x -C "$2"
+}
+
+# Source patches carried on top of the ComfyUI submodule: studio/engines/comfyui-patches/*.patch,
+# applied in sorted (C locale) order to the EXPORTED tree, never to the submodule checkout.
+# Paths in a patch are relative to the ComfyUI root (-p1). Drop a patch when upstream has it.
+comfyui_patch_files() {
+  local dir="$ENGINES_SRC/comfyui-patches"
+  [ -d "$dir" ] || return 0
+  find "$dir" -maxdepth 1 -type f -name '*.patch' | LC_ALL=C sort
+}
+
+# Suffix for the comfyui marker: empty with no patches (existing markers stay valid), else
+# ":patches-<12 hex>" over every patch's name and content, so adding, removing or editing a patch restages.
+comfyui_patches_key() {
+  local files f
+  files="$(comfyui_patch_files)"
+  [ -n "$files" ] || return 0
+  printf ':patches-%s' "$(
+    while IFS= read -r f; do printf '%s %s\n' "$(basename "$f")" "$(shasum -a 256 < "$f" | cut -d' ' -f1)"; done <<<"$files" \
+      | shasum -a 256 | cut -c1-12
+  )"
+}
+
+apply_comfyui_patches() { # <exported src dir>
+  local dest="$1" files f out
+  files="$(comfyui_patch_files)"
+  [ -n "$files" ] || return 0
+  while IFS= read -r f; do
+    log "comfyui: applying $(basename "$f")"
+    out="$(patch -p1 -F0 -N -s --no-backup-if-mismatch -d "$dest" -i "$f" 2>&1)" \
+      || { printf '%s\n' "$out" >&2; die "comfyui source patch $(basename "$f") does not apply to $COMFYUI_COMMIT (drop it if upstream has it now)"; }
+  done <<<"$files"
+  if find "$dest" \( -name '*.rej' -o -name '*.orig' \) | grep -q .; then
+    die "comfyui source patches left .rej/.orig files in $dest"
+  fi
 }
 
 # True when a running engine has files open under the given venv. pgrep -f on the
@@ -301,7 +338,7 @@ PY
 stage_comfyui() {
   local venv="$ENGINES_HOME/comfyui" new="$ENGINES_HOME/comfyui.new"
   local constraints="$ENGINES_SRC/comfyui-constraints.txt"
-  local want="$COMFYUI_COMMIT:py$COMFYUI_PYTHON:constraints-$(shasum -a 256 "$constraints" | cut -c1-12)"
+  local want="$COMFYUI_COMMIT:py$COMFYUI_PYTHON:constraints-$(shasum -a 256 "$constraints" | cut -c1-12)$(comfyui_patches_key)"
   if [ "$FORCE" = 0 ] && [ "$(marker_get comfyui)" = "$want" ] && [ -x "$venv/bin/python" ]; then
     log "comfyui venv: up to date ($COMFYUI_COMMIT)"
     discard_stale_staged "$new"
@@ -314,6 +351,7 @@ stage_comfyui() {
   log "comfyui venv: staging $COMFYUI_COMMIT in $new (this installs torch and the pinned stack, about 1.5 GB; it can take several minutes)"
   make_venv "$new" "$COMFYUI_PYTHON"
   export_tree "$ENGINES_SRC/comfyui" "$new/src"
+  apply_comfyui_patches "$new/src"
   pip_install "$new" -r "$new/src/requirements.txt" -c "$constraints" >"$BUILD_ROOT/comfyui-install.log" 2>&1 \
     || { tail -n 30 "$BUILD_ROOT/comfyui-install.log" >&2; die "comfyui install failed (log: $BUILD_ROOT/comfyui-install.log)"; }
   validate_comfyui "$new"
