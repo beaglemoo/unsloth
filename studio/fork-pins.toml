@@ -19,8 +19,11 @@
 # Bumped 2026-11-01 to the PyPI 2026.10.11 release commit 0aab78cd (mlx==0.32.4, mlx-lm <=0.32.2, mlx-vlm <=0.7.11):
 # every zoo symbol Studio imports exists there, so the release is used instead of zoo main (reproducible).
 # Bumped 2026-11-05 to the PyPI 2026.11.2 release commit 935947c5 (mlx==0.32.4, mlx-lm <=0.32.2, mlx-vlm <=0.7.11; includes MLX Fast Verify, zoo #2332).
+# Bumped 2026-11-26 to the PyPI 2026.11.12 release commit 0c745cc8 (mlx==0.32.4, mlx-lm <=0.32.2, mlx-vlm <=0.8.1);
+# 58 later zoo main commits carry the same version string (CUDA/GRPO/vLLM only, none touch unsloth_zoo/mlx or speculative),
+# so the installer checks the recorded commit_id as well.
 
 [unsloth-zoo]
-version = "2026.11.2"
+version = "2026.11.12"
 url = "https://github.com/unslothai/unsloth-zoo"
-commit = "935947c5de133a529f98be3b9c416a851a4f069e"
+commit = "0c745cc812808e90cb41b4acdff18031a2581c5b"
