@@ -13511,16 +13511,16 @@ def _attached_local_memory_active() -> bool:
 
 
 async def _admit_attached_stt_load(sidecar, model, engine):
-    """Admit a dictation load that will allocate, as a local load. Returns the arbiter claim (release it in a
-    ``finally`` once the load and its use are done) or None when ``model`` is already resident.
+    """Admit a dictation load or reuse as local work. Returns the arbiter claim; release it in a ``finally`` once the
+    load and the transcription are done.
 
-    The claim is registered under the arbiter lock, so oMLX and ComfyUI are refused from admission until the
-    sidecar publishes its own loading state, the same way an image or video load is held."""
+    A model that is already resident is claimed too: the claim keeps an oMLX request from unloading the idle sidecar
+    (and registering its own hold) between this admission and the worker-thread ``stt_registry.load``, which would
+    then reload with no admission, beside oMLX. The claim is registered under the arbiter lock, so oMLX and ComfyUI
+    are refused from admission until the route releases it, the same way an image or video load is held. A held
+    oMLX request refuses the claim with the retryable 503 instead."""
     from core.inference.attached.arbiter import new_media_hold
 
-    resolved = _stt_resolved_model_id(model, engine)
-    if resolved is not None and getattr(sidecar, "loaded_model", None) == resolved:
-        return None
     hold = new_media_hold("stt")
     try:
         await _admit_attached_local_load(hold)

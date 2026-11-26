@@ -256,11 +256,12 @@ def test_a_failing_load_releases_the_claim(entry, stt, world, monkeypatch):
     assert arbiter._media_holds == set()
 
 
-def test_a_model_that_is_already_resident_is_not_admitted_again(entry, stt, world):
+def test_a_model_that_is_already_resident_is_claimed_for_the_whole_reuse(entry, stt, world):
     stt["sidecar"].loaded_model = MODEL
     entry()
-    assert world["omlx"] == []
-    assert stt["claim"] == [None]
+    assert world["omlx"] == ["unload_all"]
+    assert stt["claim"] == ["is loading a dictation model"]
+    assert arbiter._media_holds == set()
 
 
 def test_a_dictation_load_is_left_alone_when_arbitration_is_off(entry, stt, world, monkeypatch):
@@ -299,9 +300,13 @@ def _ggml_sidecar(model_id):
 
 
 @pytest.mark.parametrize("requested, resident", [("small", "small"), (None, "small"), ("large-v3-turbo", "large-v3-turbo")])
-def test_a_ggml_model_that_is_already_resident_is_not_admitted_again(world, requested, resident):
-    assert run(inference._admit_attached_stt_load(_ggml_sidecar(resident), requested, "gguf")) is None
-    assert world["omlx"] == []
+def test_a_ggml_model_that_is_already_resident_is_claimed_too(world, requested, resident):
+    hold = run(inference._admit_attached_stt_load(_ggml_sidecar(resident), requested, "gguf"))
+    try:
+        assert hold is not None and hold.kind == "stt"
+        assert arbiter._media_held() == "is loading a dictation model"
+    finally:
+        hold.release()
     assert arbiter._media_holds == set()
 
 
@@ -330,3 +335,79 @@ def test_an_unknown_ggml_model_is_admitted_and_left_to_the_loader_to_refuse(worl
     hold = run(inference._admit_attached_stt_load(_ggml_sidecar("small"), "not-a-curated-model", "gguf"))
     assert hold is not None
     hold.release()
+
+
+# --- warm reuse: the claim covers the gap before the worker-thread registry load --------------------------------
+
+
+def _paused_lifecycle(monkeypatch, sidecar):
+    """A registry load that parks on a worker thread until the test lets it go, noting what was held when it ran."""
+    seen = {"entered": threading.Event(), "go": threading.Event(), "claim": None, "loads": 0}
+
+    def load_stt(model, engine, cancel_event = None, **kwargs):
+        seen["loads"] += 1
+        seen["claim"] = arbiter._media_held()
+        seen["entered"].set()
+        assert seen["go"].wait(10)
+        sidecar.loaded_model = model
+
+    monkeypatch.setattr(inference, "_stt_lifecycle", lambda: (load_stt, lambda *a, **k: []))
+    return seen
+
+
+def _warm_entries(stt):
+    stt["sidecar"].transcribe = lambda raw, model, language, fast, *a, **k: {"text": "hi"}
+    return {
+        "stt_load": lambda: inference.stt_load(NS(model = MODEL, engine = "transformers", device = None), NS(), "user"),
+        "transcribe": lambda: inference._transcribe_audio_result(b"audio", MODEL, None, False),
+    }
+
+
+@pytest.mark.parametrize("name", ["stt_load", "transcribe"])
+def test_omlx_is_refused_between_a_warm_reuse_and_its_registry_load(name, stt, world, monkeypatch, dictation):
+    stt["sidecar"].loaded_model = MODEL
+    dictation["stt"] = dict(RESIDENT)
+    seen = _paused_lifecycle(monkeypatch, stt["sidecar"])
+    entry = _warm_entries(stt)[name]
+
+    async def scenario():
+        task = asyncio.create_task(entry())
+        assert await asyncio.to_thread(seen["entered"].wait, 10)
+        try:
+            # The sidecar is resident and idle to the registry; without the claim this would unload it and be admitted.
+            refused = await arbiter.before_omlx_use(arbiter.new_omlx_hold())
+            assert refused.error and "dictation model" in refused.error
+            assert dictation["unloads"] == []
+            assert arbiter.omlx_holds() == 0
+        finally:
+            seen["go"].set()
+        await task
+
+    run(scenario())
+    assert seen["claim"] == "is loading a dictation model"
+    assert arbiter._media_holds == set()
+    assert not run(arbiter.before_omlx_use()).error
+
+
+@pytest.mark.parametrize("name", ["stt_load", "transcribe"])
+def test_a_warm_reuse_is_refused_with_a_retryable_503_while_omlx_holds(name, stt, world, monkeypatch):
+    stt["sidecar"].loaded_model = MODEL
+    seen = _paused_lifecycle(monkeypatch, stt["sidecar"])
+    entry = _warm_entries(stt)[name]
+
+    async def scenario():
+        hold = arbiter.new_omlx_hold()
+        assert not (await arbiter.before_omlx_use(hold)).error
+        try:
+            with pytest.raises(HTTPException) as caught:
+                await entry()
+        finally:
+            hold.release()
+        return caught.value
+
+    refused = run(scenario())
+    assert refused.status_code == 503
+    assert refused.headers == {"Retry-After": "15"}
+    assert seen["loads"] == 0
+    assert world["omlx"] == []
+    assert arbiter._media_holds == set()
