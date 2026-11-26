@@ -283,3 +283,50 @@ def test_oMLX_use_is_refused_while_the_dictation_claim_is_held(world, dictation)
     finally:
         hold.release()
     assert not run(arbiter.before_omlx_use()).error
+
+
+# --- the whisper.cpp (gguf) engine: residency is read from the real sidecar with the real id resolver ------------
+
+
+def _ggml_sidecar(model_id):
+    """A real whisper.cpp sidecar whose server process "runs" the given curated model."""
+    from core.inference.stt_ggml_sidecar import GgmlSttSidecar
+
+    sidecar = GgmlSttSidecar()
+    sidecar._process = NS(poll = lambda: None)
+    sidecar._model_id = model_id
+    return sidecar
+
+
+@pytest.mark.parametrize("requested, resident", [("small", "small"), (None, "small"), ("large-v3-turbo", "large-v3-turbo")])
+def test_a_ggml_model_that_is_already_resident_is_not_admitted_again(world, requested, resident):
+    assert run(inference._admit_attached_stt_load(_ggml_sidecar(resident), requested, "gguf")) is None
+    assert world["omlx"] == []
+    assert arbiter._media_holds == set()
+
+
+@pytest.mark.parametrize("model_id", [None, "tiny"])
+def test_a_ggml_load_that_allocates_is_admitted_and_unloads_omlx(world, model_id):
+    hold = run(inference._admit_attached_stt_load(_ggml_sidecar(model_id), "small", "gguf"))
+    try:
+        assert hold is not None and hold.kind == "stt"
+        assert world["omlx"] == ["unload_all"]
+        assert arbiter._media_held() == "is loading a dictation model"
+    finally:
+        hold.release()
+    assert arbiter._media_holds == set()
+
+
+def test_a_ggml_sidecar_whose_server_died_counts_as_not_resident(world):
+    sidecar = _ggml_sidecar("small")
+    sidecar._process = NS(poll = lambda: 1)
+    assert sidecar.loaded_model is None
+    hold = run(inference._admit_attached_stt_load(sidecar, "small", "gguf"))
+    assert hold is not None
+    hold.release()
+
+
+def test_an_unknown_ggml_model_is_admitted_and_left_to_the_loader_to_refuse(world):
+    hold = run(inference._admit_attached_stt_load(_ggml_sidecar("small"), "not-a-curated-model", "gguf"))
+    assert hold is not None
+    hold.release()
