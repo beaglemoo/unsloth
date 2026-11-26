@@ -466,6 +466,12 @@ def test_chat_proxy_streaming_keeps_the_claim_until_the_stream_ends(credentials,
         def __init__(self, *args, **kwargs):
             pass
 
+        async def serves_ollama(self):
+            return False
+
+        async def served_context_window(self, model):
+            return None
+
         async def stream_chat_completion(self, **kwargs):
             yield 'data: {"choices":[{"delta":{"content":"a"}}]}'
             yield 'data: {"choices":[{"delta":{"content":"b"}}]}'

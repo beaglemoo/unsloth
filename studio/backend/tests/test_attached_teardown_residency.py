@@ -289,7 +289,7 @@ def _prepare_load(orch, monkeypatch, narrow):
     monkeypatch.setattr(orch_mod, "get_device", lambda: NS(value = "cpu"))
     monkeypatch.setattr("utils.transformers_version.needs_transformers_5", lambda _model: False)
     monkeypatch.setattr("utils.transformers_version.sidecar_swap_kind", lambda: None)
-    monkeypatch.setattr(orch, "_narrow_context_in_place", narrow)
+    monkeypatch.setattr(orch, "_retune_in_place", narrow)
     monkeypatch.setattr(orch, "_cancel_generation", lambda *_a, **_k: None)
 
 
