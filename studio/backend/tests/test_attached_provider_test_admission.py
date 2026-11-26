@@ -193,3 +193,91 @@ def test_a_concurrent_local_admission_sees_the_probe_hold(studio, monkeypatch):
     monkeypatch.setattr(FakeClient, "stream_chat_completion", probing)
     assert test_connection(api_type = "responses").success
     assert seen and "busy" in seen[0].lower()
+
+
+# --- probe_with_chat types (no model list): the one-token chat is inference too ---------------------------------
+
+
+def chat_probe(provider_type = "perplexity", base_url = OMLX, **fields):
+    payload = ProviderTestRequest(
+        provider_type = provider_type, base_url = base_url, model_id = "swift", **fields
+    )
+    return asyncio.run(providers.test_provider(payload, "user", False))
+
+
+@pytest.mark.parametrize("provider_type", ["perplexity", "azure", "bedrock"])
+def test_a_chat_probe_type_pointed_at_omlx_is_admitted_and_held_for_its_run(studio, provider_type):
+    result = chat_probe(provider_type)
+    assert result.success, result.message
+    assert FakeClient.log == [("responses", 1)]
+    assert arbiter.omlx_holds() == 0
+
+
+@pytest.mark.parametrize("provider_type", ["perplexity", "azure", "bedrock"])
+def test_a_chat_probe_type_pointed_at_omlx_is_refused_while_studio_trains(studio, provider_type):
+    studio["training"] = True
+    result = chat_probe(provider_type)
+    assert not result.success
+    assert "Studio is training" in result.message
+    assert FakeClient.log == []
+    assert arbiter.omlx_holds() == 0
+
+
+def test_a_chat_probe_type_pointed_at_omlx_is_refused_while_a_local_model_is_loaded(studio, monkeypatch):
+    monkeypatch.setattr(arbiter, "_local_memory_active", lambda: True)
+    result = chat_probe()
+    assert not result.success
+    assert "local model" in result.message
+    assert FakeClient.log == []
+    assert arbiter.omlx_holds() == 0
+
+
+def test_a_chat_probe_elsewhere_needs_no_admission(studio):
+    studio["training"] = True
+    result = chat_probe(base_url = ELSEWHERE)
+    assert result.success, result.message
+    assert FakeClient.log == [("responses", 0)]
+
+
+def test_a_chat_probe_with_attached_engines_off_is_not_arbitrated(studio, monkeypatch):
+    monkeypatch.setattr(arbiter, "get_config", lambda: DEFAULT_CONFIG)
+    studio["training"] = True
+    result = chat_probe()
+    assert result.success, result.message
+    assert FakeClient.log == [("responses", 0)]
+
+
+def test_a_chat_probe_without_a_model_sends_and_holds_nothing(studio):
+    payload = ProviderTestRequest(provider_type = "perplexity", base_url = OMLX, model_id = "")
+    result = asyncio.run(providers.test_provider(payload, "user", False))
+    assert not result.success
+    assert FakeClient.log == []
+    assert arbiter.omlx_holds() == 0
+
+
+@pytest.fixture
+def shared(studio, monkeypatch):
+    monkeypatch.setattr(providers, "_is_shared_saved_target", lambda payload: True)
+    monkeypatch.setattr(providers, "_bind_saved_provider_target", lambda payload: payload)
+    monkeypatch.setattr(providers.providers_db, "get_provider", lambda provider_id: {"models": ["swift"]})
+    return studio
+
+
+def shared_probe(provider_type = "perplexity"):
+    payload = ProviderTestRequest(provider_type = provider_type, base_url = OMLX, provider_id = "p1")
+    return asyncio.run(providers.test_provider(payload, "user", False))
+
+
+def test_a_shared_chat_probe_to_omlx_is_admitted_and_held_for_its_run(shared):
+    result = shared_probe()
+    assert result.success, result.message
+    assert FakeClient.log == [("responses", 1)]
+    assert arbiter.omlx_holds() == 0
+
+
+def test_a_shared_chat_probe_to_omlx_is_refused_while_studio_trains(shared):
+    shared["training"] = True
+    result = shared_probe()
+    assert not result.success
+    assert FakeClient.log == []
+    assert arbiter.omlx_holds() == 0

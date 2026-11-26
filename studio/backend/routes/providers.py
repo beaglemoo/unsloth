@@ -1034,14 +1034,18 @@ async def _test_custom_provider_connectivity(
         )
 
 
-async def _test_by_chat(client, model_id: str, base_url: str) -> ProviderTestResult:
-    """For providers with no usable model list (Azure deployments, Bedrock, Vertex, Perplexity)."""
+async def _test_by_chat(client, model_id: str, base_url: str, admit = None) -> ProviderTestResult:
+    """For providers with no usable model list (Azure deployments, Bedrock, Vertex, Perplexity).
+
+    ``admit`` is awaited before the request goes out; it raises when the arbiter refuses (oMLX is the target)."""
     if not model_id:
         return ProviderTestResult(
             success = False,
             message = "Connection failed: add a model ID to test with.",
             error_kind = "other",
         )
+    if admit is not None:
+        await admit()
     failure: str | None = None
     kind = "other"
     answered = False
@@ -1198,33 +1202,6 @@ async def test_provider(
         timeout = _PROVIDER_CONNECTIVITY_TIMEOUT_SECONDS,
     )
 
-    if shared:
-        # Others learn only reachability: no model probe, no upstream error text (it can quote the URL).
-        try:
-            if answers_decisions_only(payload.provider_type, payload.api_type):
-                await client.list_decision_models()
-            elif provider_probes_with_chat(payload.provider_type, base_url):
-                # No model list to read, so a listing would fail even when the chat works.
-                saved = (providers_db.get_provider(payload.provider_id) or {}).get("models") or []
-                model = payload.model_id if payload.model_id in saved else next(iter(saved), "")
-                if not (await _test_by_chat(client, model, base_url)).success:
-                    raise RuntimeError("chat check failed")
-            elif payload.provider_type == "openrouter":
-                await client.verify_models_endpoint_lightweight()
-            else:
-                await client.list_models()
-        except Exception:
-            return ProviderTestResult(
-                success = False,
-                message = "Connection failed. Ask the owner to check this connection.",
-                models_count = None,
-            )
-        finally:
-            await client.close()
-        return ProviderTestResult(
-            success = True, message = "Connected successfully.", models_count = None
-        )
-
     # Probes that run inference reach oMLX like any other request to it: admitted once, and held until the test ends.
     omlx_hold = new_omlx_hold()
     admitted = False
@@ -1239,6 +1216,36 @@ async def test_provider(
         await _admit_attached_omlx_provider(payload.provider_type, base_url, omlx_hold)
         admitted = True
 
+    if shared:
+        # Others learn only reachability: no model probe, no upstream error text (it can quote the URL).
+        try:
+            if answers_decisions_only(payload.provider_type, payload.api_type):
+                await client.list_decision_models()
+            elif provider_probes_with_chat(payload.provider_type, base_url):
+                # No model list to read, so a listing would fail even when the chat works.
+                saved = (providers_db.get_provider(payload.provider_id) or {}).get("models") or []
+                model = payload.model_id if payload.model_id in saved else next(iter(saved), "")
+                if not (await _test_by_chat(client, model, base_url, admit_inference)).success:
+                    raise RuntimeError("chat check failed")
+            elif payload.provider_type == "openrouter":
+                await client.verify_models_endpoint_lightweight()
+            else:
+                await client.list_models()
+        except Exception:
+            return ProviderTestResult(
+                success = False,
+                message = "Connection failed. Ask the owner to check this connection.",
+                models_count = None,
+            )
+        finally:
+            try:
+                await client.close()
+            finally:
+                omlx_hold.release()
+        return ProviderTestResult(
+            success = True, message = "Connected successfully.", models_count = None
+        )
+
     try:
         if answers_decisions_only(payload.provider_type, payload.api_type):
             return await _test_decision_connectivity(
@@ -1249,7 +1256,9 @@ async def test_provider(
                 client, payload.model_id or "", payload.api_type, base_url, admit_inference
             )
         if provider_probes_with_chat(payload.provider_type, base_url):
-            return await _test_by_chat(client, (payload.model_id or "").strip(), base_url)
+            return await _test_by_chat(
+                client, (payload.model_id or "").strip(), base_url, admit_inference
+            )
         if info.get("model_list_mode") == "curated":
             await client.verify_models_endpoint_lightweight()
             if payload.provider_type in _KEY_CHECKED_PROVIDERS and await client.api_key_rejected():
