@@ -4182,6 +4182,17 @@ async def start_diffusion_training(
                 )
             except ResumeError as e:
                 raise HTTPException(status_code = 400, detail = str(e))
+        # Unload oMLX and free ComfyUI before any of Studio's own models are torn down, as an LLM training start does
+        # (attached-engine arbitration; a no-op while it is off). A foreign export refuses first, so a refused start
+        # never unloads oMLX. A refusal is a retryable 503, not the 409 a RuntimeError from this block becomes.
+        await asyncio.to_thread(_refuse_a_foreign_export)
+        from core.inference.attached.arbiter import free_for_local
+
+        admission = await free_for_local("training")
+        if admission.error:
+            raise HTTPException(
+                status_code = 503, detail = admission.error, headers = {"Retry-After": "15"}
+            )
         # Offloaded: teardown blocks on generation locks and a subprocess join.
         await asyncio.to_thread(_free_gpu_for_diffusion_training)
         job_id = service.start(config)

@@ -398,7 +398,13 @@ async def _media_resident_async() -> Optional[str]:
 def _training_active() -> bool:
     from core.training import get_training_backend
 
-    return bool(get_training_backend().is_training_active())
+    if get_training_backend().is_training_active():
+        return True
+    # Diffusion (Images) LoRA training, the LTX families included, has its own service: active from the start request's
+    # reservation until its process is gone. Read only when the module is loaded; a service never built is not training.
+    module = sys.modules.get("core.training.diffusion_training_service")
+    service = getattr(module, "_service", None)
+    return bool(service is not None and service.is_active())
 
 
 def _local_memory_active() -> bool:
