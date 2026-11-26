@@ -146,7 +146,7 @@ test("the context meter marks where a cloud chat compacts", () => {
   assert.match(bar, /data-slot="compaction-mark"/);
   assert.match(bar, /Auto-compacts at/);
   const page = readSrc("features/chat/chat-page.tsx");
-  assert.match(page, /total=\{isExternalModel \? cloudContextWindow : loadedContextLength\}/);
+  assert.match(page, /total=\{\s*isExternalModel\s*\? \(attachedContextWindow \?\? cloudContextWindow\)\s*: loadedContextLength\s*\}/);
   assert.match(page, /compactAt=\{cloudCompactAt\}/);
   assert.match(page, /isExternalModel && autoCompactEnabled && activeExternalProviderType !== "openai_codex"/);
 });

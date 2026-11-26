@@ -78,8 +78,10 @@ test("the notice wording names the engine and the tab", () => {
 test("the Connections list renders only the filtered rows and links to the tab", () => {
   const dialog = src("features/chat/chat-providers-dialog.tsx");
   assert.match(dialog, /connectionsListView\(providers\)/);
-  assert.match(dialog, /listView\.visible\.map\(\(provider\) =>/);
-  assert.match(dialog, /listView\.connectionCount\} connections/);
+  assert.match(dialog, /\.filter\(\(\{ provider \}\) => !isAttachedConnection\(provider\)\)/);
+  assert.match(dialog, /listedProviders\.map\(\(\{ provider, enabled \}\) =>/);
+  assert.match(dialog, /listedProviders\.length\} connections/);
+  assert.match(dialog, /totalModels = listView\.modelCount/);
   assert.match(dialog, /openDialog\("attached-engines"\)/);
   // no list or count reads the unfiltered rows
   assert.doesNotMatch(dialog, /\{providers\.map\(/);
