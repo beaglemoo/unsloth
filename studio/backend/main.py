@@ -1007,7 +1007,9 @@ async def lifespan(app: FastAPI):
 
     # The tray's idle-free countdown marker outlives a quit; no timer survives a restart.
     try:
-        from core.inference.attached.arbiter import clear_stale_idle_marker
+        from core.inference.attached.arbiter import clear_stale_idle_marker, remember_loop
+        # Worker threads (RAG embeddings through an oMLX connection) are admitted on this loop, which owns the arbiter lock.
+        remember_loop(asyncio.get_running_loop())
         clear_stale_idle_marker()
     except Exception:  # noqa: BLE001 -- a phantom countdown is cosmetic
         _lifespan_log.debug("could not clear the ComfyUI idle marker", exc_info = True)

@@ -751,3 +751,51 @@ def free_for_local_from_thread(reason: Reason, loop: asyncio.AbstractEventLoop) 
             return ArbiterResult(skipped = "error", error = "Shared-memory admission timed out; training was blocked.")
     except Exception as exc:
         return ArbiterResult(skipped = "error", error = f"Shared-memory admission failed: {exc}")
+
+
+_server_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def remember_loop(loop: Optional[asyncio.AbstractEventLoop]) -> None:
+    """Record the server's event loop (the lifespan calls this), so a worker thread can be admitted on the loop that
+    owns the arbiter lock: the lock is per loop, so admission on any other loop would not exclude the routes."""
+    global _server_loop
+    _server_loop = loop
+
+
+def before_omlx_use_from_thread(
+    hold: Optional[OmlxRequestHold] = None,
+    loop: Optional[asyncio.AbstractEventLoop] = None,
+) -> ArbiterResult:
+    """``before_omlx_use`` for a blocking caller on a worker thread (RAG embeddings through a connection that targets oMLX).
+
+    Runs the admission on the server loop and waits for it. Nothing is asked of the arbiter while attached engines are
+    off. With them on, no usable loop, the caller's own loop, or a timeout is a refusal (fail closed). The claim is
+    registered under the arbiter lock exactly as for a route; its owner task is gone once this returns, so it is
+    bound by ``_OMLX_HOLD_MAX_AGE_S`` like any leaked claim, and the caller releases it in a ``finally``."""
+    try:
+        if not get_config().enabled:
+            return ArbiterResult(skipped = "disabled")
+        loop = loop or _server_loop
+        if loop is None or loop.is_closed():
+            return ArbiterResult(skipped = "error", error = "Memory admission is not running; retry shortly to use oMLX.")
+        try:
+            if asyncio.get_running_loop() is loop:
+                return ArbiterResult(
+                    skipped = "error",
+                    error = "Memory admission cannot wait on its own event loop.",
+                )
+        except RuntimeError:
+            pass
+        future = asyncio.run_coroutine_threadsafe(before_omlx_use(hold), loop)
+        try:
+            return future.result(timeout = _THREAD_WAIT_S)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            if hold is not None:
+                hold.release()
+            return ArbiterResult(skipped = "error", error = "Shared-memory admission timed out; retry shortly to use oMLX.")
+    except Exception as exc:
+        if hold is not None:
+            hold.release()
+        return ArbiterResult(skipped = "error", error = f"Shared-memory admission failed: {exc}")

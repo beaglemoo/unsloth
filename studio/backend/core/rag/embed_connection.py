@@ -163,6 +163,37 @@ def _remote_http_client() -> httpx.Client:
         return httpx.Client(timeout = _TIMEOUT, trust_env = False)
 
 
+def _admit_attached_omlx(provider: dict):
+    """An arbiter claim for one embeddings request when the connection targets the attached oMLX, else None.
+
+    oMLX loads its embedding model on first use, so the request is admitted like any other oMLX call: refused (a
+    ``ConnectionEmbedderError``, no retry) while Studio holds a local model, trains or runs ComfyUI work, and held
+    against local loads and ComfyUI jobs until the caller releases it. Nothing is asked of the arbiter for any other
+    connection, or while attached engines are off. Runs on a worker thread; the admission itself runs on the server loop."""
+    base_url = provider.get("base_url") or ""
+    provider_type = provider.get("provider_type")
+    try:
+        host = (urlsplit(base_url.strip()).hostname or "").rstrip(".").lower()
+    except ValueError:
+        host = ""
+    if provider_type != "omlx" and host not in _LOOPBACK_HOSTS:
+        return None
+    try:
+        from core.inference.attached import arbiter
+
+        if not arbiter.targets_omlx(provider_type, base_url):
+            return None
+    except Exception:  # noqa: BLE001 - arbitration is attached-engines plumbing; its absence is not an embedding error
+        logger.debug("oMLX target check failed", exc_info = True)
+        return None
+    hold = arbiter.new_omlx_hold()
+    result = arbiter.before_omlx_use_from_thread(hold)
+    if result.error:
+        hold.release()
+        raise ConnectionEmbedderError(result.error)
+    return hold
+
+
 class ConnectionEmbeddingBackend:
     def __init__(self, *, attempts: int = _ATTEMPTS) -> None:
         self._attempts = max(1, attempts)
@@ -172,9 +203,18 @@ class ConnectionEmbeddingBackend:
         self._served = threading.local()
 
     def _post(self, model_name: str, texts: list[str]) -> tuple[list[list[float]], str]:
+        client, provider, model = _client_for(model_name)
+        # The provider the request will reach, so an edit between two reads cannot send it to oMLX unadmitted.
+        hold = _admit_attached_omlx(provider)
+        try:
+            return self._post_to(client, provider, model, texts)
+        finally:
+            if hold is not None:
+                hold.release()
+
+    def _post_to(self, client, provider: dict, model: str, texts: list[str]) -> tuple[list[list[float]], str]:
         from core.inference.external_provider import _append_provider_path
 
-        client, provider, model = _client_for(model_name)
         client.set_header_context(None, model)
         url = _append_provider_path(client.base_url, "embeddings")
         body = {"model": model, "input": texts, "encoding_format": "float"}
