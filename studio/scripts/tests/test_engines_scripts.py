@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -1727,6 +1728,128 @@ def test_a_failed_comfyui_install_stops_the_build_and_swaps_nothing(home):
     result = build_fn(home, f'ENGINES_SRC="{src}"; mkdir -p "$BUILD_ROOT"; {stubs} stage_comfyui')
     assert result.returncode != 0 and "comfyui install failed" in result.stderr
     assert not (home / "comfyui").exists() and not (home / "comfyui.new" / ".staged").exists()
+
+
+def _porcelain(repo):
+    return subprocess.run(["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _patch_text(old, new, header="# a carried patch\n"):
+    return (
+        header
+        + "diff --git a/comfy/ops.py b/comfy/ops.py\n--- a/comfy/ops.py\n+++ b/comfy/ops.py\n"
+        + f"@@ -1,3 +1,3 @@\n a\n-{old}\n+{new}\n c\n"
+    )
+
+
+@pytest.fixture
+def patch_rig(home):
+    """A real one-commit ComfyUI stand-in (so the real export_tree runs) and a patches dir."""
+    src = home.parent / "src-engines"
+    sub = src / "comfyui"
+    (sub / "comfy").mkdir(parents=True)
+    (sub / "requirements.txt").write_text("")
+    (sub / "comfy" / "ops.py").write_text("a\nb\nc\n")
+    (src / "comfyui-constraints.txt").write_text("torch==1\n")
+    git(sub, "init", "-q", "-b", "main")
+    git(sub, "add", ".")
+    git(sub, "commit", "-q", "-m", "one")
+    patches = src / "comfyui-patches"
+    patches.mkdir()
+    return src, sub, patches
+
+
+def stage_with_real_export(home, src, **env):
+    stubs = STAGE_STUBS.replace("export_tree()", "export_tree_stub()")
+    return build_fn(home, f'ENGINES_SRC="{src}"; mkdir -p "$BUILD_ROOT"; {stubs} stage_comfyui', **env)
+
+
+def staged_key(home):
+    return (home / "comfyui.new" / ".staged").read_text().splitlines()[1]
+
+
+def test_a_comfyui_patch_is_applied_to_the_exported_tree_and_never_to_the_submodule(home, patch_rig):
+    src, sub, patches = patch_rig
+    (patches / "0001-b-to-B.patch").write_text(_patch_text("b", "B"))
+    result = stage_with_real_export(home, src)
+    assert result.returncode == 0, result.stderr
+    assert (home / "comfyui.new" / "src" / "comfy" / "ops.py").read_text() == "a\nB\nc\n"
+    assert (sub / "comfy" / "ops.py").read_text() == "a\nb\nc\n"
+    assert _porcelain(sub) == ""
+    assert not list((home / "comfyui.new" / "src").rglob("*.rej")) and not list((home / "comfyui.new" / "src").rglob("*.orig"))
+
+
+def test_comfyui_patches_apply_in_sorted_order(home, patch_rig):
+    src, _, patches = patch_rig
+    (patches / "0002-second.patch").write_text(_patch_text("B", "C"))
+    (patches / "0001-first.patch").write_text(_patch_text("b", "B"))
+    result = stage_with_real_export(home, src)
+    assert result.returncode == 0, result.stderr
+    assert (home / "comfyui.new" / "src" / "comfy" / "ops.py").read_text() == "a\nC\nc\n"
+
+
+def test_a_comfyui_patch_that_does_not_apply_fails_the_build_loudly(home, patch_rig):
+    src, sub, patches = patch_rig
+    (patches / "0001-bad.patch").write_text(_patch_text("not-there", "x"))
+    result = stage_with_real_export(home, src)
+    assert result.returncode != 0
+    assert "0001-bad.patch does not apply" in result.stderr
+    assert not (home / "comfyui.new" / ".staged").exists() and not (home / "comfyui").exists()
+    assert "pip_install" not in ((home / "calls").read_text() if (home / "calls").exists() else "")
+    assert _porcelain(sub) == ""
+
+
+def test_the_comfyui_marker_carries_the_patch_hash_and_follows_the_patch_set(home, patch_rig):
+    import hashlib
+
+    src, _, patches = patch_rig
+    (patches / "0001-b-to-B.patch").write_text(_patch_text("b", "B"))
+    first = stage_with_real_export(home, src)
+    assert first.returncode == 0, first.stderr
+    key = staged_key(home)
+    base = f"abc:py3.13:constraints-{constraints_key(src / 'comfyui-constraints.txt')}"
+    inner = hashlib.sha256()
+    name_line = "0001-b-to-B.patch " + hashlib.sha256((patches / "0001-b-to-B.patch").read_bytes()).hexdigest() + "\n"
+    inner.update(name_line.encode())
+    assert key == f"{base}:patches-{inner.hexdigest()[:12]}"
+    # the same set is not restaged
+    (home / "calls").unlink()
+    again = stage_with_real_export(home, src)
+    assert again.returncode == 0 and "already staged" in again.stdout and not (home / "calls").exists()
+    # editing, adding or removing a patch changes the key and restages
+    (patches / "0001-b-to-B.patch").write_text(_patch_text("b", "B", header="# edited\n"))
+    edited = stage_with_real_export(home, src)
+    assert edited.returncode == 0 and staged_key(home) != key
+    (patches / "0002-more.patch").write_text(_patch_text("B", "C"))
+    added = stage_with_real_export(home, src)
+    assert added.returncode == 0 and staged_key(home).count(":patches-") == 1
+    after_add = staged_key(home)
+    (patches / "0002-more.patch").unlink()
+    (patches / "0001-b-to-B.patch").unlink()
+    removed = stage_with_real_export(home, src)
+    assert removed.returncode == 0
+    assert staged_key(home) == base and after_add != base
+
+
+def test_no_patches_leaves_the_comfyui_marker_unchanged_and_a_live_marker_valid(home, patch_rig):
+    src, _, patches = patch_rig
+    base = f"abc:py3.13:constraints-{constraints_key(src / 'comfyui-constraints.txt')}"
+    # an empty patches dir, a dir with only non-patch files, and no dir at all all give the old key
+    (patches / "README").write_text("not a patch\n")
+    result = stage_with_real_export(home, src)
+    assert result.returncode == 0, result.stderr
+    assert staged_key(home) == base
+    # a live venv provisioned before patches existed is still up to date
+    make_comfy_venv(home / "comfyui", "live")
+    (home / ".provisioned").write_text(f"comfyui={base}\n")
+    shutil.rmtree(home / "comfyui.new")
+    (home / "calls").unlink()
+    up_to_date = stage_with_real_export(home, src)
+    assert up_to_date.returncode == 0 and "up to date" in up_to_date.stdout and not (home / "calls").exists()
+    # adding the first patch makes that live marker stale, so the stage runs
+    (patches / "0001-b-to-B.patch").write_text(_patch_text("b", "B"))
+    restaged = stage_with_real_export(home, src)
+    assert restaged.returncode == 0 and (home / "calls").exists() and ":patches-" in staged_key(home)
 
 
 def recording_python(venv: Path, fail_on=""):
