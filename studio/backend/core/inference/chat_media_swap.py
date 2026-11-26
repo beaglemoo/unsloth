@@ -134,6 +134,9 @@ class RoundTrip:
     still_alone: Optional[Callable[[], bool]] = None
     # True while an image or video load or render is running: the swap never evicts around one.
     media_busy: Optional[Callable[[], bool]] = None
+    # Attached-engine admission for the whole swap: awaited before chat is touched, returns the callable that releases
+    # its claim (or None). Raises SwapUnavailable on a refusal, with nothing changed.
+    admit: Optional[Callable[[], Awaitable[Optional[Callable[[], None]]]]] = None
     beside_first: bool = False
 
     def stop(self) -> None:
@@ -197,14 +200,19 @@ class RoundTrip:
                 if self.cancel.is_set():
                     return ERR_STOPPED
                 raise
+        release_admission: Optional[Callable[[], None]] = None
         try:
             if self.still_alone is not None and not self.still_alone():
                 raise SwapUnavailable(ERR_BUSY)
             if self.media_busy is not None and await asyncio.to_thread(self.media_busy):
                 raise SwapUnavailable(ERR_MEDIA_BUSY)
+            if self.admit is not None:
+                release_admission = await self.admit()
             return await self._run_held(snap, gate, total)
         finally:
             await gate.aclose()
+            if release_admission is not None:
+                release_admission()
 
     async def _run_held(self, snap: ChatSnapshot, gate, total: float) -> str:
         try:
@@ -525,6 +533,32 @@ class StudioImage:
         )
 
 
+async def _admit_attached_swap() -> Optional[Callable[[], None]]:
+    """Attached-engine admission for a chat image swap, taken before chat is evicted and released after chat is back.
+
+    The image load and the chat reload are admitted on their own, but chat is out of memory between the two, and a
+    resident chat model is what keeps oMLX out. Without a claim an oMLX request admitted in that window loads its model,
+    and the chat reload is then refused and never lands. The claim is the same media hold an image load takes
+    (``free_for_local``), so oMLX and ComfyUI jobs are refused for the whole swap. A refusal changes nothing."""
+    from fastapi import HTTPException
+
+    from core.inference.attached.arbiter import new_media_hold
+    from routes.inference import _admit_attached_local_load
+
+    hold = new_media_hold("image")
+    try:
+        await _admit_attached_local_load(hold)
+    except HTTPException as exc:
+        hold.release()
+        raise SwapUnavailable(
+            f"Error: shared memory could not be freed for the image model ({exc.detail}); try again shortly."
+        ) from exc
+    except BaseException:
+        hold.release()
+        raise
+    return hold.release
+
+
 def chat_can_swap() -> bool:
     """Runs on the event loop: no model index scan here."""
     if not swap_enabled():
@@ -599,6 +633,7 @@ def run_in_tool(
         hold_requests = inference_lifecycle_gate,
         still_alone = lambda: active_generations.count() <= 1,
         media_busy = _media_busy,
+        admit = _admit_attached_swap,
         beside_first = policy in ("fit", "always") or not on_gpu,
     )
 
